@@ -1,7 +1,6 @@
 [http]
 bind_address = "127.0.0.1"
 port = 8080
-operator_api_token_env = "OPERATOR_API_TOKEN"
 
 [solana]
 cluster = "mainnet-beta"
@@ -10,11 +9,13 @@ commitment = "confirmed"
 
 [wallets.maker]
 role = "maker"
+private_key_env = "MAKER_PRIVATE_KEY"
 keypair_path_env = "MAKER_KEYPAIR_PATH"
 keypair_json_env = "MAKER_KEYPAIR_JSON"
 
 [wallets.taker]
 role = "taker"
+private_key_env = "TAKER_PRIVATE_KEY"
 keypair_path_env = "TAKER_KEYPAIR_PATH"
 keypair_json_env = "TAKER_KEYPAIR_JSON"
 
@@ -100,15 +101,14 @@ quote_timeout_millis = 2_000
 
 [gateway]
 enabled = true
-api_key_env = "CIRCLE_API_KEY"
-entity_secret_env = "CIRCLE_ENTITY_SECRET"
-wallet_id_env = "CIRCLE_GATEWAY_WALLET_ID"
 solana_address_env = "CIRCLE_GATEWAY_SOLANA_ADDRESS"
 usdc_refill_threshold_raw = 3_000_000
 usdc_refill_target_raw = 10_000_000
 max_refill_notional_usd = "2"
+max_refill_fee_raw = 250_000
 
 [runtime]
 event_capacity = 256
 scaffold_hold_millis = 0
 enable_protocol_workers = false
+database_path = "runtime.sqlite"

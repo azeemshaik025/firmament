@@ -1,33 +1,23 @@
-//! Shared scaffold for the Solana RFQ maker runtime.
-//!
-//! Wave 0 intentionally exposes stable contracts and bootstrap state only. Live
-//! protocol adapters, HTTP routes, persistence, and TUI rendering are added by
-//! later worktrees behind these boundaries.
+//! Solana RFQ maker runtime.
 
-pub mod api;
-pub mod api_types;
-pub mod assets;
+pub mod adapters;
+pub mod application;
 pub mod config;
+pub mod domain;
 pub mod error;
-pub mod events;
-pub mod gateway;
-pub mod hedge;
-pub mod htlc;
-pub mod inventory;
-pub mod jupiter;
+pub mod interfaces;
 pub mod ports;
-pub mod quote_engine;
-pub mod rebalance;
-pub mod rfq;
-pub mod risk;
-pub mod runtime;
-pub mod settlement;
-pub mod solana_client;
-pub mod tui;
-pub mod tui_state;
-pub mod types;
-pub mod wallets;
 
+pub use adapters::circle_gateway as gateway;
+pub use adapters::jupiter;
+pub use adapters::persistence::{db, ledger, pnl};
+pub use adapters::solana::{client as solana_client, htlc, wallets};
+pub use application::{hedge, rebalance, rfq, runtime};
 pub use config::AppConfig;
+pub use domain::{assets, events, inventory, quote_engine, risk, settlement, types};
 pub use error::{AppError, AppResult};
-pub use runtime::{AppState, RuntimeState, bootstrap};
+pub use interfaces::http as api;
+pub use interfaces::http::types as api_types;
+pub use interfaces::tui;
+pub use interfaces::tui::state as tui_state;
+pub use runtime::{AppState, RuntimeState, bootstrap, bootstrap_live_runtime};

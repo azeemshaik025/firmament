@@ -1,4 +1,4 @@
-//! Application error categories shared by scaffold modules and future adapters.
+//! Application error categories shared by runtime modules and adapters.
 
 use thiserror::Error;
 
@@ -38,6 +38,13 @@ pub enum AppError {
 }
 
 impl AppError {
+    /// Build a configuration error from displayable context without exposing
+    /// secret values.
+    #[must_use]
+    pub fn config(message: impl Into<String>) -> Self {
+        Self::Config(::config::ConfigError::Message(message.into()))
+    }
+
     /// Build a validation error from displayable context.
     #[must_use]
     pub fn validation(message: impl Into<String>) -> Self {

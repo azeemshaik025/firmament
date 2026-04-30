@@ -153,9 +153,24 @@ fn wallets_load_keypair_from_path() {
 }
 
 #[test]
+fn wallets_load_keypair_from_base58_private_key() {
+    let expected = Keypair::new();
+    let wallet = LoadedWallet::from_private_key_base58(
+        WalletRole::Maker,
+        &expected.to_base58_string(),
+        "MAKER_PRIVATE_KEY",
+    )
+    .expect("load base58 private key");
+
+    assert_eq!(wallet.role(), WalletRole::Maker);
+    assert_eq!(wallet.pubkey(), expected.pubkey());
+}
+
+#[test]
 fn wallets_env_loader_reports_missing_secret_references() {
     let config = WalletConfig {
         role: WalletRole::Maker,
+        private_key_env: format!("MISSING_PRIVATE_KEY_{}", uuid::Uuid::now_v7().simple()),
         keypair_path_env: format!("MISSING_PATH_{}", uuid::Uuid::now_v7().simple()),
         keypair_json_env: format!("MISSING_JSON_{}", uuid::Uuid::now_v7().simple()),
     };
@@ -194,10 +209,16 @@ fn wallets_live_loading_skips_without_env() {
     }
 
     let config = WalletsConfig::default();
-    let maker_secret_configured = std::env::var(&config.maker.keypair_path_env).is_ok()
-        || std::env::var(&config.maker.keypair_json_env).is_ok();
-    let taker_secret_configured = std::env::var(&config.taker.keypair_path_env).is_ok()
-        || std::env::var(&config.taker.keypair_json_env).is_ok();
+    let maker_secret_configured = config
+        .maker
+        .keypair_source_envs()
+        .into_iter()
+        .any(|name| std::env::var(name).is_ok());
+    let taker_secret_configured = config
+        .taker
+        .keypair_source_envs()
+        .into_iter()
+        .any(|name| std::env::var(name).is_ok());
 
     if !maker_secret_configured || !taker_secret_configured {
         eprintln!("skipping live wallet loading; maker/taker keypair env vars are not both set");
@@ -253,8 +274,10 @@ fn live_client_and_wallet() -> Option<(SolanaClient, LoadedWallet)> {
     };
 
     let wallet_config = WalletsConfig::default().maker;
-    let has_wallet = std::env::var(&wallet_config.keypair_path_env).is_ok()
-        || std::env::var(&wallet_config.keypair_json_env).is_ok();
+    let has_wallet = wallet_config
+        .keypair_source_envs()
+        .into_iter()
+        .any(|name| std::env::var(name).is_ok());
     if !has_wallet {
         eprintln!("skipping live Solana RPC test; maker keypair env vars are not set");
         return None;

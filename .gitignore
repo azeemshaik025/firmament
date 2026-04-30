@@ -1,5 +1,17 @@
 /target/
 
+# Local runtime state
+config.toml
+runtime.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# Local agent planning/support files
+agent-context/
+agent-prompts/
+docs/
+scripts/
+
 # Local secrets and environment overrides
 .env
 .env.*
