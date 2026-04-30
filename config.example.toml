@@ -1,0 +1,114 @@
+[http]
+bind_address = "127.0.0.1"
+port = 8080
+operator_api_token_env = "OPERATOR_API_TOKEN"
+
+[solana]
+cluster = "mainnet-beta"
+rpc_url_env = "SOLANA_RPC_URL"
+commitment = "confirmed"
+
+[wallets.maker]
+role = "maker"
+keypair_path_env = "MAKER_KEYPAIR_PATH"
+keypair_json_env = "MAKER_KEYPAIR_JSON"
+
+[wallets.taker]
+role = "taker"
+keypair_path_env = "TAKER_KEYPAIR_PATH"
+keypair_json_env = "TAKER_KEYPAIR_JSON"
+
+[assets.policy]
+max_action_notional_usd = "2"
+max_cumulative_automation_notional_usd = "15"
+cbbtc_exception_notional_usd = "5"
+default_quote_expiry_seconds = 45
+base_spread_bps = 35
+
+[[assets.supported]]
+id = "USDC"
+symbol = "USDC"
+mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+decimals = 6
+enabled = true
+target_weight = "0.60"
+quoteable_threshold_raw = 2_000_000
+
+[[assets.supported]]
+id = "SOL"
+symbol = "SOL"
+mint = "So11111111111111111111111111111111111111112"
+decimals = 9
+enabled = true
+target_weight = "0.35"
+quoteable_threshold_raw = 10_000_000
+
+[[assets.supported]]
+id = "cbBTC"
+symbol = "cbBTC"
+mint = "VERIFY_CBBTC_SOLANA_MINT_BEFORE_LIVE_USE"
+decimals = 8
+enabled = true
+target_weight = "0.05"
+quoteable_threshold_raw = 1_000
+
+[[assets.pairs]]
+input = "USDC"
+output = "SOL"
+enabled = true
+
+[[assets.pairs]]
+input = "SOL"
+output = "USDC"
+enabled = true
+
+[[assets.pairs]]
+input = "USDC"
+output = "cbBTC"
+enabled = true
+
+[[assets.pairs]]
+input = "cbBTC"
+output = "USDC"
+enabled = true
+
+[[assets.pairs]]
+input = "SOL"
+output = "cbBTC"
+enabled = true
+
+[[assets.pairs]]
+input = "cbBTC"
+output = "SOL"
+enabled = true
+
+[risk]
+max_quote_notional_usd = "2"
+max_trade_notional_usd = "2"
+max_daily_notional_usd = "15"
+max_cbbtc_notional_usd = "5"
+max_inventory_drift_bps = 1_500
+max_price_staleness_seconds = 20
+require_taker_allowlist = false
+
+[jupiter]
+enabled = true
+api_key_env = "JUPITER_API_KEY"
+base_url = "https://lite-api.jup.ag"
+max_slippage_bps = 50
+quote_timeout_millis = 2_000
+
+[gateway]
+enabled = true
+api_key_env = "CIRCLE_API_KEY"
+entity_secret_env = "CIRCLE_ENTITY_SECRET"
+wallet_id_env = "CIRCLE_GATEWAY_WALLET_ID"
+solana_address_env = "CIRCLE_GATEWAY_SOLANA_ADDRESS"
+usdc_refill_threshold_raw = 3_000_000
+usdc_refill_target_raw = 10_000_000
+max_refill_notional_usd = "2"
+
+[runtime]
+event_capacity = 256
+scaffold_hold_millis = 0
+enable_protocol_workers = false

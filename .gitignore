@@ -1,0 +1,15 @@
+/target/
+
+# Local secrets and environment overrides
+.env
+.env.*
+!.env.example
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
