@@ -12,7 +12,6 @@ use crate::adapters::persistence::db::Db;
 use crate::adapters::persistence::ledger::{LedgerEventConsumer, SqliteLedgerRepository};
 use crate::adapters::persistence::pnl::{PnlCategory, PnlEstimate, PnlPriceBook, PnlRepository};
 use crate::adapters::solana::htlc::{generate_secret, hash_secret};
-use crate::application::hedge::{HedgeDecision, HedgePolicy, decide_hedge};
 use crate::application::rebalance::{
     ActionKey, AutomationActionKind, AutomationLimits, AutomationState, DecisionBlockReason,
     GatewayRefillDecision, GatewayRefillPlan, PlannedSwap, RebalanceDecision, RebalancePolicy,
@@ -32,8 +31,8 @@ use crate::domain::inventory::{InventoryPolicy, InventorySnapshot as ValuedInven
 use crate::domain::quote_engine::InventorySnapshot as QuoteInventorySnapshot;
 use crate::domain::settlement::{SettlementTerms, TwoSidedSettlement};
 use crate::domain::types::{
-    AmountRaw, AssetId, BalanceSnapshot, QuoteId, SettlementStatus, TokenAmount, TradeId,
-    TxSignature, WalletRole,
+    AmountRaw, AssetId, BalanceSnapshot, ExternalHtlcInitiation, QuoteId, SettlementStatus,
+    TokenAmount, TradeId, TxSignature, UnsignedWalletTransaction, WalletAddress, WalletRole,
 };
 use crate::error::{AppError, AppResult};
 use crate::ports::{BalanceReader, GatewayClient, HtlcClient, PriceProvider, SwapExecutor};
@@ -50,7 +49,7 @@ pub struct RuntimeAdapters {
     pub price_provider: Arc<dyn PriceProvider>,
     /// Solana HTLC client used for two-sided settlement.
     pub htlc_client: Arc<dyn HtlcClient>,
-    /// Jupiter-backed swap executor used by rebalance and hedge decisions.
+    /// Jupiter-backed swap executor used by rebalance decisions.
     pub swap_executor: Arc<dyn SwapExecutor>,
     /// Circle Gateway client used for USDC refill decisions.
     pub gateway_client: Arc<dyn GatewayClient>,
@@ -63,8 +62,11 @@ pub struct RuntimeAdapters {
 pub struct RuntimeOrchestratorOptions {
     /// Cumulative automated spend already consumed in this runtime run.
     pub initial_automation_spend_usd: Decimal,
-    /// Taker wallet address used by scripted TUI demo RFQs.
+    /// Taker wallet address used by legacy scripted demo RFQs.
     pub demo_taker_wallet: Option<crate::domain::types::WalletAddress>,
+    /// Whether this process owns the local taker signer needed for the
+    /// current two-wallet local-signer settlement flow.
+    pub allow_local_taker_settlement: bool,
 }
 
 impl Default for RuntimeOrchestratorOptions {
@@ -72,6 +74,7 @@ impl Default for RuntimeOrchestratorOptions {
         Self {
             initial_automation_spend_usd: Decimal::ZERO,
             demo_taker_wallet: None,
+            allow_local_taker_settlement: true,
         }
     }
 }
@@ -112,6 +115,59 @@ pub struct RuntimeTrade {
     pub input_amount: TokenAmount,
     /// Maker output amount.
     pub output_amount: TokenAmount,
+}
+
+/// Response returned when a browser-wallet settlement is started.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletSettlementStart {
+    /// Quote accepted for wallet settlement.
+    pub quote_id: QuoteId,
+    /// Trade created for settlement tracking.
+    pub trade_id: TradeId,
+    /// Unsigned taker lock transaction for the connected wallet to sign.
+    pub taker_lock_transaction: UnsignedWalletTransaction,
+    /// HTLC expiry inherited from the accepted quote.
+    pub expires_at: OffsetDateTime,
+}
+
+/// Response returned after the browser taker lock signature is recorded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletTakerLockResult {
+    /// Trade being settled.
+    pub trade_id: TradeId,
+    /// Current settlement status.
+    pub settlement_status: SettlementStatus,
+    /// Maker lock signature submitted by the backend.
+    pub maker_lock_signature: Option<TxSignature>,
+    /// All observed signatures so far.
+    pub tx_signatures: Vec<TxSignature>,
+}
+
+/// Response returned when the browser asks for a redeem transaction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletTakerRedeemPreparation {
+    /// Trade being settled.
+    pub trade_id: TradeId,
+    /// Unsigned taker redeem transaction for the connected wallet to sign.
+    pub taker_redeem_transaction: UnsignedWalletTransaction,
+}
+
+/// Response returned when the browser taker redeem signature is recorded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletTakerRedeemResult {
+    /// Final runtime trade record.
+    pub trade: RuntimeTrade,
+    /// Maker redeem signature submitted by the backend.
+    pub maker_redeem_signature: Option<TxSignature>,
+}
+
+#[derive(Debug, Clone)]
+struct WalletSettlementState {
+    quote: FirmQuote,
+    settlement: TwoSidedSettlement,
+    taker_lock_request: ExternalHtlcInitiation,
+    taker_wallet: WalletAddress,
+    tx_signatures: Vec<TxSignature>,
 }
 
 /// Summary of one post-settlement automation pass.
@@ -202,7 +258,6 @@ impl RuntimePersistence {
         Ok(PnlProjection {
             realized_spread_usdc_estimate: summary.realized_spread_usdc,
             fees_usdc_estimate: summary.fees_usdc,
-            hedge_cost_usdc_estimate: summary.hedge_cost_usdc,
             rebalance_cost_usdc_estimate: summary.rebalance_cost_usdc,
             net_usdc_estimate: summary.net_usdc,
         })
@@ -253,11 +308,13 @@ pub struct RuntimeOrchestrator {
     adapters: RuntimeAdapters,
     quotes: Arc<RwLock<HashMap<QuoteId, FirmQuote>>>,
     trades: Arc<RwLock<HashMap<TradeId, RuntimeTrade>>>,
+    wallet_settlements: Arc<RwLock<HashMap<TradeId, WalletSettlementState>>>,
     automation_state: Arc<RwLock<AutomationState>>,
     usd_prices: Arc<RwLock<BTreeMap<AssetId, Decimal>>>,
     persistence: Option<Arc<RuntimePersistence>>,
     last_accepted_quote: Arc<RwLock<Option<QuoteId>>>,
     demo_taker_wallet: Option<crate::domain::types::WalletAddress>,
+    allow_local_taker_settlement: bool,
 }
 
 impl RuntimeOrchestrator {
@@ -279,11 +336,13 @@ impl RuntimeOrchestrator {
             adapters,
             quotes: Arc::new(RwLock::new(HashMap::new())),
             trades: Arc::new(RwLock::new(HashMap::new())),
+            wallet_settlements: Arc::new(RwLock::new(HashMap::new())),
             automation_state: Arc::new(RwLock::new(automation_state)),
             usd_prices: Arc::new(RwLock::new(usd_prices)),
             persistence: None,
             last_accepted_quote: Arc::new(RwLock::new(None)),
             demo_taker_wallet: options.demo_taker_wallet,
+            allow_local_taker_settlement: options.allow_local_taker_settlement,
         }
     }
 
@@ -375,6 +434,13 @@ impl RuntimeOrchestrator {
     /// for failed settlement steps. Automation failures are emitted as events
     /// and do not fail an otherwise completed trade.
     pub async fn accept_quote(&self, quote_id: QuoteId) -> AppResult<RuntimeTrade> {
+        if !self.allow_local_taker_settlement {
+            self.ensure_quote_known(quote_id).await?;
+            return Err(AppError::unsupported(
+                "server-side taker settlement is disabled for the web app; use wallet settlement endpoints instead",
+            ));
+        }
+
         let quote = self.take_quote(quote_id).await?;
         let trade_id = self.accept_quote_for_trade(&quote).await?;
         let tx_signatures = self.settle_quote(&quote, trade_id).await?;
@@ -391,6 +457,16 @@ impl RuntimeOrchestrator {
         self.refresh_inventory_and_automation().await?;
 
         Ok(trade)
+    }
+
+    async fn ensure_quote_known(&self, quote_id: QuoteId) -> AppResult<()> {
+        if self.quotes.read().await.contains_key(&quote_id) {
+            Ok(())
+        } else {
+            Err(AppError::validation(format!(
+                "unknown or rejected quote {quote_id}"
+            )))
+        }
     }
 
     async fn take_quote(&self, quote_id: QuoteId) -> AppResult<FirmQuote> {
@@ -450,6 +526,227 @@ impl RuntimeOrchestrator {
         .await?;
 
         Ok(tx_signatures)
+    }
+
+    /// Start connected-wallet settlement for an accepted quote.
+    ///
+    /// # Errors
+    ///
+    /// Returns validation errors for unknown/expired quotes, wallet mismatch,
+    /// or adapter errors while building the unsigned taker-lock transaction.
+    pub async fn start_wallet_settlement(
+        &self,
+        quote_id: QuoteId,
+        taker_wallet: WalletAddress,
+        secret_hash: String,
+    ) -> AppResult<WalletSettlementStart> {
+        let quote = self.take_quote(quote_id).await?;
+        if quote.htlc_terms.taker_wallet != taker_wallet {
+            return Err(AppError::validation(
+                "connected wallet does not match the RFQ taker wallet",
+            ));
+        }
+
+        let trade_id = self.accept_quote_for_trade(&quote).await?;
+        let maker_wallet = self
+            .adapters
+            .htlc_client
+            .wallet_address(WalletRole::Maker)
+            .await?;
+        let terms = SettlementTerms {
+            quote_id,
+            trade_id,
+            taker_input: quote.htlc_terms.maker_receive.clone(),
+            maker_output: quote.htlc_terms.maker_pay.clone(),
+            taker_wallet: WalletRole::Taker,
+            maker_wallet: WalletRole::Maker,
+            secret_hash,
+            expires_at: quote.htlc_terms.expires_at,
+        };
+        let mut settlement = TwoSidedSettlement::new(terms);
+        let start = settlement.start(self.app_state.run_id());
+        self.publish(RuntimeEvent::Settlement(start.event)).await?;
+
+        let taker_lock_request = ExternalHtlcInitiation {
+            trade_id,
+            funder: taker_wallet.clone(),
+            redeemer: maker_wallet,
+            amount: quote.htlc_terms.maker_receive.clone(),
+            hashlock: settlement.terms.secret_hash.clone(),
+            expires_at: settlement.terms.expires_at,
+        };
+        let taker_lock_transaction = self
+            .adapters
+            .htlc_client
+            .build_external_initiate(taker_lock_request.clone())
+            .await?;
+        let expires_at = quote.htlc_terms.expires_at;
+
+        self.wallet_settlements.write().await.insert(
+            trade_id,
+            WalletSettlementState {
+                quote,
+                settlement,
+                taker_lock_request,
+                taker_wallet,
+                tx_signatures: Vec::new(),
+            },
+        );
+
+        Ok(WalletSettlementStart {
+            quote_id,
+            trade_id,
+            taker_lock_transaction,
+            expires_at,
+        })
+    }
+
+    /// Record the browser-submitted taker lock, then submit the maker lock.
+    ///
+    /// # Errors
+    ///
+    /// Returns validation errors for unknown trades or adapter errors from
+    /// signature confirmation and maker lock submission.
+    pub async fn record_wallet_taker_lock(
+        &self,
+        trade_id: TradeId,
+        taker_lock_signature: TxSignature,
+    ) -> AppResult<WalletTakerLockResult> {
+        let mut state = self.wallet_settlement_state(trade_id).await?;
+        let taker_lock = self
+            .adapters
+            .htlc_client
+            .record_external_initiate(state.taker_lock_request.clone(), taker_lock_signature)
+            .await?;
+        push_signature(&mut state.tx_signatures, taker_lock.signature.as_ref());
+        let transition = state.settlement.record_taker_lock(
+            self.app_state.run_id(),
+            taker_lock.signature.as_ref().map(ToString::to_string),
+        );
+        self.publish(RuntimeEvent::Settlement(transition.event))
+            .await?;
+
+        let maker_lock = self
+            .adapters
+            .htlc_client
+            .initiate_with_external_redeemer(
+                state.settlement.terms.maker_lock_request(),
+                state.taker_wallet.clone(),
+            )
+            .await?;
+        push_signature(&mut state.tx_signatures, maker_lock.signature.as_ref());
+        let transition = state.settlement.record_maker_lock(
+            self.app_state.run_id(),
+            maker_lock.signature.as_ref().map(ToString::to_string),
+        );
+        self.publish(RuntimeEvent::Settlement(transition.event))
+            .await?;
+
+        let response = WalletTakerLockResult {
+            trade_id,
+            settlement_status: SettlementStatus::Initiated,
+            maker_lock_signature: maker_lock.signature,
+            tx_signatures: state.tx_signatures.clone(),
+        };
+        self.wallet_settlements
+            .write()
+            .await
+            .insert(trade_id, state);
+        Ok(response)
+    }
+
+    /// Build the unsigned taker redeem transaction after the browser reveals
+    /// the preimage at redeem time.
+    ///
+    /// # Errors
+    ///
+    /// Returns validation errors for unknown trades or adapter construction errors.
+    pub async fn prepare_wallet_taker_redeem(
+        &self,
+        trade_id: TradeId,
+        preimage: String,
+    ) -> AppResult<WalletTakerRedeemPreparation> {
+        let state = self.wallet_settlement_state(trade_id).await?;
+        let taker_redeem_transaction = self
+            .adapters
+            .htlc_client
+            .build_external_redeem(trade_id, state.taker_wallet, preimage)
+            .await?;
+
+        Ok(WalletTakerRedeemPreparation {
+            trade_id,
+            taker_redeem_transaction,
+        })
+    }
+
+    /// Record the browser taker redeem, submit maker redeem, and finalize the trade.
+    ///
+    /// # Errors
+    ///
+    /// Returns validation errors for unknown trades or adapter errors from
+    /// signature confirmation, maker redeem, ledger, or automation.
+    pub async fn complete_wallet_taker_redeem(
+        &self,
+        trade_id: TradeId,
+        preimage: String,
+        taker_redeem_signature: TxSignature,
+    ) -> AppResult<WalletTakerRedeemResult> {
+        let mut state = self.wallet_settlement_state(trade_id).await?;
+        let taker_redeem = self
+            .adapters
+            .htlc_client
+            .record_external_redeem(trade_id, taker_redeem_signature)
+            .await?;
+        push_signature(&mut state.tx_signatures, taker_redeem.signature.as_ref());
+        let transition = state.settlement.record_taker_redeem(
+            self.app_state.run_id(),
+            taker_redeem.signature.as_ref().map(ToString::to_string),
+        );
+        self.publish(RuntimeEvent::Settlement(transition.event))
+            .await?;
+
+        let maker_redeem = self.adapters.htlc_client.redeem(trade_id, preimage).await?;
+        push_signature(&mut state.tx_signatures, maker_redeem.signature.as_ref());
+        let transition = state.settlement.record_maker_redeem(
+            self.app_state.run_id(),
+            maker_redeem.signature.as_ref().map(ToString::to_string),
+        );
+        self.publish(RuntimeEvent::Settlement(transition.event))
+            .await?;
+        self.publish(RuntimeEvent::Settlement(SettlementEvent::StatusChanged {
+            metadata: EventMetadata::new(self.app_state.run_id()),
+            trade_id,
+            status: SettlementStatus::Redeemed,
+        }))
+        .await?;
+
+        let trade = RuntimeTrade {
+            quote_id: state.quote.quote_id,
+            trade_id,
+            settlement_status: SettlementStatus::Redeemed,
+            tx_signatures: state.tx_signatures.clone(),
+            input_amount: state.quote.input_amount,
+            output_amount: state.quote.output_amount,
+        };
+        self.trades.write().await.insert(trade_id, trade.clone());
+        self.wallet_settlements.write().await.remove(&trade_id);
+        self.refresh_inventory_and_automation().await?;
+
+        Ok(WalletTakerRedeemResult {
+            trade,
+            maker_redeem_signature: maker_redeem.signature,
+        })
+    }
+
+    async fn wallet_settlement_state(&self, trade_id: TradeId) -> AppResult<WalletSettlementState> {
+        self.wallet_settlements
+            .read()
+            .await
+            .get(&trade_id)
+            .cloned()
+            .ok_or_else(|| {
+                AppError::validation(format!("unknown wallet settlement trade {trade_id}"))
+            })
     }
 
     async fn run_settlement_locks(
@@ -583,8 +880,8 @@ impl RuntimeOrchestrator {
         )
     }
 
-    /// Refresh working inventory and run rebalance, hedge, and Gateway refill
-    /// decisions from the resulting snapshot.
+    /// Refresh working inventory and run rebalance and Gateway refill decisions
+    /// from the resulting snapshot.
     ///
     /// # Errors
     ///
@@ -634,14 +931,14 @@ impl RuntimeOrchestrator {
         .await
     }
 
-    /// Generate the scripted normal tiny USDC->SOL RFQ used by the TUI demo.
+    /// Generate the scripted normal tiny USDC->SOL RFQ used by legacy demos.
     ///
     /// # Errors
     ///
     /// Returns adapter, quote, risk, or event persistence errors from RFQ
     /// handling.
     pub async fn generate_tiny_demo_rfq(&self) -> AppResult<RfqResponse> {
-        self.request_rfq(self.demo_rfq(AmountRaw::new(1_000_000))?)
+        self.request_rfq(self.demo_rfq(AmountRaw::new(100_000))?)
             .await
     }
 
@@ -652,7 +949,23 @@ impl RuntimeOrchestrator {
     /// Returns adapter, quote, risk, or event persistence errors from RFQ
     /// handling.
     pub async fn generate_oversized_demo_rfq(&self) -> AppResult<RfqResponse> {
-        self.request_rfq(self.demo_rfq(AmountRaw::new(3_000_000))?)
+        self.request_rfq(self.demo_rfq(AmountRaw::new(1_000_000))?)
+            .await
+    }
+
+    /// Generate a custom operator RFQ from configured asset identifiers.
+    ///
+    /// # Errors
+    ///
+    /// Returns configuration, validation, adapter, quote, risk, or event
+    /// persistence errors from RFQ handling.
+    pub async fn request_operator_rfq(
+        &self,
+        input_asset: &AssetId,
+        output_asset: &AssetId,
+        input_amount_raw: AmountRaw,
+    ) -> AppResult<RfqResponse> {
+        self.request_rfq(self.operator_rfq(input_asset, output_asset, input_amount_raw)?)
             .await
     }
 
@@ -717,26 +1030,6 @@ impl RuntimeOrchestrator {
             }
         }
 
-        let hedge_policy = HedgePolicy::from_config(self.app_state.config());
-        let automation_state = self.automation_state.read().await.clone();
-        match decide_hedge(
-            inventory,
-            &automation_state,
-            &limits,
-            &hedge_policy,
-            OffsetDateTime::now_utc(),
-        ) {
-            HedgeDecision::Swap(plan) => {
-                if self.submit_swap_plan(plan, &limits).await? {
-                    summary.completed_swaps += 1;
-                }
-            }
-            HedgeDecision::NoAction { reason } => {
-                summary.blocked_reasons.push(reason);
-                self.publish_cap_block_if_needed("hedge", reason).await?;
-            }
-        }
-
         let automation_state = self.automation_state.read().await.clone();
         match decide_gateway_refill(
             inventory,
@@ -786,7 +1079,7 @@ impl RuntimeOrchestrator {
                 self.record_completed_action(
                     &key,
                     plan.estimated_notional_usd,
-                    plan.uses_cbbtc_exception,
+                    plan.uses_non_stable_asset_exception,
                 )
                 .await;
                 for event in submission.events {
@@ -880,15 +1173,15 @@ impl RuntimeOrchestrator {
         &self,
         key: &ActionKey,
         notional_usd: Decimal,
-        uses_cbbtc_exception: bool,
+        uses_non_stable_asset_exception: bool,
     ) {
         let mut state = self.automation_state.write().await;
         state.cumulative_spend_usd += notional_usd;
         state
             .last_submitted_at
             .insert(key.clone(), OffsetDateTime::now_utc());
-        if uses_cbbtc_exception {
-            state.cbbtc_exception_used = true;
+        if uses_non_stable_asset_exception {
+            state.non_stable_asset_exception_used = true;
         }
     }
 
@@ -946,10 +1239,25 @@ impl RuntimeOrchestrator {
     }
 
     fn demo_rfq(&self, amount_raw: AmountRaw) -> AppResult<RfqRequest> {
-        let input_mint = self.mint_for_asset("USDC")?;
-        let output_mint = self.mint_for_asset("SOL")?;
+        self.operator_rfq(&AssetId::from("USDC"), &AssetId::from("SOL"), amount_raw)
+    }
+
+    fn operator_rfq(
+        &self,
+        input_asset: &AssetId,
+        output_asset: &AssetId,
+        amount_raw: AmountRaw,
+    ) -> AppResult<RfqRequest> {
+        if input_asset == output_asset {
+            return Err(AppError::validation(
+                "RFQ input and output assets must be different",
+            ));
+        }
+
+        let input_mint = self.mint_for_asset(input_asset)?;
+        let output_mint = self.mint_for_asset(output_asset)?;
         let taker_wallet = self.demo_taker_wallet.clone().ok_or_else(|| {
-            AppError::config("TUI demo commands require a configured taker wallet address")
+            AppError::config("legacy local RFQ commands require a configured taker wallet address")
         })?;
 
         Ok(RfqRequest {
@@ -967,13 +1275,13 @@ impl RuntimeOrchestrator {
         })
     }
 
-    fn mint_for_asset(&self, id: &str) -> AppResult<crate::domain::types::MintAddress> {
+    fn mint_for_asset(&self, id: &AssetId) -> AppResult<crate::domain::types::MintAddress> {
         self.app_state
             .config()
             .assets
             .supported
             .iter()
-            .find(|asset| asset.id.as_str() == id)
+            .find(|asset| asset.enabled && asset.id == *id)
             .map(|asset| asset.mint.clone())
             .ok_or_else(|| AppError::config(format!("missing {id} asset config")))
     }

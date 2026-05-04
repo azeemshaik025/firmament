@@ -58,13 +58,7 @@ impl RfqContext {
         };
 
         let risk_policy = RiskPolicy {
-            supported_pairs: config
-                .assets
-                .pairs
-                .iter()
-                .filter(|pair| pair.enabled)
-                .map(crate::config::PairConfig::pair)
-                .collect(),
+            supported_pairs: config.assets.enabled_pairs(),
             allowlisted_takers: Vec::new(),
             require_taker_allowlist: config.risk.require_taker_allowlist,
             max_quote_notional_usd: Some(config.risk.max_quote_notional_usd),
@@ -79,7 +73,14 @@ impl RfqContext {
                 .assets
                 .supported
                 .iter()
-                .map(|asset| (asset.id.clone(), config.risk.max_trade_notional_usd))
+                .map(|asset| {
+                    let limit = if matches!(asset.id.as_str(), "USDC" | "SOL") {
+                        config.risk.max_trade_notional_usd
+                    } else {
+                        config.risk.max_non_stable_asset_notional_usd
+                    };
+                    (asset.id.clone(), limit)
+                })
                 .collect(),
             current_exposure_usd: config
                 .assets

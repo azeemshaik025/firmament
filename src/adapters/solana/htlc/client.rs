@@ -6,6 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_commitment_config::CommitmentConfig;
 use solana_sdk::instruction::Instruction;
@@ -19,7 +21,8 @@ use crate::adapters::solana::client::{
 };
 use crate::domain::assets::AssetRegistry;
 use crate::domain::types::{
-    HtlcInitiation, HtlcReceipt, SettlementStatus, TradeId, TxSignature, WalletRole,
+    ExternalHtlcInitiation, HtlcInitiation, HtlcReceipt, SettlementStatus, TradeId, TxSignature,
+    UnsignedWalletTransaction, WalletAddress, WalletRole,
 };
 use crate::error::AppError;
 use crate::ports::HtlcClient;
@@ -87,6 +90,7 @@ struct SolanaHtlcLeg {
     kind: HtlcProgramKind,
     program_id: Pubkey,
     swap_pda: Pubkey,
+    funder_pubkey: Pubkey,
     mint: Option<Pubkey>,
     token_program: Option<Pubkey>,
     status: SettlementStatus,
@@ -174,6 +178,16 @@ impl SolanaHtlcClient {
     ) -> Result<(Instruction, SolanaHtlcLeg), AppError> {
         let funder = self.wallet(request.funder)?;
         let redeemer = self.wallet(request.redeemer)?;
+        self.build_initiate_instruction_for_pubkeys(request, funder.pubkey(), redeemer.pubkey())
+            .await
+    }
+
+    async fn build_initiate_instruction_for_pubkeys(
+        &self,
+        request: &HtlcInitiation,
+        funder_pubkey: Pubkey,
+        redeemer_pubkey: Pubkey,
+    ) -> Result<(Instruction, SolanaHtlcLeg), AppError> {
         let secret_hash = parse_secret_hash(&request.hashlock)
             .map_err(|error| AppError::validation(error.to_string()))?;
         let asset = self.registry.require_asset(&request.amount.asset)?;
@@ -181,16 +195,16 @@ impl SolanaHtlcClient {
         if asset.is_native_sol() {
             let instruction = build_initiate_native(
                 &self.native_program_id,
-                &funder.pubkey(),
+                &funder_pubkey,
                 &InitiateNativeData {
                     amount_lamports: request.amount.amount_raw.as_u64(),
                     expires_in_slots: expires_in_slots(request.expires_at),
-                    redeemer: redeemer.pubkey(),
+                    redeemer: redeemer_pubkey,
                     secret_hash,
                 },
             );
             let (swap_pda, _) =
-                derive_native_swap_pda(&self.native_program_id, &funder.pubkey(), &secret_hash);
+                derive_native_swap_pda(&self.native_program_id, &funder_pubkey, &secret_hash);
             return Ok((
                 instruction,
                 SolanaHtlcLeg {
@@ -198,6 +212,7 @@ impl SolanaHtlcClient {
                     kind: HtlcProgramKind::Native,
                     program_id: self.native_program_id,
                     swap_pda,
+                    funder_pubkey,
                     mint: None,
                     token_program: None,
                     status: SettlementStatus::Pending,
@@ -209,27 +224,26 @@ impl SolanaHtlcClient {
         let token_program = self.token_program_for_mint(&mint).await?;
         let funder_ata =
             crate::adapters::solana::client::SolanaClient::derive_associated_token_address(
-                &funder.pubkey(),
+                &funder_pubkey,
                 &mint,
                 &token_program,
             );
         let instruction = build_initiate_spl(
             &self.spl_program_id,
-            &funder.pubkey(),
+            &funder_pubkey,
             &mint,
             &funder_ata,
-            &funder.pubkey(),
+            &funder_pubkey,
             token_program,
             &InitiateSplData {
                 expires_in_slots: expires_in_slots(request.expires_at),
-                redeemer: redeemer.pubkey(),
+                redeemer: redeemer_pubkey,
                 secret_hash,
                 swap_amount: request.amount.amount_raw.as_u64(),
                 destination_data: None,
             },
         );
-        let (swap_pda, _) =
-            derive_spl_swap_pda(&self.spl_program_id, &funder.pubkey(), &secret_hash);
+        let (swap_pda, _) = derive_spl_swap_pda(&self.spl_program_id, &funder_pubkey, &secret_hash);
         Ok((
             instruction,
             SolanaHtlcLeg {
@@ -237,6 +251,7 @@ impl SolanaHtlcClient {
                 kind: HtlcProgramKind::Spl,
                 program_id: self.spl_program_id,
                 swap_pda,
+                funder_pubkey,
                 mint: Some(mint),
                 token_program: Some(token_program),
                 status: SettlementStatus::Pending,
@@ -250,21 +265,27 @@ impl SolanaHtlcClient {
         preimage: &str,
     ) -> Result<Instruction, AppError> {
         let redeemer = self.wallet(leg.request.redeemer)?;
+        self.build_redeem_instruction_for_pubkey(leg, redeemer.pubkey(), preimage)
+    }
+
+    fn build_redeem_instruction_for_pubkey(
+        &self,
+        leg: &SolanaHtlcLeg,
+        redeemer_pubkey: Pubkey,
+        preimage: &str,
+    ) -> Result<Instruction, AppError> {
         let secret = parse_secret_preimage(preimage)
             .map_err(|error| AppError::validation(error.to_string()))?;
         let data = RedeemData { secret };
 
         match leg.kind {
-            HtlcProgramKind::Native => {
-                let initiator = self.wallet(leg.request.funder)?.pubkey();
-                Ok(build_redeem_native(
-                    &leg.program_id,
-                    &leg.swap_pda,
-                    &initiator,
-                    &redeemer.pubkey(),
-                    &data,
-                ))
-            }
+            HtlcProgramKind::Native => Ok(build_redeem_native(
+                &leg.program_id,
+                &leg.swap_pda,
+                &leg.funder_pubkey,
+                &redeemer_pubkey,
+                &data,
+            )),
             HtlcProgramKind::Spl => {
                 let mint = leg
                     .mint
@@ -272,10 +293,9 @@ impl SolanaHtlcClient {
                 let token_program = leg
                     .token_program
                     .ok_or_else(|| AppError::internal("SPL HTLC leg missing token program"))?;
-                let sponsor = self.wallet(leg.request.funder)?.pubkey();
                 let redeemer_ata =
                     crate::adapters::solana::client::SolanaClient::derive_associated_token_address(
-                        &redeemer.pubkey(),
+                        &redeemer_pubkey,
                         &mint,
                         &token_program,
                     );
@@ -284,7 +304,7 @@ impl SolanaHtlcClient {
                     &leg.swap_pda,
                     &mint,
                     &redeemer_ata,
-                    &sponsor,
+                    &leg.funder_pubkey,
                     token_program,
                     &data,
                 ))
@@ -353,6 +373,32 @@ impl SolanaHtlcClient {
         Ok(TxSignature::new(signature.to_string()))
     }
 
+    async fn build_unsigned_transaction(
+        &self,
+        payer: Pubkey,
+        instruction: Instruction,
+    ) -> Result<UnsignedWalletTransaction, AppError> {
+        let blockhash = self
+            .rpc_client
+            .get_latest_blockhash()
+            .await
+            .map_err(|error| AppError::solana(format!("get latest blockhash: {error}")))?;
+        let message = solana_sdk::message::Message::new_with_blockhash(
+            &[instruction],
+            Some(&payer),
+            &blockhash,
+        );
+        let transaction = Transaction::new_unsigned(message);
+        let bytes = bincode::serialize(&transaction).map_err(|error| {
+            AppError::solana(format!("serialize unsigned transaction: {error}"))
+        })?;
+
+        Ok(UnsignedWalletTransaction {
+            transaction_base64: BASE64_STANDARD.encode(bytes),
+            recent_blockhash: blockhash.to_string(),
+        })
+    }
+
     async fn await_confirmation(&self, signature: &Signature) -> Result<(), AppError> {
         for _ in 0..self.confirmation.max_attempts {
             tokio::time::sleep(self.confirmation.poll_interval).await;
@@ -401,10 +447,23 @@ impl SolanaHtlcClient {
             .cloned()
             .ok_or_else(|| AppError::validation(format!("missing HTLC wallet for {role:?}")))
     }
+
+    fn pubkey_from_wallet(address: &WalletAddress) -> Result<Pubkey, AppError> {
+        Pubkey::from_str(address.as_str()).map_err(|error| {
+            AppError::validation(format!(
+                "invalid Solana wallet address {}: {error}",
+                address.as_str()
+            ))
+        })
+    }
 }
 
 #[async_trait]
 impl HtlcClient for SolanaHtlcClient {
+    async fn wallet_address(&self, role: WalletRole) -> Result<WalletAddress, AppError> {
+        Ok(WalletAddress::new(self.wallet(role)?.pubkey().to_string()))
+    }
+
     async fn initiate(&self, request: HtlcInitiation) -> Result<HtlcReceipt, AppError> {
         let (instruction, mut leg) = self.build_initiate_instruction(&request).await?;
         let signature = self.submit(request.funder, instruction).await?;
@@ -421,6 +480,152 @@ impl HtlcClient for SolanaHtlcClient {
             trade_id: request.trade_id,
             status: SettlementStatus::Initiated,
             signature: Some(signature),
+        })
+    }
+
+    async fn initiate_with_external_redeemer(
+        &self,
+        request: HtlcInitiation,
+        redeemer: WalletAddress,
+    ) -> Result<HtlcReceipt, AppError> {
+        let funder = self.wallet(request.funder)?;
+        let redeemer_pubkey = Self::pubkey_from_wallet(&redeemer)?;
+        let (instruction, mut leg) = self
+            .build_initiate_instruction_for_pubkeys(&request, funder.pubkey(), redeemer_pubkey)
+            .await?;
+        let signature = self.submit(request.funder, instruction).await?;
+        leg.status = SettlementStatus::Initiated;
+        self.state
+            .lock()
+            .await
+            .entry(request.trade_id)
+            .or_default()
+            .legs
+            .push(leg);
+
+        Ok(HtlcReceipt {
+            trade_id: request.trade_id,
+            status: SettlementStatus::Initiated,
+            signature: Some(signature),
+        })
+    }
+
+    async fn build_external_initiate(
+        &self,
+        request: ExternalHtlcInitiation,
+    ) -> Result<UnsignedWalletTransaction, AppError> {
+        let funder = Self::pubkey_from_wallet(&request.funder)?;
+        let redeemer = Self::pubkey_from_wallet(&request.redeemer)?;
+        let role_request = HtlcInitiation {
+            trade_id: request.trade_id,
+            funder: WalletRole::Taker,
+            redeemer: WalletRole::Maker,
+            amount: request.amount,
+            hashlock: request.hashlock,
+            expires_at: request.expires_at,
+        };
+        let (instruction, _) = self
+            .build_initiate_instruction_for_pubkeys(&role_request, funder, redeemer)
+            .await?;
+
+        self.build_unsigned_transaction(funder, instruction).await
+    }
+
+    async fn record_external_initiate(
+        &self,
+        request: ExternalHtlcInitiation,
+        signature: TxSignature,
+    ) -> Result<HtlcReceipt, AppError> {
+        let signature = Signature::from_str(signature.as_str()).map_err(|error| {
+            AppError::validation(format!("invalid taker lock signature: {error}"))
+        })?;
+        self.await_confirmation(&signature).await?;
+
+        let funder = Self::pubkey_from_wallet(&request.funder)?;
+        let redeemer = Self::pubkey_from_wallet(&request.redeemer)?;
+        let role_request = HtlcInitiation {
+            trade_id: request.trade_id,
+            funder: WalletRole::Taker,
+            redeemer: WalletRole::Maker,
+            amount: request.amount,
+            hashlock: request.hashlock,
+            expires_at: request.expires_at,
+        };
+        let (_, mut leg) = self
+            .build_initiate_instruction_for_pubkeys(&role_request, funder, redeemer)
+            .await?;
+        leg.status = SettlementStatus::Initiated;
+        self.state
+            .lock()
+            .await
+            .entry(role_request.trade_id)
+            .or_default()
+            .legs
+            .push(leg);
+
+        Ok(HtlcReceipt {
+            trade_id: role_request.trade_id,
+            status: SettlementStatus::Initiated,
+            signature: Some(TxSignature::new(signature.to_string())),
+        })
+    }
+
+    async fn build_external_redeem(
+        &self,
+        trade_id: TradeId,
+        redeemer: WalletAddress,
+        preimage: String,
+    ) -> Result<UnsignedWalletTransaction, AppError> {
+        let redeemer_pubkey = Self::pubkey_from_wallet(&redeemer)?;
+        let leg = {
+            let state = self.state.lock().await;
+            let trade = state
+                .get(&trade_id)
+                .ok_or_else(|| AppError::validation(format!("unknown HTLC trade {trade_id}")))?;
+            trade
+                .legs
+                .iter()
+                .find(|leg| {
+                    leg.request.funder == WalletRole::Maker
+                        && leg.status == SettlementStatus::Initiated
+                })
+                .cloned()
+                .ok_or_else(|| AppError::validation("no maker-funded HTLC leg is redeemable"))?
+        };
+        let instruction =
+            self.build_redeem_instruction_for_pubkey(&leg, redeemer_pubkey, &preimage)?;
+        self.build_unsigned_transaction(redeemer_pubkey, instruction)
+            .await
+    }
+
+    async fn record_external_redeem(
+        &self,
+        trade_id: TradeId,
+        signature: TxSignature,
+    ) -> Result<HtlcReceipt, AppError> {
+        let signature = Signature::from_str(signature.as_str()).map_err(|error| {
+            AppError::validation(format!("invalid taker redeem signature: {error}"))
+        })?;
+        self.await_confirmation(&signature).await?;
+
+        let mut state = self.state.lock().await;
+        let trade = state
+            .get_mut(&trade_id)
+            .ok_or_else(|| AppError::validation(format!("unknown HTLC trade {trade_id}")))?;
+        let leg = trade
+            .legs
+            .iter_mut()
+            .find(|leg| {
+                leg.request.funder == WalletRole::Maker && leg.status == SettlementStatus::Initiated
+            })
+            .ok_or_else(|| AppError::validation("no maker-funded HTLC leg is redeemable"))?;
+        leg.status = SettlementStatus::Redeemed;
+        trade.redeemed_count = trade.redeemed_count.saturating_add(1);
+
+        Ok(HtlcReceipt {
+            trade_id,
+            status: SettlementStatus::Redeemed,
+            signature: Some(TxSignature::new(signature.to_string())),
         })
     }
 
@@ -1084,6 +1289,7 @@ mod tests {
             kind: HtlcProgramKind::Spl,
             program_id: spl_program(),
             swap_pda,
+            funder_pubkey: taker.pubkey(),
             mint: Some(mint),
             token_program: Some(token_program()),
             status: SettlementStatus::Initiated,
@@ -1145,10 +1351,8 @@ mod tests {
             "LIVE_HTLC_AMOUNT_LAMPORTS must stay at or below 100000 lamports"
         );
 
-        let wallets = crate::adapters::solana::wallets::DemoWallets::from_env_config(
-            &crate::config::WalletsConfig::default(),
-        )
-        .expect("load live demo wallets");
+        let wallets = crate::adapters::solana::wallets::DemoWallets::from_env()
+            .expect("load live demo wallets");
         let rpc_url = std::env::var("SOLANA_RPC_URL").expect("SOLANA_RPC_URL checked");
         let client = SolanaHtlcClient::new(SolanaHtlcClientConfig {
             rpc_client: Arc::new(RpcClient::new(rpc_url)),

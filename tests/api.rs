@@ -1,22 +1,20 @@
 use async_trait::async_trait;
 use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode, header};
-use rust_decimal::Decimal;
-use serde_json::{Value, json};
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use tbd_rfq_maker_runtime::ports::{
-    BalanceReader, GatewayClient, HtlcClient, PriceProvider, SwapExecutor,
-};
-use tbd_rfq_maker_runtime::runtime::{
+use firmament::ports::{BalanceReader, GatewayClient, HtlcClient, PriceProvider, SwapExecutor};
+use firmament::runtime::{
     RuntimeAdapters, RuntimeOrchestrator, RuntimeOrchestratorOptions, RuntimePersistence,
 };
-use tbd_rfq_maker_runtime::types::{
+use firmament::types::{
     AmountRaw, AssetId, AssetPair, BalanceSnapshot, GatewayReceipt, GatewayRefillRequest,
     HtlcInitiation, HtlcReceipt, ReferencePrice, SettlementStatus, SwapQuote, SwapReceipt,
     SwapRequest, TokenAmount, TxSignature, WalletRole,
 };
-use tbd_rfq_maker_runtime::{AppConfig, api, bootstrap};
+use firmament::{AppConfig, api, bootstrap};
+use rust_decimal::Decimal;
+use serde_json::{Value, json};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use time::OffsetDateTime;
 use tower::ServiceExt;
 
@@ -44,10 +42,8 @@ async fn test_orchestrator_router() -> axum::Router {
             ])),
         },
         Arc::new(
-            RuntimePersistence::open_in_memory(
-                tbd_rfq_maker_runtime::assets::AssetRegistry::default(),
-            )
-            .expect("persistence"),
+            RuntimePersistence::open_in_memory(firmament::assets::AssetRegistry::default())
+                .expect("persistence"),
         ),
         RuntimeOrchestratorOptions::default(),
     );
@@ -112,7 +108,7 @@ async fn api_runtime_events_endpoint_success() {
 }
 
 #[tokio::test]
-async fn api_rfq_accept_flow_uses_runtime_orchestrator_and_fake_adapters() {
+async fn api_legacy_accept_route_requires_wallet_settlement() {
     let app = test_orchestrator_router().await;
 
     let response = app
@@ -146,17 +142,14 @@ async fn api_rfq_accept_flow_uses_runtime_orchestrator_and_fake_adapters() {
         .await
         .expect("response");
 
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
     let accept_body = response_json(response).await;
-    assert_eq!(accept_body["quote_id"], quote_id);
-    assert_eq!(accept_body["settlement_status"], "redeemed");
-    assert_eq!(accept_body["integration_status"], "runtime_orchestrated");
-    assert!(accept_body["tx_signatures"].as_array().unwrap().len() >= 4);
+    assert_eq!(accept_body["error"]["code"], "wallet_settlement_required");
     assert!(
-        accept_body["ledger_summary"]["entry_count"]
-            .as_u64()
+        accept_body["error"]["message"]
+            .as_str()
             .unwrap()
-            > 0
+            .contains("wallet-settlement")
     );
 }
 
@@ -265,11 +258,12 @@ impl PriceProvider for FakePriceProvider {
     async fn reference_price(
         &self,
         pair: AssetPair,
-    ) -> Result<ReferencePrice, tbd_rfq_maker_runtime::AppError> {
-        let price =
-            self.prices.get(&pair).copied().ok_or_else(|| {
-                tbd_rfq_maker_runtime::AppError::unsupported("fake price missing")
-            })?;
+    ) -> Result<ReferencePrice, firmament::AppError> {
+        let price = self
+            .prices
+            .get(&pair)
+            .copied()
+            .ok_or_else(|| firmament::AppError::unsupported("fake price missing"))?;
         Ok(ReferencePrice {
             pair,
             output_per_input: price,
@@ -281,15 +275,12 @@ impl PriceProvider for FakePriceProvider {
 #[derive(Debug, Clone, Default)]
 struct FakeHtlcClient {
     initiated: Arc<Mutex<Vec<HtlcInitiation>>>,
-    redeemed: Arc<Mutex<Vec<(tbd_rfq_maker_runtime::types::TradeId, String)>>>,
+    redeemed: Arc<Mutex<Vec<(firmament::types::TradeId, String)>>>,
 }
 
 #[async_trait]
 impl HtlcClient for FakeHtlcClient {
-    async fn initiate(
-        &self,
-        request: HtlcInitiation,
-    ) -> Result<HtlcReceipt, tbd_rfq_maker_runtime::AppError> {
+    async fn initiate(&self, request: HtlcInitiation) -> Result<HtlcReceipt, firmament::AppError> {
         let mut initiated = self.initiated.lock().expect("htlc lock");
         initiated.push(request.clone());
         Ok(HtlcReceipt {
@@ -301,9 +292,9 @@ impl HtlcClient for FakeHtlcClient {
 
     async fn redeem(
         &self,
-        trade_id: tbd_rfq_maker_runtime::types::TradeId,
+        trade_id: firmament::types::TradeId,
         preimage: String,
-    ) -> Result<HtlcReceipt, tbd_rfq_maker_runtime::AppError> {
+    ) -> Result<HtlcReceipt, firmament::AppError> {
         let mut redeemed = self.redeemed.lock().expect("htlc lock");
         redeemed.push((trade_id, preimage));
         Ok(HtlcReceipt {
@@ -315,8 +306,8 @@ impl HtlcClient for FakeHtlcClient {
 
     async fn refund(
         &self,
-        trade_id: tbd_rfq_maker_runtime::types::TradeId,
-    ) -> Result<HtlcReceipt, tbd_rfq_maker_runtime::AppError> {
+        trade_id: firmament::types::TradeId,
+    ) -> Result<HtlcReceipt, firmament::AppError> {
         Ok(HtlcReceipt {
             trade_id,
             status: SettlementStatus::Refunded,
@@ -326,8 +317,8 @@ impl HtlcClient for FakeHtlcClient {
 
     async fn status(
         &self,
-        _trade_id: tbd_rfq_maker_runtime::types::TradeId,
-    ) -> Result<SettlementStatus, tbd_rfq_maker_runtime::AppError> {
+        _trade_id: firmament::types::TradeId,
+    ) -> Result<SettlementStatus, firmament::AppError> {
         Ok(SettlementStatus::Initiated)
     }
 }
@@ -337,10 +328,7 @@ struct FakeSwapExecutor;
 
 #[async_trait]
 impl SwapExecutor for FakeSwapExecutor {
-    async fn quote_swap(
-        &self,
-        request: SwapRequest,
-    ) -> Result<SwapQuote, tbd_rfq_maker_runtime::AppError> {
+    async fn quote_swap(&self, request: SwapRequest) -> Result<SwapQuote, firmament::AppError> {
         Ok(SwapQuote {
             expected_output: TokenAmount::new(request.pair.output.clone(), AmountRaw::new(10)),
             estimated_fee: Some(TokenAmount::new(usdc(), AmountRaw::new(10_000))),
@@ -349,10 +337,7 @@ impl SwapExecutor for FakeSwapExecutor {
         })
     }
 
-    async fn execute_swap(
-        &self,
-        quote: SwapQuote,
-    ) -> Result<SwapReceipt, tbd_rfq_maker_runtime::AppError> {
+    async fn execute_swap(&self, quote: SwapQuote) -> Result<SwapReceipt, firmament::AppError> {
         Ok(SwapReceipt {
             trade_id: None,
             signature: TxSignature::new("swap-sig"),
@@ -366,10 +351,7 @@ struct FakeGatewayClient;
 
 #[async_trait]
 impl GatewayClient for FakeGatewayClient {
-    async fn balance(
-        &self,
-        asset: AssetId,
-    ) -> Result<GatewayReceipt, tbd_rfq_maker_runtime::AppError> {
+    async fn balance(&self, asset: AssetId) -> Result<GatewayReceipt, firmament::AppError> {
         Ok(GatewayReceipt {
             amount: TokenAmount::new(asset, AmountRaw::new(10_000_000)),
             provider_transfer_id: None,
@@ -380,7 +362,7 @@ impl GatewayClient for FakeGatewayClient {
     async fn request_refill(
         &self,
         request: GatewayRefillRequest,
-    ) -> Result<GatewayReceipt, tbd_rfq_maker_runtime::AppError> {
+    ) -> Result<GatewayReceipt, firmament::AppError> {
         Ok(GatewayReceipt {
             amount: request.amount,
             provider_transfer_id: Some("gateway-transfer".to_owned()),
@@ -404,16 +386,13 @@ impl FakeBalanceReader {
 
 #[async_trait]
 impl BalanceReader for FakeBalanceReader {
-    async fn balances(
-        &self,
-        _wallet: WalletRole,
-    ) -> Result<BalanceSnapshot, tbd_rfq_maker_runtime::AppError> {
+    async fn balances(&self, _wallet: WalletRole) -> Result<BalanceSnapshot, firmament::AppError> {
         let mut snapshots = self.snapshots.lock().expect("balance lock");
         if snapshots.len() == 1 {
             return Ok(snapshots[0].clone());
         }
         snapshots
             .pop()
-            .ok_or_else(|| tbd_rfq_maker_runtime::AppError::internal("no fake snapshots"))
+            .ok_or_else(|| firmament::AppError::internal("no fake snapshots"))
     }
 }

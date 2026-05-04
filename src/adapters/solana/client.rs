@@ -368,8 +368,8 @@ mod tests {
     use solana_sdk::signature::Keypair;
 
     use super::*;
-    use crate::adapters::solana::wallets::LoadedWallet;
-    use crate::config::{SolanaConfig, WalletsConfig};
+    use crate::adapters::solana::wallets::{LoadedWallet, SOLANA_RPC_URL_ENV, keypair_source_envs};
+    use crate::config::SolanaConfig;
     use crate::domain::assets::{AssetRegistry, USDC_MINT};
     use crate::domain::types::AssetId;
 
@@ -421,7 +421,7 @@ mod tests {
         }
 
         let solana_config = SolanaConfig::default();
-        let rpc_url = match std::env::var(&solana_config.rpc_url_env) {
+        let rpc_url = match std::env::var(SOLANA_RPC_URL_ENV) {
             Ok(value) if !value.trim().is_empty() => value,
             _ => {
                 eprintln!("skipping live Solana RPC test; SOLANA_RPC_URL is not set");
@@ -429,9 +429,7 @@ mod tests {
             }
         };
 
-        let wallet_config = WalletsConfig::default().maker;
-        let has_wallet = wallet_config
-            .keypair_source_envs()
+        let has_wallet = keypair_source_envs(WalletRole::Maker)
             .into_iter()
             .any(|name| std::env::var(name).is_ok());
         if !has_wallet {
@@ -439,7 +437,7 @@ mod tests {
             return None;
         }
 
-        let wallet = LoadedWallet::from_env_config(&wallet_config).unwrap();
+        let wallet = LoadedWallet::from_maker_env().unwrap();
         let client = SolanaClient::new(rpc_url, solana_config.commitment).unwrap();
         Some((client, wallet))
     }

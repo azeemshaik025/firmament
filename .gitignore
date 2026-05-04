@@ -1,5 +1,14 @@
 /target/
 
+# Frontend dependencies and compiler caches
+node_modules/
+*.tsbuildinfo
+.vite/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
 # Local runtime state
 config.toml
 runtime.sqlite
@@ -10,7 +19,8 @@ runtime.sqlite
 agent-context/
 agent-prompts/
 docs/
-scripts/
+scripts/*
+!scripts/run_demo.sh
 
 # Local secrets and environment overrides
 .env

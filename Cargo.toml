@@ -1,5 +1,5 @@
 [package]
-name = "tbd-rfq-maker-runtime"
+name = "firmament"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
@@ -7,18 +7,20 @@ publish = false
 
 [dependencies]
 anyhow = "1"
+argon2 = "0.5"
 async-trait = "0.1"
 borsh = { version = "1", features = ["derive"] }
 axum = "0.8"
 base64 = "0.22"
 bincode = "1"
 config = { version = "0.15", default-features = false, features = ["toml"] }
-crossterm = "0.28"
 dotenvy = "0.15"
 ed25519-dalek = { version = "2", features = ["std"] }
 hex = "0.4"
-ratatui = "0.29"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
 rand = "0.8"
 rusqlite = { version = "0.32", features = ["bundled"] }
 rust_decimal = { version = "1", features = ["serde"] }
@@ -30,9 +32,22 @@ solana-commitment-config = "3"
 solana-sdk = "3"
 spl-associated-token-account-interface = "2"
 thiserror = "2"
-time = { version = "0.3", features = ["formatting", "macros", "parsing", "serde"] }
-tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+time = { version = "0.3", features = [
+    "formatting",
+    "macros",
+    "parsing",
+    "serde",
+] }
+tokio = { version = "1", features = [
+    "fs",
+    "macros",
+    "net",
+    "rt-multi-thread",
+    "sync",
+    "time",
+] }
 tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["fs"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
 uuid = { version = "1", features = ["serde", "v4", "v7"] }

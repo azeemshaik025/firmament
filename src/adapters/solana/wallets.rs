@@ -8,9 +8,23 @@ use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::{Keypair, Signer};
 use thiserror::Error;
 
-use crate::config::{WalletConfig, WalletsConfig};
 use crate::domain::types::{WalletAddress, WalletRole};
 use crate::error::AppError;
+
+/// Environment variable containing the Solana RPC URL.
+pub const SOLANA_RPC_URL_ENV: &str = "SOLANA_RPC_URL";
+/// Maker/operator base58 private key env var.
+pub const MAKER_PRIVATE_KEY_ENV: &str = "MAKER_PRIVATE_KEY";
+/// Maker/operator Solana CLI keypair path env var.
+pub const MAKER_KEYPAIR_PATH_ENV: &str = "MAKER_KEYPAIR_PATH";
+/// Maker/operator Solana CLI keypair JSON env var.
+pub const MAKER_KEYPAIR_JSON_ENV: &str = "MAKER_KEYPAIR_JSON";
+/// Taker/app base58 private key env var.
+pub const TAKER_PRIVATE_KEY_ENV: &str = "TAKER_PRIVATE_KEY";
+/// Taker/app Solana CLI keypair path env var.
+pub const TAKER_KEYPAIR_PATH_ENV: &str = "TAKER_KEYPAIR_PATH";
+/// Taker/app Solana CLI keypair JSON env var.
+pub const TAKER_KEYPAIR_JSON_ENV: &str = "TAKER_KEYPAIR_JSON";
 
 /// A loaded Solana keypair tagged with its runtime role.
 pub struct LoadedWallet {
@@ -19,38 +33,56 @@ pub struct LoadedWallet {
 }
 
 impl LoadedWallet {
-    /// Load a wallet keypair from a configured environment-backed source.
+    /// Load a wallet keypair from the fixed env vars for the runtime role.
     ///
     /// # Errors
     ///
-    /// Returns a wallet error when neither configured env var is set, both are
+    /// Returns a wallet error when neither role env var is set, multiple are
     /// set, or the referenced keypair material cannot be parsed.
-    pub fn from_env_config(config: &WalletConfig) -> Result<Self, WalletError> {
-        let private_key = non_empty_env(&config.private_key_env);
-        let path = non_empty_env(&config.keypair_path_env);
-        let json = non_empty_env(&config.keypair_json_env);
+    pub fn from_role_env(role: WalletRole) -> Result<Self, WalletError> {
+        let [private_key_env, keypair_path_env, keypair_json_env] = keypair_source_envs(role);
+        let private_key = non_empty_env(private_key_env);
+        let path = non_empty_env(keypair_path_env);
+        let json = non_empty_env(keypair_json_env);
 
         match (private_key, path, json) {
-            (Some(private_key), None, None) => Self::from_private_key_base58(
-                config.role,
-                &private_key,
-                config.private_key_env.as_str(),
-            ),
-            (None, Some(path), None) => Self::from_path(config.role, path),
-            (None, None, Some(json)) => Self::from_json(config.role, &json),
+            (Some(private_key), None, None) => {
+                Self::from_private_key_base58(role, &private_key, private_key_env)
+            }
+            (None, Some(path), None) => Self::from_path(role, path),
+            (None, None, Some(json)) => Self::from_json(role, &json),
             (None, None, None) => Err(WalletError::MissingKeypair {
-                role: config.role,
-                env_vars: config
-                    .keypair_source_envs()
+                role,
+                env_vars: keypair_source_envs(role)
                     .into_iter()
                     .map(str::to_owned)
                     .collect(),
             }),
             _ => Err(WalletError::AmbiguousKeypairSources {
-                role: config.role,
-                env_vars: configured_source_names(config),
+                role,
+                env_vars: configured_source_names(role),
             }),
         }
+    }
+
+    /// Load the maker/operator wallet from fixed maker env vars.
+    ///
+    /// # Errors
+    ///
+    /// Returns a wallet error when the maker keypair source is missing,
+    /// ambiguous, or malformed.
+    pub fn from_maker_env() -> Result<Self, WalletError> {
+        Self::from_role_env(WalletRole::Maker)
+    }
+
+    /// Load the taker/app wallet from fixed taker env vars.
+    ///
+    /// # Errors
+    ///
+    /// Returns a wallet error when the taker keypair source is missing,
+    /// ambiguous, or malformed.
+    pub fn from_taker_env() -> Result<Self, WalletError> {
+        Self::from_role_env(WalletRole::Taker)
     }
 
     /// Load a wallet from a base58 Solana private key string.
@@ -171,15 +203,15 @@ pub struct DemoWallets {
 }
 
 impl DemoWallets {
-    /// Load both demo wallets from configured environment-backed sources.
+    /// Load both demo wallets from fixed environment-backed sources.
     ///
     /// # Errors
     ///
     /// Returns a wallet error when either wallet cannot be loaded.
-    pub fn from_env_config(config: &WalletsConfig) -> Result<Self, WalletError> {
+    pub fn from_env() -> Result<Self, WalletError> {
         Ok(Self {
-            maker: LoadedWallet::from_env_config(&config.maker)?,
-            taker: LoadedWallet::from_env_config(&config.taker)?,
+            maker: LoadedWallet::from_maker_env()?,
+            taker: LoadedWallet::from_taker_env()?,
         })
     }
 }
@@ -267,9 +299,26 @@ fn non_empty_env(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn configured_source_names(config: &WalletConfig) -> Vec<String> {
-    config
-        .keypair_source_envs()
+/// Return the accepted keypair source env vars for one runtime wallet role.
+#[must_use]
+pub const fn keypair_source_envs(role: WalletRole) -> [&'static str; 3] {
+    match role {
+        WalletRole::Maker | WalletRole::Operator => [
+            MAKER_PRIVATE_KEY_ENV,
+            MAKER_KEYPAIR_PATH_ENV,
+            MAKER_KEYPAIR_JSON_ENV,
+        ],
+        WalletRole::Taker => [
+            TAKER_PRIVATE_KEY_ENV,
+            TAKER_KEYPAIR_PATH_ENV,
+            TAKER_KEYPAIR_JSON_ENV,
+        ],
+        WalletRole::Gateway => ["", "", ""],
+    }
+}
+
+fn configured_source_names(role: WalletRole) -> Vec<String> {
+    keypair_source_envs(role)
         .into_iter()
         .filter(|name| non_empty_env(name).is_some())
         .map(str::to_owned)
@@ -283,7 +332,6 @@ mod tests {
     use solana_sdk::signature::{Keypair, Signer};
 
     use super::*;
-    use crate::config::WalletConfig;
     use crate::domain::types::WalletRole;
 
     fn keypair_json(keypair: &Keypair) -> String {
@@ -333,18 +381,23 @@ mod tests {
     }
 
     #[test]
-    fn wallets_env_loader_reports_missing_secret_references() {
-        let config = WalletConfig {
-            role: WalletRole::Maker,
-            private_key_env: format!("MISSING_PRIVATE_KEY_{}", uuid::Uuid::now_v7().simple()),
-            keypair_path_env: format!("MISSING_PATH_{}", uuid::Uuid::now_v7().simple()),
-            keypair_json_env: format!("MISSING_JSON_{}", uuid::Uuid::now_v7().simple()),
-        };
-
-        assert!(matches!(
-            LoadedWallet::from_env_config(&config),
-            Err(WalletError::MissingKeypair { .. })
-        ));
+    fn wallets_role_env_contract_is_hardcoded() {
+        assert_eq!(
+            keypair_source_envs(WalletRole::Maker),
+            [
+                "MAKER_PRIVATE_KEY",
+                "MAKER_KEYPAIR_PATH",
+                "MAKER_KEYPAIR_JSON"
+            ]
+        );
+        assert_eq!(
+            keypair_source_envs(WalletRole::Taker),
+            [
+                "TAKER_PRIVATE_KEY",
+                "TAKER_KEYPAIR_PATH",
+                "TAKER_KEYPAIR_JSON"
+            ]
+        );
     }
 
     #[test]
@@ -354,15 +407,10 @@ mod tests {
             return;
         }
 
-        let config = crate::config::WalletsConfig::default();
-        let maker_secret_configured = config
-            .maker
-            .keypair_source_envs()
+        let maker_secret_configured = keypair_source_envs(WalletRole::Maker)
             .into_iter()
             .any(|name| std::env::var(name).is_ok());
-        let taker_secret_configured = config
-            .taker
-            .keypair_source_envs()
+        let taker_secret_configured = keypair_source_envs(WalletRole::Taker)
             .into_iter()
             .any(|name| std::env::var(name).is_ok());
 
@@ -373,7 +421,7 @@ mod tests {
             return;
         }
 
-        let wallets = DemoWallets::from_env_config(&config).unwrap();
+        let wallets = DemoWallets::from_env().unwrap();
         assert_eq!(wallets.maker.role(), WalletRole::Maker);
         assert_eq!(wallets.taker.role(), WalletRole::Taker);
     }

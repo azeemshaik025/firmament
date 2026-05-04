@@ -118,7 +118,7 @@ impl AssetMetadata {
     }
 }
 
-/// Registry errors that can be shown safely to API/TUI consumers.
+/// Registry errors that can be shown safely to API and web app consumers.
 #[derive(Debug, Error)]
 pub enum AssetError {
     /// The asset is not part of the supported runtime universe.
@@ -244,13 +244,7 @@ impl AssetRegistry {
                 }
             })
             .collect();
-        let pairs = config
-            .assets
-            .pairs
-            .iter()
-            .filter(|pair| pair.enabled)
-            .map(|pair| AssetPair::new(pair.input.clone(), pair.output.clone()))
-            .collect();
+        let pairs = config.assets.enabled_pairs();
 
         Self::new(assets, pairs)
     }
@@ -460,8 +454,9 @@ mod tests {
     }
 
     #[test]
-    fn assets_supported_pairs_are_directional_and_complete() {
-        let registry = AssetRegistry::default();
+    fn assets_from_config_derives_all_directional_non_self_pairs() {
+        let config = AppConfig::default();
+        let registry = AssetRegistry::from_config(&config);
         let usdc = AssetId::from("USDC");
         let sol = AssetId::from("SOL");
         let cbbtc = AssetId::from("cbBTC");
@@ -488,6 +483,25 @@ mod tests {
             registry.validate_pair(&unsupported),
             Err(AssetError::UnsupportedAsset(_))
         ));
+    }
+
+    #[test]
+    fn assets_from_config_blacklist_disables_only_that_direction() {
+        let mut config = AppConfig::default();
+        config.assets.blacklisted_pairs = vec![crate::config::PairConfig {
+            input: AssetId::from("USDC"),
+            output: AssetId::from("SOL"),
+        }];
+        let registry = AssetRegistry::from_config(&config);
+
+        let blacklisted = AssetPair::new(AssetId::from("USDC"), AssetId::from("SOL"));
+        assert!(matches!(
+            registry.validate_pair(&blacklisted),
+            Err(AssetError::UnsupportedPair { .. })
+        ));
+
+        let reverse = AssetPair::new(AssetId::from("SOL"), AssetId::from("USDC"));
+        assert!(registry.validate_pair(&reverse).is_ok());
     }
 
     #[test]

@@ -29,7 +29,7 @@ pub enum LedgerAccountType {
     Gateway,
     /// Gateway refill/deposit in flight.
     PendingGatewayDeposit,
-    /// Jupiter rebalance or hedge transit account.
+    /// Jupiter rebalance transit account.
     Rebalance,
     /// Operational fees and costs.
     Fees,

@@ -4,25 +4,12 @@ port = 8080
 
 [solana]
 cluster = "mainnet-beta"
-rpc_url_env = "SOLANA_RPC_URL"
 commitment = "confirmed"
-
-[wallets.maker]
-role = "maker"
-private_key_env = "MAKER_PRIVATE_KEY"
-keypair_path_env = "MAKER_KEYPAIR_PATH"
-keypair_json_env = "MAKER_KEYPAIR_JSON"
-
-[wallets.taker]
-role = "taker"
-private_key_env = "TAKER_PRIVATE_KEY"
-keypair_path_env = "TAKER_KEYPAIR_PATH"
-keypair_json_env = "TAKER_KEYPAIR_JSON"
 
 [assets.policy]
 max_action_notional_usd = "2"
 max_cumulative_automation_notional_usd = "15"
-cbbtc_exception_notional_usd = "5"
+non_stable_asset_exception_notional_usd = "5"
 default_quote_expiry_seconds = 45
 base_spread_bps = 35
 
@@ -53,55 +40,29 @@ enabled = true
 target_weight = "0.05"
 quoteable_threshold_raw = 1_000
 
-[[assets.pairs]]
-input = "USDC"
-output = "SOL"
-enabled = true
-
-[[assets.pairs]]
-input = "SOL"
-output = "USDC"
-enabled = true
-
-[[assets.pairs]]
-input = "USDC"
-output = "cbBTC"
-enabled = true
-
-[[assets.pairs]]
-input = "cbBTC"
-output = "USDC"
-enabled = true
-
-[[assets.pairs]]
-input = "SOL"
-output = "cbBTC"
-enabled = true
-
-[[assets.pairs]]
-input = "cbBTC"
-output = "SOL"
-enabled = true
+# Every enabled supported asset can quote against every other enabled asset by
+# default. Add directional blacklist rows only for pairs you want to disable.
+# [[assets.blacklisted_pairs]]
+# input = "SOL"
+# output = "cbBTC"
 
 [risk]
 max_quote_notional_usd = "2"
 max_trade_notional_usd = "2"
 max_daily_notional_usd = "15"
-max_cbbtc_notional_usd = "5"
+max_non_stable_asset_notional_usd = "5"
 max_inventory_drift_bps = 1_500
 max_price_staleness_seconds = 20
 require_taker_allowlist = false
 
 [jupiter]
 enabled = true
-api_key_env = "JUPITER_API_KEY"
 base_url = "https://lite-api.jup.ag"
 max_slippage_bps = 50
 quote_timeout_millis = 2_000
 
 [gateway]
 enabled = true
-solana_address_env = "CIRCLE_GATEWAY_SOLANA_ADDRESS"
 usdc_refill_threshold_raw = 3_000_000
 usdc_refill_target_raw = 10_000_000
 max_refill_notional_usd = "2"
@@ -110,5 +71,11 @@ max_refill_fee_raw = 250_000
 [runtime]
 event_capacity = 256
 scaffold_hold_millis = 0
+# `cargo run --release` starts the maker API runtime.
 enable_protocol_workers = false
 database_path = "runtime.sqlite"
+
+[admin]
+allowed_users = ["admin"]
+session_ttl_seconds = 28800
+cookie_secure = false

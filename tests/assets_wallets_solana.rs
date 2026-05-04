@@ -1,12 +1,12 @@
 use std::fs;
 
+use firmament::assets::{AssetError, AssetRegistry, CBBTC_MINT, USDC_MINT};
+use firmament::config::SolanaConfig;
+use firmament::solana_client::{LEGACY_TOKEN_PROGRAM_ID, SolanaClient};
+use firmament::types::{AmountRaw, AssetId, AssetPair, WalletRole};
+use firmament::wallets::{DemoWallets, LoadedWallet, SOLANA_RPC_URL_ENV, keypair_source_envs};
 use rust_decimal::Decimal;
 use solana_sdk::signature::{Keypair, Signer};
-use tbd_rfq_maker_runtime::assets::{AssetError, AssetRegistry, CBBTC_MINT, USDC_MINT};
-use tbd_rfq_maker_runtime::config::{SolanaConfig, WalletConfig, WalletsConfig};
-use tbd_rfq_maker_runtime::solana_client::{LEGACY_TOKEN_PROGRAM_ID, SolanaClient};
-use tbd_rfq_maker_runtime::types::{AmountRaw, AssetId, AssetPair, WalletRole};
-use tbd_rfq_maker_runtime::wallets::{DemoWallets, LoadedWallet, WalletError};
 
 fn keypair_json(keypair: &Keypair) -> String {
     serde_json::to_string(&keypair.to_bytes().to_vec()).expect("serialize keypair")
@@ -167,18 +167,23 @@ fn wallets_load_keypair_from_base58_private_key() {
 }
 
 #[test]
-fn wallets_env_loader_reports_missing_secret_references() {
-    let config = WalletConfig {
-        role: WalletRole::Maker,
-        private_key_env: format!("MISSING_PRIVATE_KEY_{}", uuid::Uuid::now_v7().simple()),
-        keypair_path_env: format!("MISSING_PATH_{}", uuid::Uuid::now_v7().simple()),
-        keypair_json_env: format!("MISSING_JSON_{}", uuid::Uuid::now_v7().simple()),
-    };
-
-    assert!(matches!(
-        LoadedWallet::from_env_config(&config),
-        Err(WalletError::MissingKeypair { .. })
-    ));
+fn wallets_env_loader_uses_fixed_secret_references() {
+    assert_eq!(
+        keypair_source_envs(WalletRole::Maker),
+        [
+            "MAKER_PRIVATE_KEY",
+            "MAKER_KEYPAIR_PATH",
+            "MAKER_KEYPAIR_JSON"
+        ]
+    );
+    assert_eq!(
+        keypair_source_envs(WalletRole::Taker),
+        [
+            "TAKER_PRIVATE_KEY",
+            "TAKER_KEYPAIR_PATH",
+            "TAKER_KEYPAIR_JSON"
+        ]
+    );
 }
 
 #[test]
@@ -208,15 +213,10 @@ fn wallets_live_loading_skips_without_env() {
         return;
     }
 
-    let config = WalletsConfig::default();
-    let maker_secret_configured = config
-        .maker
-        .keypair_source_envs()
+    let maker_secret_configured = keypair_source_envs(WalletRole::Maker)
         .into_iter()
         .any(|name| std::env::var(name).is_ok());
-    let taker_secret_configured = config
-        .taker
-        .keypair_source_envs()
+    let taker_secret_configured = keypair_source_envs(WalletRole::Taker)
         .into_iter()
         .any(|name| std::env::var(name).is_ok());
 
@@ -225,7 +225,7 @@ fn wallets_live_loading_skips_without_env() {
         return;
     }
 
-    let wallets = DemoWallets::from_env_config(&config).expect("load live demo wallets");
+    let wallets = DemoWallets::from_env().expect("load live demo wallets");
     assert_eq!(wallets.maker.role(), WalletRole::Maker);
     assert_eq!(wallets.taker.role(), WalletRole::Taker);
 }
@@ -265,7 +265,7 @@ fn live_client_and_wallet() -> Option<(SolanaClient, LoadedWallet)> {
     }
 
     let solana_config = SolanaConfig::default();
-    let rpc_url = match std::env::var(&solana_config.rpc_url_env) {
+    let rpc_url = match std::env::var(SOLANA_RPC_URL_ENV) {
         Ok(value) if !value.trim().is_empty() => value,
         _ => {
             eprintln!("skipping live Solana RPC test; SOLANA_RPC_URL is not set");
@@ -273,9 +273,7 @@ fn live_client_and_wallet() -> Option<(SolanaClient, LoadedWallet)> {
         }
     };
 
-    let wallet_config = WalletsConfig::default().maker;
-    let has_wallet = wallet_config
-        .keypair_source_envs()
+    let has_wallet = keypair_source_envs(WalletRole::Maker)
         .into_iter()
         .any(|name| std::env::var(name).is_ok());
     if !has_wallet {
@@ -283,7 +281,7 @@ fn live_client_and_wallet() -> Option<(SolanaClient, LoadedWallet)> {
         return None;
     }
 
-    let wallet = LoadedWallet::from_env_config(&wallet_config).expect("load live maker wallet");
+    let wallet = LoadedWallet::from_maker_env().expect("load live maker wallet");
     let client = SolanaClient::new(rpc_url, solana_config.commitment).expect("build Solana client");
     Some((client, wallet))
 }

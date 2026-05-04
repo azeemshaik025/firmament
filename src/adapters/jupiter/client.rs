@@ -15,8 +15,8 @@ use solana_sdk::signature::{Keypair, Signature, Signer};
 use time::OffsetDateTime;
 use tracing::debug;
 
-use crate::adapters::solana::wallets::LoadedWallet;
-use crate::config::{AppConfig, AssetConfig, PairConfig, WalletConfig};
+use crate::adapters::solana::wallets::{LoadedWallet, SOLANA_RPC_URL_ENV};
+use crate::config::{AppConfig, AssetConfig, JUPITER_API_KEY_ENV};
 use crate::domain::types::{
     AmountRaw, AssetId, AssetPair, MintAddress, ReferencePrice, SwapQuote, SwapReceipt,
     SwapRequest, TokenAmount, TxSignature, WalletAddress, WalletRole,
@@ -131,15 +131,15 @@ impl JupiterWallet {
         }
     }
 
-    /// Load a wallet signer from the configured private-key/path/JSON source.
+    /// Load a wallet signer from the fixed private-key/path/JSON source for a role.
     ///
     /// # Errors
     ///
-    /// Returns a validation error when the configured env vars are missing or malformed.
-    pub fn from_env_config(config: &WalletConfig) -> Result<Self, AppError> {
-        let wallet = LoadedWallet::from_env_config(config).map_err(AppError::from)?;
+    /// Returns a validation error when the role env vars are missing or malformed.
+    pub fn from_role_env(role: WalletRole) -> Result<Self, AppError> {
+        let wallet = LoadedWallet::from_role_env(role).map_err(AppError::from)?;
         let keypair = wallet.try_clone_keypair().map_err(AppError::from)?;
-        Ok(Self::from_keypair(config.role, keypair))
+        Ok(Self::from_keypair(role, keypair))
     }
 
     fn role(&self) -> WalletRole {
@@ -213,15 +213,9 @@ impl JupiterClientConfig {
             .filter(|asset| asset.enabled)
             .map(JupiterAsset::from_config)
             .collect::<Result<Vec<_>, _>>()?;
-        let pairs = app_config
-            .assets
-            .pairs
-            .iter()
-            .filter(|pair| pair.enabled)
-            .map(PairConfig::pair)
-            .collect();
-        let api_key = env_nonempty(&app_config.jupiter.api_key_env);
-        let rpc_url = env_nonempty(&app_config.solana.rpc_url_env);
+        let pairs = app_config.assets.enabled_pairs();
+        let api_key = env_nonempty(JUPITER_API_KEY_ENV);
+        let rpc_url = env_nonempty(SOLANA_RPC_URL_ENV);
 
         Ok(Self {
             base_url: app_config.jupiter.base_url.clone(),
@@ -1353,8 +1347,7 @@ mod tests {
             eprintln!("skipping live Jupiter test; JUPITER_API_KEY is not set");
             return None;
         };
-        let wallet_config = crate::config::WalletsConfig::default().maker;
-        let Ok(wallet) = JupiterWallet::from_env_config(&wallet_config) else {
+        let Ok(wallet) = JupiterWallet::from_role_env(WalletRole::Maker) else {
             eprintln!("skipping live Jupiter test; maker keypair env vars are not set");
             return None;
         };
@@ -1394,8 +1387,7 @@ mod tests {
             eprintln!("skipping live Jupiter cbBTC swap; SOLANA_RPC_URL is not set");
             return None;
         };
-        let wallet_config = crate::config::WalletsConfig::default().maker;
-        let Ok(wallet) = JupiterWallet::from_env_config(&wallet_config) else {
+        let Ok(wallet) = JupiterWallet::from_role_env(WalletRole::Maker) else {
             eprintln!("skipping live Jupiter cbBTC swap; maker keypair env vars are not set");
             return None;
         };

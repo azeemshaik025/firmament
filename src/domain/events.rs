@@ -1,4 +1,4 @@
-//! Runtime event contracts consumed by API, TUI, and ledger projections.
+//! Runtime event contracts consumed by API, web app, and ledger projections.
 
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -41,7 +41,7 @@ pub enum RuntimeEvent {
     Quote(QuoteEvent),
     /// HTLC settlement event.
     Settlement(SettlementEvent),
-    /// Jupiter swap or hedge event.
+    /// Jupiter swap or rebalance event.
     Swap(SwapEvent),
     /// Circle Gateway event.
     Gateway(GatewayEvent),
@@ -155,7 +155,7 @@ pub enum SettlementEvent {
     },
 }
 
-/// Jupiter swap, rebalance, and hedge events.
+/// Jupiter swap and rebalance events.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SwapEvent {

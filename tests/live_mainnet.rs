@@ -1,16 +1,14 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use firmament::assets::AssetRegistry;
+use firmament::rfq::{RfqRequest, RfqResponse};
+use firmament::solana_client::SolanaClient;
+use firmament::types::{AmountRaw, AssetId, MintAddress, SettlementStatus, WalletAddress};
+use firmament::wallets::{LoadedWallet, SOLANA_RPC_URL_ENV};
+use firmament::{AppConfig, AppError, AppResult, bootstrap_live_runtime};
 use rust_decimal::Decimal;
 use solana_sdk::{pubkey::Pubkey, transaction::Transaction};
-use tbd_rfq_maker_runtime::assets::AssetRegistry;
-use tbd_rfq_maker_runtime::rfq::{RfqRequest, RfqResponse};
-use tbd_rfq_maker_runtime::solana_client::SolanaClient;
-use tbd_rfq_maker_runtime::types::{
-    AmountRaw, AssetId, MintAddress, SettlementStatus, WalletAddress,
-};
-use tbd_rfq_maker_runtime::wallets::LoadedWallet;
-use tbd_rfq_maker_runtime::{AppConfig, AppError, AppResult, bootstrap_live_runtime};
 
 const USDC_MINT: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const CBBTC_MINT: &str = "cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij";
@@ -38,10 +36,10 @@ async fn live_cbbtc_rfq_accept_skips_without_explicit_opt_in() {
     config.runtime.database_path = temp_live_db_path();
     config.assets.policy.max_action_notional_usd = Decimal::ZERO;
     config.assets.policy.max_cumulative_automation_notional_usd = Decimal::ZERO;
-    config.assets.policy.cbbtc_exception_notional_usd = Decimal::ZERO;
+    config.assets.policy.non_stable_asset_exception_notional_usd = Decimal::ZERO;
 
-    let maker = LoadedWallet::from_env_config(&config.wallets.maker).expect("load maker wallet");
-    let taker = LoadedWallet::from_env_config(&config.wallets.taker).expect("load taker wallet");
+    let maker = LoadedWallet::from_maker_env().expect("load maker wallet");
+    let taker = LoadedWallet::from_taker_env().expect("load taker wallet");
     ensure_token_account_exists(&config, &maker, &taker.pubkey(), &AssetId::from("cbBTC"))
         .await
         .expect("ensure taker cbBTC ATA");
@@ -90,10 +88,7 @@ async fn ensure_token_account_exists(
     wallet: &Pubkey,
     asset_id: &AssetId,
 ) -> AppResult<Pubkey> {
-    let solana = SolanaClient::new(
-        env_required(&config.solana.rpc_url_env)?,
-        &config.solana.commitment,
-    )?;
+    let solana = SolanaClient::new(env_required(SOLANA_RPC_URL_ENV)?, &config.solana.commitment)?;
     let registry = AssetRegistry::from_config(config);
     let asset = registry.require_asset(asset_id)?;
     let ata = solana.associated_token_address(wallet, asset).await?;

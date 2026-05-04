@@ -28,8 +28,6 @@ pub enum PnlCategory {
     Fees,
     /// Jupiter rebalance cost.
     RebalanceCost,
-    /// Hedge execution or carry cost.
-    HedgeCost,
 }
 
 impl PnlCategory {
@@ -39,7 +37,6 @@ impl PnlCategory {
             Self::RealizedSpread => "realized_spread",
             Self::Fees => "fees",
             Self::RebalanceCost => "rebalance_cost",
-            Self::HedgeCost => "hedge_cost",
         }
     }
 }
@@ -58,7 +55,6 @@ impl TryFrom<&str> for PnlCategory {
             "realized_spread" => Ok(Self::RealizedSpread),
             "fees" => Ok(Self::Fees),
             "rebalance_cost" => Ok(Self::RebalanceCost),
-            "hedge_cost" => Ok(Self::HedgeCost),
             _ => Err(AppError::persistence(format!(
                 "invalid P&L category: {value}"
             ))),
@@ -210,8 +206,6 @@ pub struct PnlSummary {
     pub fees_usdc: Decimal,
     /// Rebalance costs in USDC, normally negative.
     pub rebalance_cost_usdc: Decimal,
-    /// Hedge costs in USDC, normally negative.
-    pub hedge_cost_usdc: Decimal,
     /// Net total in USDC.
     pub net_usdc: Decimal,
 }
@@ -302,13 +296,10 @@ impl<'db> PnlRepository<'db> {
                     PnlCategory::RealizedSpread => summary.realized_spread_usdc += value,
                     PnlCategory::Fees => summary.fees_usdc += value,
                     PnlCategory::RebalanceCost => summary.rebalance_cost_usdc += value,
-                    PnlCategory::HedgeCost => summary.hedge_cost_usdc += value,
                 }
             }
-            summary.net_usdc = summary.realized_spread_usdc
-                + summary.fees_usdc
-                + summary.rebalance_cost_usdc
-                + summary.hedge_cost_usdc;
+            summary.net_usdc =
+                summary.realized_spread_usdc + summary.fees_usdc + summary.rebalance_cost_usdc;
             Ok(summary)
         })
     }

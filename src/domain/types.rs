@@ -88,6 +88,12 @@ impl Display for WalletAddress {
     }
 }
 
+impl From<&str> for WalletAddress {
+    fn from(value: &str) -> Self {
+        Self::new(value)
+    }
+}
+
 /// Role of a configured wallet within the demo runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -272,7 +278,7 @@ pub enum RiskDecision {
     },
     /// Risk checks failed and the runtime must reject the action.
     Rejected {
-        /// Stable rejection reason for API, TUI, and ledger consumers.
+        /// Stable rejection reason for API, web app, and ledger consumers.
         reason: RejectionReason,
         /// Human-readable details for the operator.
         details: Vec<String>,
@@ -295,7 +301,7 @@ pub enum RejectionReason {
     CumulativeCapExceeded,
     /// Inventory is below the configured quoteable threshold.
     InventoryBelowQuoteableThreshold,
-    /// Spot exposure exceeds configured limits.
+    /// Configured exposure exceeds risk limits.
     ExposureLimitExceeded,
     /// Reference price data is too old to quote safely.
     StalePrice,
@@ -374,6 +380,33 @@ pub struct HtlcInitiation {
     pub hashlock: String,
     /// Refund deadline.
     pub expires_at: OffsetDateTime,
+}
+
+/// HTLC initiation request where the funding wallet is an external browser
+/// wallet instead of a server-owned configured wallet role.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalHtlcInitiation {
+    /// Trade this escrow belongs to.
+    pub trade_id: TradeId,
+    /// Browser wallet funding the escrow.
+    pub funder: WalletAddress,
+    /// Wallet allowed to redeem the escrow.
+    pub redeemer: WalletAddress,
+    /// Asset and amount placed into escrow.
+    pub amount: TokenAmount,
+    /// Hash preimage commitment encoded by the future HTLC client.
+    pub hashlock: String,
+    /// Refund deadline.
+    pub expires_at: OffsetDateTime,
+}
+
+/// Serialized unsigned transaction returned to a browser wallet for signing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnsignedWalletTransaction {
+    /// Base64-encoded Solana transaction bytes.
+    pub transaction_base64: String,
+    /// Latest blockhash used by the transaction.
+    pub recent_blockhash: String,
 }
 
 /// Current high-level status of a settlement flow.
@@ -463,8 +496,6 @@ pub enum LedgerEntryCategory {
     Fees,
     /// Rebalance movement.
     Rebalance,
-    /// Hedge movement.
-    Hedge,
     /// P&L estimate movement.
     ProfitAndLoss,
 }

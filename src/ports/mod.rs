@@ -4,9 +4,10 @@ use async_trait::async_trait;
 
 use crate::domain::events::RuntimeEvent;
 use crate::domain::types::{
-    AssetId, AssetPair, BalanceSnapshot, GatewayReceipt, GatewayRefillRequest, HtlcInitiation,
-    HtlcReceipt, LedgerMovement, ReferencePrice, SettlementStatus, SwapQuote, SwapReceipt,
-    SwapRequest, TradeId, WalletRole,
+    AssetId, AssetPair, BalanceSnapshot, ExternalHtlcInitiation, GatewayReceipt,
+    GatewayRefillRequest, HtlcInitiation, HtlcReceipt, LedgerMovement, ReferencePrice,
+    SettlementStatus, SwapQuote, SwapReceipt, SwapRequest, TradeId, TxSignature,
+    UnsignedWalletTransaction, WalletAddress, WalletRole,
 };
 use crate::error::AppError;
 
@@ -22,7 +23,7 @@ pub trait PriceProvider: Send + Sync {
     async fn reference_price(&self, pair: AssetPair) -> Result<ReferencePrice, AppError>;
 }
 
-/// Quotes and executes spot swaps used for rebalance and hedge actions.
+/// Quotes and executes spot swaps used for rebalance actions.
 #[async_trait]
 pub trait SwapExecutor: Send + Sync {
     /// Return an executable swap quote without submitting a transaction.
@@ -45,6 +46,18 @@ pub trait SwapExecutor: Send + Sync {
 /// Initiates, redeems, refunds, and queries Solana HTLC settlement flows.
 #[async_trait]
 pub trait HtlcClient: Send + Sync {
+    /// Return a configured server-owned wallet address.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the role is not configured for this runtime.
+    async fn wallet_address(&self, role: WalletRole) -> Result<WalletAddress, AppError> {
+        let _ = role;
+        Err(AppError::unsupported(
+            "HTLC client does not expose wallet addresses",
+        ))
+    }
+
     /// Initiate an HTLC escrow for a trade.
     ///
     /// # Errors
@@ -52,6 +65,92 @@ pub trait HtlcClient: Send + Sync {
     /// Returns an error when instruction construction, signing, submission, or
     /// confirmation fails.
     async fn initiate(&self, request: HtlcInitiation) -> Result<HtlcReceipt, AppError>;
+
+    /// Initiate a server-funded HTLC whose redeemer is an external browser wallet.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when instruction construction, signing, submission, or
+    /// confirmation fails.
+    async fn initiate_with_external_redeemer(
+        &self,
+        request: HtlcInitiation,
+        redeemer: WalletAddress,
+    ) -> Result<HtlcReceipt, AppError> {
+        let _ = request;
+        let _ = redeemer;
+        Err(AppError::unsupported(
+            "HTLC client does not support external redeemers",
+        ))
+    }
+
+    /// Build an unsigned browser-funded HTLC lock transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the transaction cannot be constructed.
+    async fn build_external_initiate(
+        &self,
+        request: ExternalHtlcInitiation,
+    ) -> Result<UnsignedWalletTransaction, AppError> {
+        let _ = request;
+        Err(AppError::unsupported(
+            "HTLC client does not support browser-funded locks",
+        ))
+    }
+
+    /// Record a submitted browser-funded HTLC lock transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the signature cannot be validated or confirmed.
+    async fn record_external_initiate(
+        &self,
+        request: ExternalHtlcInitiation,
+        signature: TxSignature,
+    ) -> Result<HtlcReceipt, AppError> {
+        let _ = request;
+        let _ = signature;
+        Err(AppError::unsupported(
+            "HTLC client does not support browser-funded lock recording",
+        ))
+    }
+
+    /// Build an unsigned browser redeem transaction for a server-funded HTLC.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the transaction cannot be constructed.
+    async fn build_external_redeem(
+        &self,
+        trade_id: TradeId,
+        redeemer: WalletAddress,
+        preimage: String,
+    ) -> Result<UnsignedWalletTransaction, AppError> {
+        let _ = trade_id;
+        let _ = redeemer;
+        let _ = preimage;
+        Err(AppError::unsupported(
+            "HTLC client does not support browser redeem construction",
+        ))
+    }
+
+    /// Record a submitted browser redeem transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the signature cannot be validated or confirmed.
+    async fn record_external_redeem(
+        &self,
+        trade_id: TradeId,
+        signature: TxSignature,
+    ) -> Result<HtlcReceipt, AppError> {
+        let _ = trade_id;
+        let _ = signature;
+        Err(AppError::unsupported(
+            "HTLC client does not support browser redeem recording",
+        ))
+    }
 
     /// Redeem an HTLC escrow using a preimage.
     ///
@@ -111,7 +210,7 @@ pub trait BalanceReader: Send + Sync {
     async fn balances(&self, wallet: WalletRole) -> Result<BalanceSnapshot, AppError>;
 }
 
-/// Publishes runtime events to a stream, buffer, API projection, or TUI.
+/// Publishes runtime events to a stream, buffer, API projection, or web app.
 #[async_trait]
 pub trait RuntimeEventSink: Send + Sync {
     /// Publish a runtime event.

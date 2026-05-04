@@ -36,7 +36,7 @@ impl RuntimeHandle {
         }
     }
 
-    /// Clone the latest runtime projection for read-only API/TUI consumers.
+    /// Clone the latest runtime projection for read-only API and web app consumers.
     pub async fn snapshot(&self) -> RuntimeState {
         self.inner.read().await.clone()
     }
@@ -86,7 +86,7 @@ impl RuntimeEventSink for RuntimeHandle {
     }
 }
 
-/// Runtime read projection consumed by future API and TUI layers.
+/// Runtime read projection consumed by API and web app layers.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RuntimeState {
     /// Runtime invocation identifier.
@@ -101,11 +101,11 @@ pub struct RuntimeState {
     pub pnl: PnlProjection,
     /// RFQ placeholder projection.
     pub rfq: RfqProjection,
-    /// Rebalance and hedge placeholder projection.
+    /// Rebalance placeholder projection.
     pub rebalance: RebalanceProjection,
     /// Gateway placeholder projection.
     pub gateway: GatewayProjection,
-    /// Recent runtime events for API/TUI consumers.
+    /// Recent runtime events for API and web app consumers.
     pub recent_events: Vec<RuntimeEvent>,
 }
 
@@ -336,8 +336,6 @@ pub struct PnlProjection {
     pub realized_spread_usdc_estimate: Decimal,
     /// Fee estimate in USDC.
     pub fees_usdc_estimate: Decimal,
-    /// Hedge cost estimate in USDC.
-    pub hedge_cost_usdc_estimate: Decimal,
     /// Rebalance cost estimate in USDC.
     pub rebalance_cost_usdc_estimate: Decimal,
     /// Net estimate in USDC.
@@ -349,7 +347,6 @@ impl Default for PnlProjection {
         Self {
             realized_spread_usdc_estimate: Decimal::ZERO,
             fees_usdc_estimate: Decimal::ZERO,
-            hedge_cost_usdc_estimate: Decimal::ZERO,
             rebalance_cost_usdc_estimate: Decimal::ZERO,
             net_usdc_estimate: Decimal::ZERO,
         }
@@ -369,17 +366,13 @@ pub struct RfqProjection {
     pub active_settlement_count: usize,
 }
 
-/// Rebalance and hedge placeholder projection.
+/// Rebalance placeholder projection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebalanceProjection {
     /// Pending Jupiter swap count.
     pub pending_swap_count: usize,
     /// Completed Jupiter swap count.
     pub completed_swap_count: usize,
-    /// Pending hedge action count.
-    pub pending_hedge_count: usize,
-    /// Completed hedge action count.
-    pub completed_hedge_count: usize,
 }
 
 /// Gateway placeholder projection.

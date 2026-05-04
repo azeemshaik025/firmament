@@ -5,21 +5,50 @@ use std::path::Path;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
+use crate::adapters::solana::wallets::{SOLANA_RPC_URL_ENV, keypair_source_envs};
 use crate::domain::types::{AmountRaw, AssetId, AssetPair, MintAddress, WalletRole};
 use crate::error::{AppError, AppResult};
 
 const CONFIG_FILE: &str = "config.toml";
 
+/// Environment variable containing the Jupiter API key.
+pub const JUPITER_API_KEY_ENV: &str = "JUPITER_API_KEY";
+/// Environment variable containing the approved Circle Gateway Solana address.
+pub const CIRCLE_GATEWAY_SOLANA_ADDRESS_ENV: &str = "CIRCLE_GATEWAY_SOLANA_ADDRESS";
+/// Environment variable containing username-to-Argon2id password hashes.
+pub const FIRMAMENT_ADMIN_PASSWORD_HASHES_ENV: &str = "FIRMAMENT_ADMIN_PASSWORD_HASHES";
+/// Environment variable containing the HMAC session-cookie signing secret.
+pub const FIRMAMENT_ADMIN_SESSION_SECRET_ENV: &str = "FIRMAMENT_ADMIN_SESSION_SECRET";
+
+/// Live protocol credential scope for runtime startup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProtocolWorkerScope {
+    /// Maker runtime: API/workers with maker-owned inventory only.
+    Maker,
+    /// Legacy local two-wallet scripted taker flow.
+    Demo,
+}
+
+impl ProtocolWorkerScope {
+    /// Return the wallet roles required for this live startup scope.
+    #[must_use]
+    pub const fn required_wallet_roles(self) -> &'static [WalletRole] {
+        match self {
+            Self::Maker => &[WalletRole::Maker],
+            Self::Demo => &[WalletRole::Maker, WalletRole::Taker],
+        }
+    }
+}
+
 /// Complete application configuration after file/default merging.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
+#[serde(deny_unknown_fields)]
 pub struct AppConfig {
     /// HTTP API bind settings.
     pub http: HttpConfig,
     /// Solana RPC and cluster settings.
     pub solana: SolanaConfig,
-    /// Demo wallet secret references.
-    pub wallets: WalletsConfig,
     /// Asset universe and quote policy.
     pub assets: AssetsConfig,
     /// Risk caps and stale-data limits.
@@ -28,6 +57,8 @@ pub struct AppConfig {
     pub jupiter: JupiterConfig,
     /// Circle Gateway settings.
     pub gateway: GatewayConfig,
+    /// Admin login and session settings.
+    pub admin: AdminConfig,
     /// Runtime startup and worker settings.
     pub runtime: RuntimeConfig,
 }
@@ -70,10 +101,6 @@ impl AppConfig {
             return Err(AppError::validation("http.bind_address must not be empty"));
         }
 
-        if self.solana.rpc_url_env.trim().is_empty() {
-            return Err(AppError::validation("solana.rpc_url_env must not be empty"));
-        }
-
         if self.assets.supported.is_empty() {
             return Err(AppError::validation(
                 "assets.supported must include at least one asset",
@@ -84,9 +111,9 @@ impl AppConfig {
             asset.validate()?;
         }
 
-        if self.assets.pairs.is_empty() {
+        if self.assets.enabled_pairs().is_empty() {
             return Err(AppError::validation(
-                "assets.pairs must include at least one directional pair",
+                "assets must leave at least one enabled directional pair",
             ));
         }
 
@@ -116,6 +143,18 @@ impl AppConfig {
             ));
         }
 
+        if self.admin.allowed_users.is_empty() {
+            return Err(AppError::validation(
+                "admin.allowed_users must include at least one username",
+            ));
+        }
+
+        if self.admin.session_ttl_seconds == 0 {
+            return Err(AppError::validation(
+                "admin.session_ttl_seconds must be greater than zero",
+            ));
+        }
+
         Ok(())
     }
 
@@ -125,37 +164,50 @@ impl AppConfig {
     /// # Errors
     ///
     /// Returns a non-secret config error when required live env references are
-    /// missing or when live-only guards, such as cbBTC mint verification, fail.
+    /// missing or when live-only guards, such as placeholder mint verification, fail.
     pub fn validate_protocol_workers_ready(&self) -> AppResult<()> {
+        self.validate_protocol_workers_ready_for(ProtocolWorkerScope::Maker)
+    }
+
+    /// Validate that live protocol workers can start for a specific runtime
+    /// scope.
+    ///
+    /// # Errors
+    ///
+    /// Returns a non-secret config error when required live env references are
+    /// missing or when live-only guards, such as placeholder mint verification, fail.
+    pub fn validate_protocol_workers_ready_for(&self, scope: ProtocolWorkerScope) -> AppResult<()> {
         self.validate()?;
 
         if !self.runtime.enable_protocol_workers {
             return Ok(());
         }
 
-        if let Some(asset) = self
-            .assets
-            .supported
-            .iter()
-            .find(|asset| asset.id.as_str() == "cbBTC")
-        {
-            if asset.mint.as_str() == "VERIFY_CBBTC_SOLANA_MINT_BEFORE_LIVE_USE" {
-                return Err(AppError::validation(
-                    "live protocol workers require a verified cbBTC Solana mint; replace VERIFY_CBBTC_SOLANA_MINT_BEFORE_LIVE_USE before funding",
-                ));
-            }
+        if let Some(asset) = self.assets.supported.iter().find(|asset| {
+            asset
+                .mint
+                .as_str()
+                .trim()
+                .to_ascii_uppercase()
+                .starts_with("VERIFY_")
+        }) {
+            return Err(AppError::validation(format!(
+                "live protocol workers require a verified Solana mint for {}; replace placeholder mint {} before funding",
+                asset.id, asset.mint
+            )));
         }
 
-        require_env(&self.solana.rpc_url_env)?;
-        require_wallet_env(&self.wallets.maker)?;
-        require_wallet_env(&self.wallets.taker)?;
+        require_env(SOLANA_RPC_URL_ENV)?;
+        for role in scope.required_wallet_roles() {
+            require_wallet_env(*role)?;
+        }
 
         if self.jupiter.enabled {
-            require_env(&self.jupiter.api_key_env)?;
+            require_env(JUPITER_API_KEY_ENV)?;
         }
 
         if self.gateway.enabled {
-            require_env(&self.gateway.solana_address_env)?;
+            require_env(CIRCLE_GATEWAY_SOLANA_ADDRESS_ENV)?;
         }
 
         Ok(())
@@ -171,6 +223,7 @@ impl AppConfig {
 /// HTTP API settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[serde(deny_unknown_fields)]
 pub struct HttpConfig {
     /// Address for future Axum bind.
     pub bind_address: String,
@@ -182,19 +235,18 @@ impl Default for HttpConfig {
     fn default() -> Self {
         Self {
             bind_address: "127.0.0.1".to_owned(),
-            port: 8080,
+            port: 5050,
         }
     }
 }
 
-/// Solana RPC settings. Secret values remain referenced by environment name.
+/// Solana RPC settings. Secret values are loaded from fixed environment names.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[serde(deny_unknown_fields)]
 pub struct SolanaConfig {
     /// Solana cluster label.
     pub cluster: String,
-    /// Environment variable name that stores the RPC URL.
-    pub rpc_url_env: String,
     /// Commitment level label.
     pub commitment: String,
 }
@@ -203,86 +255,20 @@ impl Default for SolanaConfig {
     fn default() -> Self {
         Self {
             cluster: "mainnet-beta".to_owned(),
-            rpc_url_env: "SOLANA_RPC_URL".to_owned(),
             commitment: "confirmed".to_owned(),
         }
     }
 }
 
-/// Demo wallet config.
+/// Asset universe, directional pair overrides, and quote policy.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct WalletsConfig {
-    /// Maker/operator wallet secret references.
-    pub maker: WalletConfig,
-    /// Taker/app wallet secret references.
-    pub taker: WalletConfig,
-}
-
-impl Default for WalletsConfig {
-    fn default() -> Self {
-        Self {
-            maker: WalletConfig {
-                role: WalletRole::Maker,
-                private_key_env: "MAKER_PRIVATE_KEY".to_owned(),
-                keypair_path_env: "MAKER_KEYPAIR_PATH".to_owned(),
-                keypair_json_env: "MAKER_KEYPAIR_JSON".to_owned(),
-            },
-            taker: WalletConfig {
-                role: WalletRole::Taker,
-                private_key_env: "TAKER_PRIVATE_KEY".to_owned(),
-                keypair_path_env: "TAKER_KEYPAIR_PATH".to_owned(),
-                keypair_json_env: "TAKER_KEYPAIR_JSON".to_owned(),
-            },
-        }
-    }
-}
-
-/// Secret references for one wallet role.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct WalletConfig {
-    /// Role this wallet config applies to.
-    pub role: WalletRole,
-    /// Environment variable name containing a base58 Solana private key.
-    pub private_key_env: String,
-    /// Environment variable name containing a keypair path.
-    pub keypair_path_env: String,
-    /// Environment variable name containing keypair JSON.
-    pub keypair_json_env: String,
-}
-
-impl Default for WalletConfig {
-    fn default() -> Self {
-        Self {
-            role: WalletRole::Maker,
-            private_key_env: "MAKER_PRIVATE_KEY".to_owned(),
-            keypair_path_env: "MAKER_KEYPAIR_PATH".to_owned(),
-            keypair_json_env: "MAKER_KEYPAIR_JSON".to_owned(),
-        }
-    }
-}
-
-impl WalletConfig {
-    /// Return the accepted secret source env names for this wallet.
-    #[must_use]
-    pub fn keypair_source_envs(&self) -> [&str; 3] {
-        [
-            self.private_key_env.as_str(),
-            self.keypair_path_env.as_str(),
-            self.keypair_json_env.as_str(),
-        ]
-    }
-}
-
-/// Asset universe, directional pair support, and quote policy.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(deny_unknown_fields)]
 pub struct AssetsConfig {
     /// Supported asset metadata.
     pub supported: Vec<AssetConfig>,
-    /// Directional pair enablement.
-    pub pairs: Vec<PairConfig>,
+    /// Directional pairs excluded from the default enabled-asset cross-product.
+    pub blacklisted_pairs: Vec<PairConfig>,
     /// Non-secret quote and inventory policy.
     pub policy: PolicyConfig,
 }
@@ -291,15 +277,40 @@ impl Default for AssetsConfig {
     fn default() -> Self {
         Self {
             supported: default_assets(),
-            pairs: default_pairs(),
+            blacklisted_pairs: Vec::new(),
             policy: PolicyConfig::default(),
         }
+    }
+}
+
+impl AssetsConfig {
+    /// Return enabled directional pairs as every enabled asset to every other
+    /// enabled asset, minus directional blacklist overrides.
+    #[must_use]
+    pub fn enabled_pairs(&self) -> Vec<AssetPair> {
+        self.supported
+            .iter()
+            .filter(|asset| asset.enabled)
+            .flat_map(|input| {
+                self.supported
+                    .iter()
+                    .filter(|output| output.enabled && output.id != input.id)
+                    .filter(|output| {
+                        !self
+                            .blacklisted_pairs
+                            .iter()
+                            .any(|pair| pair.input == input.id && pair.output == output.id)
+                    })
+                    .map(|output| AssetPair::new(input.id.clone(), output.id.clone()))
+            })
+            .collect()
     }
 }
 
 /// Asset metadata and inventory policy.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[serde(deny_unknown_fields)]
 pub struct AssetConfig {
     /// Asset identifier used in API and events.
     pub id: AssetId,
@@ -375,16 +386,15 @@ impl Default for AssetConfig {
     }
 }
 
-/// Directional pair support config.
+/// Directional pair override config.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[serde(deny_unknown_fields)]
 pub struct PairConfig {
     /// Input asset.
     pub input: AssetId,
     /// Output asset.
     pub output: AssetId,
-    /// Whether this pair can be quoted.
-    pub enabled: bool,
 }
 
 impl PairConfig {
@@ -400,7 +410,6 @@ impl Default for PairConfig {
         Self {
             input: AssetId::from("USDC"),
             output: AssetId::from("SOL"),
-            enabled: true,
         }
     }
 }
@@ -408,13 +417,14 @@ impl Default for PairConfig {
 /// Non-secret action caps and quote defaults.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[serde(deny_unknown_fields)]
 pub struct PolicyConfig {
     /// Default per-action cap in estimated USD.
     pub max_action_notional_usd: Decimal,
     /// Cumulative automation cap in estimated USD.
     pub max_cumulative_automation_notional_usd: Decimal,
-    /// cbBTC demo exception cap in estimated USD.
-    pub cbbtc_exception_notional_usd: Decimal,
+    /// One-off route-minimum exception cap for non-native, non-stable assets.
+    pub non_stable_asset_exception_notional_usd: Decimal,
     /// Default quote expiry.
     pub default_quote_expiry_seconds: u64,
     /// Base maker spread in basis points.
@@ -426,7 +436,7 @@ impl Default for PolicyConfig {
         Self {
             max_action_notional_usd: Decimal::new(2, 0),
             max_cumulative_automation_notional_usd: Decimal::new(15, 0),
-            cbbtc_exception_notional_usd: Decimal::new(5, 0),
+            non_stable_asset_exception_notional_usd: Decimal::new(5, 0),
             default_quote_expiry_seconds: 45,
             base_spread_bps: 35,
         }
@@ -436,6 +446,7 @@ impl Default for PolicyConfig {
 /// Risk limit settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[serde(deny_unknown_fields)]
 pub struct RiskConfig {
     /// Maximum quote notional in estimated USD.
     pub max_quote_notional_usd: Decimal,
@@ -443,8 +454,8 @@ pub struct RiskConfig {
     pub max_trade_notional_usd: Decimal,
     /// Maximum daily notional in estimated USD.
     pub max_daily_notional_usd: Decimal,
-    /// cbBTC-specific exception cap.
-    pub max_cbbtc_notional_usd: Decimal,
+    /// Maximum exposure notional for non-native, non-stable assets.
+    pub max_non_stable_asset_notional_usd: Decimal,
     /// Maximum inventory drift before rebalancing is needed.
     pub max_inventory_drift_bps: u16,
     /// Maximum allowed reference price age.
@@ -459,7 +470,7 @@ impl Default for RiskConfig {
             max_quote_notional_usd: Decimal::new(2, 0),
             max_trade_notional_usd: Decimal::new(2, 0),
             max_daily_notional_usd: Decimal::new(15, 0),
-            max_cbbtc_notional_usd: Decimal::new(5, 0),
+            max_non_stable_asset_notional_usd: Decimal::new(5, 0),
             max_inventory_drift_bps: 1_500,
             max_price_staleness_seconds: 20,
             require_taker_allowlist: false,
@@ -470,11 +481,10 @@ impl Default for RiskConfig {
 /// Jupiter Swap API V2 config.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[serde(deny_unknown_fields)]
 pub struct JupiterConfig {
     /// Whether Jupiter-backed actions are enabled for future workers.
     pub enabled: bool,
-    /// Environment variable name containing the Jupiter API key.
-    pub api_key_env: String,
     /// Base URL for Jupiter Swap API V2.
     pub base_url: String,
     /// Maximum slippage cap in basis points.
@@ -487,7 +497,6 @@ impl Default for JupiterConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            api_key_env: "JUPITER_API_KEY".to_owned(),
             base_url: "https://lite-api.jup.ag".to_owned(),
             max_slippage_bps: 50,
             quote_timeout_millis: 2_000,
@@ -495,15 +504,13 @@ impl Default for JupiterConfig {
     }
 }
 
-/// Circle Gateway config. Values are environment variable names, not secrets.
+/// Circle Gateway non-secret policy config.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[serde(deny_unknown_fields)]
 pub struct GatewayConfig {
     /// Whether Gateway-backed actions are enabled for future workers.
     pub enabled: bool,
-    /// Environment variable name containing the approved Gateway Solana
-    /// depositor address.
-    pub solana_address_env: String,
     /// Refill threshold in raw USDC units.
     pub usdc_refill_threshold_raw: AmountRaw,
     /// Refill target in raw USDC units.
@@ -518,7 +525,6 @@ impl Default for GatewayConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            solana_address_env: "CIRCLE_GATEWAY_SOLANA_ADDRESS".to_owned(),
             usdc_refill_threshold_raw: AmountRaw::new(3_000_000),
             usdc_refill_target_raw: AmountRaw::new(10_000_000),
             max_refill_notional_usd: Decimal::new(2, 0),
@@ -527,9 +533,33 @@ impl Default for GatewayConfig {
     }
 }
 
+/// Admin login/session config. Secrets are supplied through env vars.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+#[serde(deny_unknown_fields)]
+pub struct AdminConfig {
+    /// Usernames that are allowed to authenticate as demo operators.
+    pub allowed_users: Vec<String>,
+    /// Session cookie lifetime.
+    pub session_ttl_seconds: u64,
+    /// Whether the session cookie should include the Secure attribute.
+    pub cookie_secure: bool,
+}
+
+impl Default for AdminConfig {
+    fn default() -> Self {
+        Self {
+            allowed_users: vec!["admin".to_owned()],
+            session_ttl_seconds: 8 * 60 * 60,
+            cookie_secure: false,
+        }
+    }
+}
+
 /// Runtime startup controls.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[serde(deny_unknown_fields)]
 pub struct RuntimeConfig {
     /// Maximum recent events held in the in-memory projection.
     pub event_capacity: usize,
@@ -565,8 +595,8 @@ fn require_env(name: &str) -> AppResult<()> {
     )))
 }
 
-fn require_wallet_env(config: &WalletConfig) -> AppResult<()> {
-    let source_envs = config.keypair_source_envs();
+fn require_wallet_env(role: WalletRole) -> AppResult<()> {
+    let source_envs = keypair_source_envs(role);
     let present_sources = source_envs
         .iter()
         .filter(|name| env_is_present(name))
@@ -577,12 +607,12 @@ fn require_wallet_env(config: &WalletConfig) -> AppResult<()> {
         1 => Ok(()),
         0 => Err(AppError::config(format!(
             "live protocol workers require a keypair source for {:?}: set exactly one of {}",
-            config.role,
+            role,
             source_envs.join(", ")
         ))),
         _ => Err(AppError::config(format!(
             "live protocol workers require exactly one keypair source for {:?}: set only one of {}; currently set {}",
-            config.role,
+            role,
             source_envs.join(", "),
             present_sources.join(", ")
         ))),
@@ -616,45 +646,6 @@ fn default_assets() -> Vec<AssetConfig> {
             enabled: true,
             target_weight: Decimal::new(5, 2),
             quoteable_threshold_raw: AmountRaw::new(1_000),
-        },
-    ]
-}
-
-fn default_pairs() -> Vec<PairConfig> {
-    let usdc = AssetId::from("USDC");
-    let sol = AssetId::from("SOL");
-    let cbbtc = AssetId::from("cbBTC");
-
-    vec![
-        PairConfig {
-            input: usdc.clone(),
-            output: sol.clone(),
-            enabled: true,
-        },
-        PairConfig {
-            input: sol.clone(),
-            output: usdc.clone(),
-            enabled: true,
-        },
-        PairConfig {
-            input: usdc.clone(),
-            output: cbbtc.clone(),
-            enabled: true,
-        },
-        PairConfig {
-            input: cbbtc.clone(),
-            output: usdc,
-            enabled: true,
-        },
-        PairConfig {
-            input: sol.clone(),
-            output: cbbtc.clone(),
-            enabled: true,
-        },
-        PairConfig {
-            input: cbbtc,
-            output: sol,
-            enabled: true,
         },
     ]
 }

@@ -1180,11 +1180,11 @@ mod tests {
             eprintln!("skipping live Gateway deposit: SOLANA_RPC_URL is not set");
             return;
         };
-        let wallet_config = crate::config::WalletsConfig::default().maker;
-        if !wallet_config
-            .keypair_source_envs()
-            .into_iter()
-            .any(|name| std::env::var(name).is_ok())
+        if !crate::adapters::solana::wallets::keypair_source_envs(
+            crate::domain::types::WalletRole::Maker,
+        )
+        .into_iter()
+        .any(|name| std::env::var(name).is_ok())
         {
             eprintln!("skipping live Gateway deposit: maker keypair env vars are not set");
             return;
@@ -1194,8 +1194,8 @@ mod tests {
             return;
         };
 
-        let maker = crate::adapters::solana::wallets::LoadedWallet::from_env_config(&wallet_config)
-            .expect("load maker");
+        let maker =
+            crate::adapters::solana::wallets::LoadedWallet::from_maker_env().expect("load maker");
         let depositor = parse_pubkey("CIRCLE_GATEWAY_SOLANA_ADDRESS", &depositor)
             .expect("valid Gateway depositor pubkey");
         assert_eq!(
@@ -1313,11 +1313,11 @@ mod tests {
             eprintln!("skipping live Gateway refill: SOLANA_RPC_URL is not set");
             return None;
         };
-        let wallet_config = crate::config::WalletsConfig::default().maker;
-        if !wallet_config
-            .keypair_source_envs()
-            .into_iter()
-            .any(|name| std::env::var(name).is_ok())
+        if !crate::adapters::solana::wallets::keypair_source_envs(
+            crate::domain::types::WalletRole::Maker,
+        )
+        .into_iter()
+        .any(|name| std::env::var(name).is_ok())
         {
             eprintln!("skipping live Gateway refill: maker keypair env vars are not set");
             return None;
@@ -1327,8 +1327,8 @@ mod tests {
             return None;
         };
 
-        let maker = crate::adapters::solana::wallets::LoadedWallet::from_env_config(&wallet_config)
-            .expect("load maker");
+        let maker =
+            crate::adapters::solana::wallets::LoadedWallet::from_maker_env().expect("load maker");
         let depositor = parse_pubkey("CIRCLE_GATEWAY_SOLANA_ADDRESS", &depositor)
             .expect("valid Gateway depositor pubkey");
         assert_eq!(

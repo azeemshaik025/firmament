@@ -15,8 +15,8 @@ use crate::adapters::jupiter::{JupiterClient, JupiterClientConfig, JupiterWallet
 use crate::adapters::solana::htlc::{
     HtlcConfirmationConfig, SolanaHtlcClient, SolanaHtlcClientConfig,
 };
-use crate::adapters::solana::wallets::DemoWallets;
-use crate::config::AppConfig;
+use crate::adapters::solana::wallets::{DemoWallets, LoadedWallet, SOLANA_RPC_URL_ENV};
+use crate::config::{AppConfig, CIRCLE_GATEWAY_SOLANA_ADDRESS_ENV, ProtocolWorkerScope};
 use crate::domain::assets::AssetRegistry;
 use crate::domain::events::{EventMetadata, RuntimeEvent, SystemEvent};
 use crate::domain::types::{RuntimeRunId, WalletRole};
@@ -27,7 +27,7 @@ use super::orchestrator::{
 };
 use super::projection::{RuntimeHandle, RuntimeState};
 
-/// Application state shared by future API, TUI, workers, and tests.
+/// Application state shared by API, web app, workers, and tests.
 #[derive(Debug, Clone)]
 pub struct AppState {
     config: AppConfig,
@@ -100,47 +100,82 @@ pub struct LiveRuntime {
     pub orchestrator: Arc<RuntimeOrchestrator>,
 }
 
-/// Build the production live runtime assembly.
+/// Build the maker-only live runtime assembly.
+///
+/// # Errors
+///
+/// Returns non-secret configuration, wallet, RPC, adapter, or persistence
+/// errors when live protocol workers are enabled but cannot be wired.
+pub async fn bootstrap_maker_runtime(config: AppConfig) -> AppResult<LiveRuntime> {
+    config.validate_protocol_workers_ready_for(ProtocolWorkerScope::Maker)?;
+    ensure_live_runtime_enabled(&config)?;
+    assemble_live_runtime(config, LoadedWallet::from_maker_env()?, None).await
+}
+
+/// Build the legacy two-wallet local-signing demo runtime assembly.
+///
+/// # Errors
+///
+/// Returns non-secret configuration, wallet, RPC, adapter, or persistence
+/// errors when live protocol workers are enabled but cannot be wired.
+pub async fn bootstrap_demo_runtime(config: AppConfig) -> AppResult<LiveRuntime> {
+    config.validate_protocol_workers_ready_for(ProtocolWorkerScope::Demo)?;
+    ensure_live_runtime_enabled(&config)?;
+    let wallets = DemoWallets::from_env()?;
+    assemble_live_runtime(config, wallets.maker, Some(wallets.taker)).await
+}
+
+/// Build the default live runtime assembly.
+///
+/// The web app uses connected browser wallets for taker settlement, so the
+/// default live runtime only requires the maker wallet.
 ///
 /// # Errors
 ///
 /// Returns non-secret configuration, wallet, RPC, adapter, or persistence
 /// errors when live protocol workers are enabled but cannot be wired.
 pub async fn bootstrap_live_runtime(config: AppConfig) -> AppResult<LiveRuntime> {
-    config.validate_protocol_workers_ready()?;
-    if !config.runtime.enable_protocol_workers {
-        return Err(AppError::config(
-            "runtime.enable_protocol_workers must be true for live runtime assembly",
-        ));
-    }
+    bootstrap_maker_runtime(config).await
+}
 
+async fn assemble_live_runtime(
+    config: AppConfig,
+    maker_wallet: LoadedWallet,
+    taker_wallet: Option<LoadedWallet>,
+) -> AppResult<LiveRuntime> {
     let app_state = bootstrap(config.clone()).await?;
-    let wallets = DemoWallets::from_env_config(&config.wallets)?;
     let registry = AssetRegistry::from_config(&config);
     let solana = crate::adapters::solana::client::SolanaClient::new(
-        env_required(&config.solana.rpc_url_env)?,
+        env_required(SOLANA_RPC_URL_ENV)?,
         &config.solana.commitment,
     )?;
 
-    let maker_keypair = Arc::new(wallets.maker.try_clone_keypair()?);
-    let taker_keypair = Arc::new(wallets.taker.try_clone_keypair()?);
-    let wallet_pubkeys = [
-        (WalletRole::Maker, maker_keypair.pubkey()),
-        (WalletRole::Taker, taker_keypair.pubkey()),
-    ];
+    let demo_taker_wallet = taker_wallet.as_ref().map(LoadedWallet::address);
+    let maker_keypair = Arc::new(maker_wallet.try_clone_keypair()?);
+    let taker_keypair = taker_wallet
+        .map(|wallet| wallet.try_clone_keypair().map(Arc::new))
+        .transpose()?;
+    let allow_local_taker_settlement = taker_keypair.is_some();
+
+    let mut wallet_pubkeys = vec![(WalletRole::Maker, maker_keypair.pubkey())];
+    let mut jupiter_wallets = vec![JupiterWallet::from_keypair(
+        WalletRole::Maker,
+        clone_keypair(maker_keypair.as_ref(), WalletRole::Maker)?,
+    )];
+    let mut htlc_wallets = vec![(WalletRole::Maker, Arc::clone(&maker_keypair))];
+
+    if let Some(taker_keypair) = &taker_keypair {
+        wallet_pubkeys.push((WalletRole::Taker, taker_keypair.pubkey()));
+        jupiter_wallets.push(JupiterWallet::from_keypair(
+            WalletRole::Taker,
+            clone_keypair(taker_keypair.as_ref(), WalletRole::Taker)?,
+        ));
+        htlc_wallets.push((WalletRole::Taker, Arc::clone(taker_keypair)));
+    }
 
     let jupiter = Arc::new(JupiterClient::new(JupiterClientConfig::from_app_config(
         &config,
-        vec![
-            JupiterWallet::from_keypair(
-                WalletRole::Maker,
-                clone_keypair(maker_keypair.as_ref(), WalletRole::Maker)?,
-            ),
-            JupiterWallet::from_keypair(
-                WalletRole::Taker,
-                clone_keypair(taker_keypair.as_ref(), WalletRole::Taker)?,
-            ),
-        ],
+        jupiter_wallets,
     )?)?);
 
     let balance_reader = Arc::new(crate::adapters::solana::client::SolanaBalanceReader::new(
@@ -151,10 +186,7 @@ pub async fn bootstrap_live_runtime(config: AppConfig) -> AppResult<LiveRuntime>
     let htlc_client = Arc::new(SolanaHtlcClient::new(SolanaHtlcClientConfig {
         rpc_client: solana.rpc_client(),
         registry: registry.clone(),
-        wallets: vec![
-            (WalletRole::Maker, Arc::clone(&maker_keypair)),
-            (WalletRole::Taker, Arc::clone(&taker_keypair)),
-        ],
+        wallets: htlc_wallets,
         confirmation: HtlcConfirmationConfig::default(),
     })?);
 
@@ -179,7 +211,8 @@ pub async fn bootstrap_live_runtime(config: AppConfig) -> AppResult<LiveRuntime>
         },
         persistence,
         RuntimeOrchestratorOptions {
-            demo_taker_wallet: Some(wallets.taker.address()),
+            demo_taker_wallet,
+            allow_local_taker_settlement,
             ..RuntimeOrchestratorOptions::default()
         },
     ));
@@ -190,17 +223,26 @@ pub async fn bootstrap_live_runtime(config: AppConfig) -> AppResult<LiveRuntime>
     })
 }
 
+fn ensure_live_runtime_enabled(config: &AppConfig) -> AppResult<()> {
+    if config.runtime.enable_protocol_workers {
+        return Ok(());
+    }
+
+    Err(AppError::config(
+        "runtime.enable_protocol_workers must be true for live runtime assembly",
+    ))
+}
+
 fn build_gateway_client(
     config: &AppConfig,
     rpc_client: Arc<solana_client::nonblocking::rpc_client::RpcClient>,
     maker_keypair: Arc<Keypair>,
 ) -> AppResult<CircleGatewayClient> {
-    let depositor = env_required(&config.gateway.solana_address_env)?
+    let depositor = env_required(CIRCLE_GATEWAY_SOLANA_ADDRESS_ENV)?
         .parse::<Pubkey>()
         .map_err(|error| {
             AppError::config(format!(
-                "{} must contain a valid Solana pubkey: {error}",
-                config.gateway.solana_address_env
+                "{CIRCLE_GATEWAY_SOLANA_ADDRESS_ENV} must contain a valid Solana pubkey: {error}"
             ))
         })?;
     let usdc_mint = USDC_MINT

@@ -2,25 +2,21 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use rust_decimal::Decimal;
-use tbd_rfq_maker_runtime::assets::AssetRegistry;
-use tbd_rfq_maker_runtime::events::{
-    InventoryEvent, QuoteEvent, RuntimeEvent, SettlementEvent, SwapEvent,
-};
-use tbd_rfq_maker_runtime::ports::{
-    BalanceReader, GatewayClient, HtlcClient, PriceProvider, SwapExecutor,
-};
-use tbd_rfq_maker_runtime::rfq::{RfqRequest, RfqResponse};
-use tbd_rfq_maker_runtime::runtime::{
+use firmament::assets::AssetRegistry;
+use firmament::events::{InventoryEvent, QuoteEvent, RuntimeEvent, SettlementEvent, SwapEvent};
+use firmament::ports::{BalanceReader, GatewayClient, HtlcClient, PriceProvider, SwapExecutor};
+use firmament::rfq::{RfqRequest, RfqResponse};
+use firmament::runtime::{
     RuntimeAdapters, RuntimeOrchestrator, RuntimeOrchestratorOptions, RuntimePersistence,
 };
-use tbd_rfq_maker_runtime::types::{
+use firmament::types::{
     AmountRaw, AssetId, AssetPair, BalanceSnapshot, GatewayReceipt, GatewayRefillRequest,
     HtlcInitiation, HtlcReceipt, MintAddress, QuoteId, ReferencePrice, RejectionReason,
     SettlementStatus, SwapQuote, SwapReceipt, SwapRequest, TokenAmount, TradeId, TxSignature,
     WalletAddress, WalletRole,
 };
-use tbd_rfq_maker_runtime::{AppConfig, AppError, bootstrap};
+use firmament::{AppConfig, AppError, bootstrap};
+use rust_decimal::Decimal;
 use time::OffsetDateTime;
 
 fn usdc() -> AssetId {
@@ -78,6 +74,14 @@ fn post_settlement_drift_inventory() -> BalanceSnapshot {
         TokenAmount::new(usdc(), AmountRaw::new(1_000_000)),
         TokenAmount::new(sol(), AmountRaw::new(100_000_000)),
         TokenAmount::new(cbbtc(), AmountRaw::new(0)),
+    ])
+}
+
+fn funded_demo_inventory() -> BalanceSnapshot {
+    balance_snapshot(vec![
+        TokenAmount::new(usdc(), AmountRaw::new(3_734_454)),
+        TokenAmount::new(sol(), AmountRaw::new(11_611_701)),
+        TokenAmount::new(cbbtc(), AmountRaw::new(7_020)),
     ])
 }
 
@@ -260,6 +264,32 @@ async fn runtime_rfq_rejection_stops_before_settlement() {
 }
 
 #[tokio::test]
+async fn runtime_maker_only_mode_rejects_local_taker_settlement_before_htlc() {
+    let htlc = FakeHtlcClient::default();
+    let orchestrator = harness(
+        FakePriceProvider::default(),
+        htlc.clone(),
+        FakeSwapExecutor::default(),
+        FakeGatewayClient::default(),
+        FakeBalanceReader::new(vec![quote_inventory()]),
+        RuntimeOrchestratorOptions {
+            allow_local_taker_settlement: false,
+            ..RuntimeOrchestratorOptions::default()
+        },
+    )
+    .await;
+
+    let quote_id = accepted_quote_id(orchestrator.request_rfq(rfq(1_000_000)).await);
+    let error = orchestrator
+        .accept_quote(quote_id)
+        .await
+        .expect_err("maker-only runtime cannot run local two-wallet settlement");
+
+    assert!(error.to_string().contains("wallet settlement endpoints"));
+    assert_eq!(htlc.initiated_count(), 0);
+}
+
+#[tokio::test]
 async fn runtime_settlement_failure_emits_failure_and_skips_rebalance() {
     let htlc = FakeHtlcClient::with_failure(HtlcFailure::MakerInitiate);
     let swap = FakeSwapExecutor::default();
@@ -363,7 +393,7 @@ async fn runtime_cap_reached_blocks_post_settlement_automation() {
 }
 
 #[tokio::test]
-async fn tui_demo_commands_dispatch_into_runtime_orchestrator() {
+async fn web_app_replacement_calls_runtime_orchestrator_directly() {
     let orchestrator = harness(
         FakePriceProvider::default(),
         FakeHtlcClient::default(),
@@ -377,22 +407,82 @@ async fn tui_demo_commands_dispatch_into_runtime_orchestrator() {
     )
     .await;
 
-    tbd_rfq_maker_runtime::tui::dispatch_demo_action(
-        &orchestrator,
-        tbd_rfq_maker_runtime::tui_state::ScriptedDemoAction::GenerateTinyRfq,
-    )
-    .await
-    .expect("generate RFQ");
-    tbd_rfq_maker_runtime::tui::dispatch_demo_action(
-        &orchestrator,
-        tbd_rfq_maker_runtime::tui_state::ScriptedDemoAction::AcceptQuote,
-    )
-    .await
-    .expect("accept RFQ");
+    // The web app operator flow reaches the same RuntimeOrchestrator commands.
+    orchestrator
+        .request_operator_rfq(&usdc(), &sol(), AmountRaw::new(1_000_000))
+        .await
+        .expect("generate RFQ");
+    orchestrator
+        .accept_latest_quote()
+        .await
+        .expect("accept RFQ");
 
     let state = orchestrator.runtime().snapshot().await;
     assert_eq!(state.rfq.accepted_quote_count, 1);
     assert_eq!(state.rfq.active_settlement_count, 0);
+}
+
+#[tokio::test]
+async fn web_tiny_demo_rfq_fits_funded_mainnet_wallet_gas_reserve() {
+    let orchestrator = harness(
+        FakePriceProvider::default(),
+        FakeHtlcClient::default(),
+        FakeSwapExecutor::default(),
+        FakeGatewayClient::default(),
+        FakeBalanceReader::new(vec![funded_demo_inventory()]),
+        RuntimeOrchestratorOptions {
+            demo_taker_wallet: Some(taker_wallet()),
+            ..RuntimeOrchestratorOptions::default()
+        },
+    )
+    .await;
+
+    let response = orchestrator
+        .generate_tiny_demo_rfq()
+        .await
+        .expect("generate tiny RFQ");
+
+    match response {
+        RfqResponse::Accepted(quote) => {
+            assert_eq!(quote.input_amount.amount_raw, AmountRaw::new(100_000));
+        }
+        RfqResponse::Rejected(rejection) => {
+            panic!("tiny funded-wallet demo RFQ should be accepted: {rejection:?}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn web_oversized_demo_rfq_shows_inventory_threshold_rejection() {
+    let orchestrator = harness(
+        FakePriceProvider::default(),
+        FakeHtlcClient::default(),
+        FakeSwapExecutor::default(),
+        FakeGatewayClient::default(),
+        FakeBalanceReader::new(vec![funded_demo_inventory()]),
+        RuntimeOrchestratorOptions {
+            demo_taker_wallet: Some(taker_wallet()),
+            ..RuntimeOrchestratorOptions::default()
+        },
+    )
+    .await;
+
+    let response = orchestrator
+        .generate_oversized_demo_rfq()
+        .await
+        .expect("generate oversized RFQ");
+
+    match response {
+        RfqResponse::Rejected(rejection) => {
+            assert_eq!(
+                rejection.reason,
+                RejectionReason::InventoryBelowQuoteableThreshold
+            );
+        }
+        RfqResponse::Accepted(quote) => {
+            panic!("oversized funded-wallet demo RFQ should be rejected: {quote:?}");
+        }
+    }
 }
 
 #[tokio::test]
@@ -407,7 +497,7 @@ async fn runtime_state_projection_receives_events_in_order() {
 
     runtime
         .publish_event(RuntimeEvent::Quote(QuoteEvent::Requested {
-            metadata: tbd_rfq_maker_runtime::events::EventMetadata::new(run_id),
+            metadata: firmament::events::EventMetadata::new(run_id),
             quote_id,
             pair: AssetPair::new(usdc(), sol()),
             input_amount: TokenAmount::new(usdc(), AmountRaw::new(1_000_000)),
@@ -418,7 +508,7 @@ async fn runtime_state_projection_receives_events_in_order() {
         .expect("publish requested");
     runtime
         .publish_event(RuntimeEvent::Quote(QuoteEvent::Accepted {
-            metadata: tbd_rfq_maker_runtime::events::EventMetadata::new(run_id),
+            metadata: firmament::events::EventMetadata::new(run_id),
             quote_id,
             trade_id,
         }))
@@ -426,7 +516,7 @@ async fn runtime_state_projection_receives_events_in_order() {
         .expect("publish accepted");
     runtime
         .publish_event(RuntimeEvent::Settlement(SettlementEvent::Started {
-            metadata: tbd_rfq_maker_runtime::events::EventMetadata::new(run_id),
+            metadata: firmament::events::EventMetadata::new(run_id),
             trade_id,
             quote_id,
         }))

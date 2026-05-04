@@ -4,10 +4,14 @@ mod bootstrap;
 mod orchestrator;
 mod projection;
 
-pub use bootstrap::{AppState, LiveRuntime, bootstrap, bootstrap_live_runtime};
+pub use bootstrap::{
+    AppState, LiveRuntime, bootstrap, bootstrap_demo_runtime, bootstrap_live_runtime,
+    bootstrap_maker_runtime,
+};
 pub use orchestrator::{
     AutomationRunSummary, RuntimeAdapters, RuntimeLedgerSummary, RuntimeOrchestrator,
-    RuntimeOrchestratorOptions, RuntimePersistence, RuntimeTrade,
+    RuntimeOrchestratorOptions, RuntimePersistence, RuntimeTrade, WalletSettlementStart,
+    WalletTakerLockResult, WalletTakerRedeemPreparation, WalletTakerRedeemResult,
 };
 pub use projection::{
     GatewayProjection, InventoryProjection, PnlProjection, RebalanceProjection, RfqProjection,

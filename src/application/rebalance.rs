@@ -22,8 +22,6 @@ use crate::ports::{GatewayClient, SwapExecutor};
 pub enum AutomationActionKind {
     /// Jupiter inventory rebalance.
     Rebalance,
-    /// Jupiter spot hedge.
-    Hedge,
     /// Circle Gateway USDC refill.
     GatewayRefill,
     /// Jupiter USDC to SOL native top-up.
@@ -48,8 +46,8 @@ pub struct AutomationLimits {
     pub max_action_notional_usd: Decimal,
     /// Max USD notional over this process run.
     pub max_cumulative_automation_notional_usd: Decimal,
-    /// One-off cbBTC routeability exception cap.
-    pub cbbtc_exception_notional_usd: Decimal,
+    /// One-off routeability exception cap for non-native, non-stable assets.
+    pub non_stable_asset_exception_notional_usd: Decimal,
     /// Max concurrent automated actions.
     pub max_concurrent_actions: usize,
     /// Cooldown between duplicate actions.
@@ -70,7 +68,10 @@ impl AutomationLimits {
                 .assets
                 .policy
                 .max_cumulative_automation_notional_usd,
-            cbbtc_exception_notional_usd: config.assets.policy.cbbtc_exception_notional_usd,
+            non_stable_asset_exception_notional_usd: config
+                .assets
+                .policy
+                .non_stable_asset_exception_notional_usd,
             max_concurrent_actions: 1,
             cooldown: Duration::seconds(30),
             max_slippage_bps: config.jupiter.max_slippage_bps,
@@ -88,8 +89,8 @@ pub struct AutomationState {
     pub in_flight: Vec<ActionKey>,
     /// Last submission timestamp by action key.
     pub last_submitted_at: BTreeMap<ActionKey, OffsetDateTime>,
-    /// Whether the one-off cbBTC exception has already been used.
-    pub cbbtc_exception_used: bool,
+    /// Whether the one-off non-stable asset exception has already been used.
+    pub non_stable_asset_exception_used: bool,
 }
 
 /// Stable no-action reasons for tests, API projection, and operator copy.
@@ -97,8 +98,6 @@ pub struct AutomationState {
 pub enum DecisionBlockReason {
     /// No configured imbalance warrants action.
     NoDrift,
-    /// No configured exposure warrants action.
-    NoExposure,
     /// Configured concurrency limit is already reached.
     MaxConcurrentActions,
     /// Same action is already in flight.
@@ -128,8 +127,8 @@ pub struct PlannedSwap {
     pub input_amount: TokenAmount,
     /// Estimated USD notional spent by this action.
     pub estimated_notional_usd: Decimal,
-    /// Whether this action consumes the one-off cbBTC exception.
-    pub uses_cbbtc_exception: bool,
+    /// Whether this action consumes the one-off non-stable asset exception.
+    pub uses_non_stable_asset_exception: bool,
     /// Operator-facing reason.
     pub reason: String,
 }
@@ -398,7 +397,7 @@ pub struct SwapPlanInput<'a> {
     pub reason: String,
 }
 
-/// Shared helper used by rebalance and hedge decisions.
+/// Shared helper used by rebalance decisions.
 ///
 /// # Errors
 ///
@@ -439,7 +438,7 @@ pub fn plan_capped_swap(input: SwapPlanInput<'_>) -> Result<PlannedSwap, Decisio
         return Err(DecisionBlockReason::UnsupportedAsset);
     }
 
-    let (capped_notional, uses_cbbtc_exception) =
+    let (capped_notional, uses_non_stable_asset_exception) =
         cap_notional_for_pair(&pair, desired_notional_usd, state, limits);
     if state.cumulative_spend_usd + capped_notional > limits.max_cumulative_automation_notional_usd
     {
@@ -472,7 +471,7 @@ pub fn plan_capped_swap(input: SwapPlanInput<'_>) -> Result<PlannedSwap, Decisio
         pair: pair.clone(),
         input_amount: TokenAmount::new(pair.input, input_raw),
         estimated_notional_usd,
-        uses_cbbtc_exception,
+        uses_non_stable_asset_exception,
         reason,
     })
 }
@@ -505,13 +504,14 @@ fn cap_notional_for_pair(
     state: &AutomationState,
     limits: &AutomationLimits,
 ) -> (Decimal, bool) {
-    let touches_cbbtc = pair.input.as_str() == "cbBTC" || pair.output.as_str() == "cbBTC";
-    if touches_cbbtc
+    let touches_non_stable_asset =
+        is_non_native_non_stable_asset(&pair.input) || is_non_native_non_stable_asset(&pair.output);
+    if touches_non_stable_asset
         && desired_notional_usd > limits.max_action_notional_usd
-        && !state.cbbtc_exception_used
+        && !state.non_stable_asset_exception_used
     {
         (
-            desired_notional_usd.min(limits.cbbtc_exception_notional_usd),
+            desired_notional_usd.min(limits.non_stable_asset_exception_notional_usd),
             true,
         )
     } else {
@@ -520,6 +520,10 @@ fn cap_notional_for_pair(
             false,
         )
     }
+}
+
+fn is_non_native_non_stable_asset(asset: &AssetId) -> bool {
+    !matches!(asset.as_str(), "USDC" | "SOL")
 }
 
 fn inventory_policy_from_limits(limits: &AutomationLimits) -> InventoryPolicy {
@@ -774,7 +778,7 @@ mod tests {
     }
 
     #[test]
-    fn rebalance_cbbtc_exception_allows_one_action_above_default_cap() {
+    fn rebalance_non_stable_asset_exception_allows_one_action_above_default_cap() {
         let (limits, policy) = defaults();
         let decision = decide_rebalance(
             &snapshot(vec![
@@ -793,10 +797,10 @@ mod tests {
                 assert_eq!(plan.pair, AssetPair::new(asset("cbBTC"), asset("USDC")));
                 assert!(plan.estimated_notional_usd > Decimal::from(2));
                 assert!(plan.estimated_notional_usd <= Decimal::from(5));
-                assert!(plan.uses_cbbtc_exception);
+                assert!(plan.uses_non_stable_asset_exception);
             }
             other @ RebalanceDecision::NoAction { .. } => {
-                panic!("expected cbBTC exception swap, got {other:?}");
+                panic!("expected non-stable asset exception swap, got {other:?}");
             }
         }
     }
@@ -867,7 +871,7 @@ mod tests {
             pair: AssetPair::new(asset("USDC"), asset("SOL")),
             input_amount: TokenAmount::new(asset("USDC"), AmountRaw::new(1_000_000)),
             estimated_notional_usd: Decimal::ONE,
-            uses_cbbtc_exception: false,
+            uses_non_stable_asset_exception: false,
             reason: "test".to_owned(),
         };
 

@@ -144,7 +144,7 @@ impl SettlementLegState {
 pub struct SettlementTransition {
     /// Fine-grained step.
     pub step: SettlementStep,
-    /// Runtime event payload for API/TUI/event sinks.
+    /// Runtime event payload for API, web app, and event sinks.
     pub event: SettlementEvent,
 }
 
