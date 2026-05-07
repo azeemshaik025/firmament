@@ -208,6 +208,133 @@ git commit -m "docs(plan): record current ledger consumer mapping"
 
 ---
 
+### Phase-1 Field Findings
+
+**Captured:** 2026-05-07
+**By:** Task 4
+
+#### LedgerEventConsumer location
+
+- Struct + impl: `src/adapters/persistence/ledger.rs:792-824`
+- Match dispatcher: `transactions_for_event` at `src/adapters/persistence/ledger.rs:826-950`
+- `LedgerConsumeSummary` value object: `src/adapters/persistence/ledger.rs:781-789`
+
+#### Current event → ledger mapping
+
+| Event variant | Distinguishing field/condition | Ledger movement |
+|---|---|---|
+| `Gateway::RefillRequested { amount }` (`ledger.rs:833`) | always | DR `pending_gateway_deposit(asset)` / CR `gateway(asset)` for `amount.amount_raw` |
+| `Gateway::RefillCompleted { receipt }` (`ledger.rs:852`) | always | DR `working(asset)` / CR `pending_gateway_deposit(asset)` for `receipt.amount.amount_raw` |
+| `Gateway::BalanceChecked { .. }` (`ledger.rs:896`) | always (snapshot) | none — added to `summary.ignored` |
+| `Gateway::Failed { .. }` (`ledger.rs:901`) | always | none — added to `summary.ignored` |
+| `Swap::Executed { receipt }` (`ledger.rs:871`) | only when `receipt.output_amount.is_some()` | DR `working(output.asset)` / CR `rebalance(output.asset)` for `output_amount.amount_raw`. If `output_amount` is None → ignored. |
+| `Swap::PriceObserved` / `Swap::Quoted` (`ledger.rs:937`) | always | none — ignored |
+| `Swap::Failed { .. }` (`ledger.rs:942`) | always | none — ignored |
+| `Settlement::Started` (`ledger.rs:908`) | always | **none** — ignored ("settlement started has no asset amount") |
+| `Settlement::Initiated { receipt }` (`ledger.rs:909`) | always | **none** — ignored ("settlement initiated receipt has no amount") |
+| `Settlement::Redeemed { receipt }` (`ledger.rs:910`) | always | **none** — ignored ("settlement redeemed receipt has no amount") |
+| `Settlement::Refunded { receipt }` (`ledger.rs:911`) | always | **none** — ignored ("settlement refunded receipt has no amount") |
+| `Settlement::StatusChanged` (`ledger.rs:912`) | always | **none** — ignored |
+| `Settlement::Failed` (`ledger.rs:913`) | always | **none** — ignored |
+| `Quote(_)` (`ledger.rs:917`) | always | none — ignored |
+| `Risk(_)` (`ledger.rs:922`) | always | none — ignored |
+| `Inventory(_)` (`ledger.rs:927`) | always | none — ignored |
+| `System(_)` (`ledger.rs:932`) | always | none — ignored |
+
+**Observation:** today the consumer writes ledger transactions for **only three** event arms — `Gateway::RefillRequested`, `Gateway::RefillCompleted`, and `Swap::Executed` (when `output_amount` is set). All settlement / HTLC events are explicitly ignored — no escrow movement, no reserved/receivable bookkeeping, no taker-lock recording.
+
+#### HtlcReceipt fields
+
+Source: `src/domain/types.rs:428-437`.
+
+- `trade_id: TradeId` — trade this receipt belongs to
+- `status: SettlementStatus` — coarse high-level status (see below)
+- `signature: Option<TxSignature>` — Solana tx signature, if submitted
+
+`SettlementStatus` (`src/domain/types.rs:412-426`) variants: `Pending`, `Initiated`, `Redeemed`, `Refunded`, `Failed`. There is **no** `Submitted`-vs-`Confirmed` distinction in the enum — `Initiated` collapses both.
+
+**Maker vs taker leg distinguished by:** **NOT distinguishable from `HtlcReceipt` alone.** The receipt has no `leg`, no `actor`, no `funder`/`redeemer`, and no wallet address. The maker-vs-taker information lives outside the receipt:
+- The orchestrator separately calls `record_taker_lock` (`settlement.rs:195`) vs `record_maker_lock` (`settlement.rs:214`) and stores receipts on `taker_input_leg.lock_receipt` vs `maker_output_leg.lock_receipt` (`settlement.rs:159-161`).
+- Both transitions emit the **same** event variant `SettlementEvent::Initiated { metadata, receipt }` (`settlement.rs:205-208` and `settlement.rs:222-227`).
+- The receipts produced by each transition are **identical in shape**: same `trade_id`, same `status: SettlementStatus::Initiated`, only the `signature` differs (`settlement.rs:316-322`).
+
+**A consumer reading only the `RuntimeEvent::Settlement(Initiated{..})` stream cannot tell the maker leg from the taker leg today.**
+
+**Submitted vs confirmed distinguished by:** **NOT distinguishable today.** `record_*_lock` calls always set `SettlementStatus::Initiated` regardless of whether the adapter has confirmed the on-chain transaction. The orchestrator's wallet flow (`orchestrator.rs:644-671`) calls `record_external_initiate`/`initiate_with_external_redeemer`, immediately publishes `Initiated`, then proceeds to the next step — there is no "confirmed" follow-up event distinct from the initial submission. The non-wallet `run_settlement_locks` (`orchestrator.rs:780-844`) does call `htlc_client.status(trade_id)` after taker lock and emits `SettlementEvent::Failed` if it isn't `Initiated`, but on the success path no separate "confirmed" event fires.
+
+#### Settlement event emission sites in orchestrator
+
+Source: `src/application/runtime/orchestrator.rs`. `publish` helper at `orchestrator.rs:1254`.
+
+**Wallet-mediated flow (browser wallet provides taker funds):**
+- `start_wallet_settlement` (`orchestrator.rs:565`)
+  - `orchestrator.rs:596` — emits `SettlementEvent::Started` (from `settlement.start`)
+- `record_wallet_taker_lock` (`orchestrator.rs:638`)
+  - `orchestrator.rs:654` — emits `SettlementEvent::Initiated` from `settlement.record_taker_lock` (taker leg)
+  - `orchestrator.rs:670` — emits `SettlementEvent::Initiated` from `settlement.record_maker_lock` (maker leg) — same arm, same fields, no leg discriminator
+- `complete_wallet_taker_redeem` (`orchestrator.rs:716`)
+  - `orchestrator.rs:733` — emits `SettlementEvent::Redeemed` from `record_taker_redeem` (taker redeem of maker output)
+  - `orchestrator.rs:742` — emits `SettlementEvent::Redeemed` from `record_maker_redeem` (maker redeem of taker input) — same arm, same fields
+  - `orchestrator.rs:744-749` — emits an extra `SettlementEvent::StatusChanged { status: Redeemed }`
+
+**Inventory-backed flow (server-only HTLC client):**
+- `settle_quote` → `run_settlement_locks` (`orchestrator.rs:780`)
+  - `orchestrator.rs:787` — emits `Started`
+  - `orchestrator.rs:808` — emits `Initiated` (taker)
+  - `orchestrator.rs:842` — emits `Initiated` (maker)
+- `run_settlement_redeems` (`orchestrator.rs:846`)
+  - `orchestrator.rs:873` — emits `Redeemed` (taker redeem of maker output)
+  - `orchestrator.rs:890` — emits `Redeemed` (maker redeem of taker input)
+- `settle_quote` (`orchestrator.rs:549-554`) emits the trailing `StatusChanged { Redeemed }` after both redeems
+
+**Other settlement emission sites:**
+- `record_settlement_failure` → `orchestrator.rs:1224` emits `SettlementEvent::Failed`
+- Manual settlement-status transition path emits `StatusChanged` at `orchestrator.rs:549-554` and `744-749`
+
+**Event field summary for settlement payloads:**
+- `Started`: `metadata`, `trade_id`, `quote_id`. No leg, no amount.
+- `Initiated`/`Redeemed`/`Refunded`: `metadata`, `receipt: HtlcReceipt` (= `trade_id`, `status`, `Option<signature>`). No leg, no amount, no actor/wallet.
+- `StatusChanged`: `metadata`, `trade_id`, `status`. No amount.
+- `Failed`: `metadata`, `trade_id`, `reason`. No amount.
+
+**Quote events (`orchestrator.rs:512`, `516`, `446`):** emitted but contain no token-amount delta the consumer can post.
+
+**Inventory events (`orchestrator.rs:389`, `924`, `942`):** emitted but explicitly ignored by the consumer (`ledger.rs:927`).
+
+#### Today's lifecycle (inventory-backed RFQ, both legs server-controlled)
+
+Walking the wallet-flow path (`orchestrator.rs:565-684`, then `716-767`) since the inventory-backed wallet flow is the canonical path:
+
+1. **Quote accepted →** `accept_quote_for_trade` publishes `QuoteEvent::Accepted` (`orchestrator.rs:512`). Consumer: ignored.
+2. **Wallet settlement started →** `start_wallet_settlement` publishes `SettlementEvent::Started` (`orchestrator.rs:596`). Consumer: ignored.
+3. **Taker submits HTLC (browser-signed) →** `record_wallet_taker_lock` calls `record_external_initiate`, then publishes `SettlementEvent::Initiated` for the taker leg (`orchestrator.rs:654`). Consumer: **ignored** (`ledger.rs:909`).
+4. **Maker submits HTLC →** same method calls `initiate_with_external_redeemer`, then publishes `SettlementEvent::Initiated` for the maker leg (`orchestrator.rs:670`). Consumer: **ignored** (same arm collapses both legs).
+5. **Taker redeems maker leg →** `complete_wallet_taker_redeem` calls `record_external_redeem`, then publishes `SettlementEvent::Redeemed` (`orchestrator.rs:733`). Consumer: **ignored** (`ledger.rs:910`).
+6. **Maker redeems taker leg →** same method calls `htlc_client.redeem`, then publishes `SettlementEvent::Redeemed` (`orchestrator.rs:742`). Consumer: **ignored**.
+7. **Trailing →** `SettlementEvent::StatusChanged { Redeemed }` (`orchestrator.rs:744`). Consumer: **ignored** (`ledger.rs:912`).
+8. **Inventory refresh →** `refresh_inventory_and_automation` (`orchestrator.rs:761`) publishes `InventoryEvent::Snapshot` and may publish a Gateway `RefillRequested`/`RefillCompleted` pair. The Gateway pair is the **only** part of the entire RFQ-fill lifecycle that produces ledger transactions today.
+
+**Net effect today:** an inventory-backed RFQ that completes successfully writes **zero** ledger transactions for the trade itself. Working balances are not debited, no reserved or receivable accounts move, no escrow accounts move. Only Gateway refills (a separate side-effect) and Jupiter-swap rebalances mutate the ledger.
+
+#### Implications for Task 5
+
+1. **HtlcReceipt is leg-agnostic and confirmation-agnostic today.** T5 must either:
+   - **Option A (recommended):** add a `leg: SettlementLeg` field to `HtlcReceipt` (`src/domain/types.rs:430`) and populate it in `TwoSidedSettlement::receipt` (`src/domain/settlement.rs:316-322`). All four `record_*` transitions (`settlement.rs:195, 214, 233, 252`) already know the leg implicitly — wire it through. Touchpoints: `domain/types.rs`, `domain/settlement.rs`, plus any deserializers / fixtures (the `tests` block in `settlement.rs:325+` and `ledger.rs:1103+`).
+   - **Option B:** introduce new variant pairs (`SettlementEvent::TakerInitiated` / `MakerInitiated`, etc.) instead of a leg field. Larger blast radius — affects `domain/events.rs:107-156`, `interfaces/http/types.rs`, web-app event renderers, and existing tests.
+   - **Option C:** rely on call-site context (consumer is wired into the orchestrator and can be told the leg out-of-band). This breaks the event-driven invariant; not recommended.
+2. **Submitted-vs-confirmed must be added.** The current single `Initiated` arm fires immediately after adapter submission. T5 needs the new `pending_escrow → htlc_escrow` transition to key off a "confirmed" signal that does not exist yet. Options:
+   - Add `confirmed: bool` to `HtlcReceipt`, or
+   - Replace `SettlementStatus::Initiated` with two states (`Submitted`, `Confirmed`), or
+   - Split `SettlementEvent::Initiated` into `Submitted` + `Confirmed` variants and have the orchestrator emit a follow-up after `htlc_client.status(...)` returns `Initiated` (today, `run_settlement_locks` polls status at `orchestrator.rs:811-815` but does not emit a separate event).
+3. **Settlement events carry no `TokenAmount`.** T5's debits/credits need an amount; `HtlcReceipt` does not have one. The amount is recoverable via `SettlementTerms.taker_input` / `SettlementTerms.maker_output` held by the orchestrator's `TwoSidedSettlement`, but **not** by a downstream consumer reading the event stream. T5 must either: (a) attach `amount: TokenAmount` to `HtlcReceipt`, or (b) attach amount to the `Initiated`/`Redeemed` variants directly, or (c) thread settlement-terms lookup into the consumer (couples the consumer to in-memory orchestrator state — not recommended).
+4. **Trailing `StatusChanged { Redeemed }` is redundant once leg-aware `Redeemed` events fire** — T5 should decide whether to keep it as a "settlement complete" marker or drop it.
+5. **No taker-lock event today produces a `Receivable` movement.** T5 must add a new ledger arm that fires on the (leg=taker, status=submitted) initiated event, debiting `receivable(input_asset)` and crediting working/reserved depending on the new lifecycle.
+6. **Quote-accepted event today writes nothing.** T5's `working → reserved` reservation hook needs to fire either on `QuoteEvent::Accepted` (`orchestrator.rs:512`) or on `SettlementEvent::Started` (`orchestrator.rs:596`/`787`). `Started` is preferable because it carries the `trade_id`, while `Accepted` carries `quote_id` + `trade_id` both. Neither variant carries the reserved amount today — same fix as (3) above (need amount on the event or on `SettlementTerms` propagated through).
+
+**Bottom-line scope assessment for T5:** This is **not** a pure consumer rewrite. T5 requires changes to `HtlcReceipt` (leg + confirmation + amount), to `TwoSidedSettlement::receipt` and the four `record_*` transitions, and likely to `SettlementEvent` itself (new variants or new fields) — and the consumer changes follow from those. The plan's T5 description should be revised to reflect this widened blast radius.
+
+---
+
 ### Task 5: Add `Receivable` and reservation hooks in the consumer
 
 **Files:**
