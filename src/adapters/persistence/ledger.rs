@@ -1193,4 +1193,29 @@ mod tests {
         assert_eq!(summary.inserted_transactions, 0);
         assert!(!summary.ignored.is_empty());
     }
+
+    #[test]
+    fn account_type_round_trips_all_variants_including_new_ones() {
+        let variants = [
+            LedgerAccountType::WorkingCustody,
+            LedgerAccountType::Reserved,
+            LedgerAccountType::PendingDexSpend,
+            LedgerAccountType::Receivable,
+            LedgerAccountType::HtlcEscrow,
+            LedgerAccountType::PendingEscrow,
+            LedgerAccountType::Gateway,
+            LedgerAccountType::GatewayReserved,
+            LedgerAccountType::PendingGatewayDeposit,
+            LedgerAccountType::Rebalance,
+            LedgerAccountType::Fees,
+            LedgerAccountType::Trading,
+            LedgerAccountType::External,
+        ];
+
+        for variant in variants {
+            let s = variant.to_string();
+            let parsed = LedgerAccountType::try_from(s.as_str()).expect("parse known variant");
+            assert_eq!(parsed, variant, "round trip failed for {variant:?}");
+        }
+    }
 }
