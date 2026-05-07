@@ -657,7 +657,7 @@ impl RuntimeOrchestrator {
         // The browser-driven path posts the signed taker tx via
         // `record_external_initiate`, which already confirms the signature
         // before returning, so for v1 we treat the submission as confirmed.
-        let confirmation = state.settlement.confirm_taker_lock(self.app_state.run_id());
+        let confirmation = state.settlement.confirm_taker_lock(self.app_state.run_id())?;
         self.publish(RuntimeEvent::Settlement(confirmation.event))
             .await?;
 
@@ -679,7 +679,7 @@ impl RuntimeOrchestrator {
         // TODO(v0.2): wire real confirmation polling for the wallet flow.
         // The maker leg uses `initiate_with_external_redeemer` which submits
         // and signs locally; for v1 we treat the submission as confirmed.
-        let confirmation = state.settlement.confirm_maker_lock(self.app_state.run_id());
+        let confirmation = state.settlement.confirm_maker_lock(self.app_state.run_id())?;
         self.publish(RuntimeEvent::Settlement(confirmation.event))
             .await?;
 
@@ -821,18 +821,27 @@ impl RuntimeOrchestrator {
         self.publish(RuntimeEvent::Settlement(transition.event))
             .await?;
 
-        let status = self
+        let status = match self
             .adapters
             .htlc_client
             .status(settlement.terms.trade_id)
-            .await?;
+            .await
+        {
+            Ok(status) => status,
+            Err(error) => {
+                let reason = format!("taker HTLC status poll failed: {error}");
+                self.record_settlement_failure(settlement, quote, tx_signatures, &reason)
+                    .await?;
+                return Err(AppError::solana(reason));
+            }
+        };
         if status != SettlementStatus::Initiated {
             let reason = format!("taker HTLC validation returned {status:?}");
             self.record_settlement_failure(settlement, quote, tx_signatures, &reason)
                 .await?;
             return Err(AppError::solana(reason));
         }
-        let confirmation = settlement.confirm_taker_lock(self.app_state.run_id());
+        let confirmation = settlement.confirm_taker_lock(self.app_state.run_id())?;
         self.publish(RuntimeEvent::Settlement(confirmation.event))
             .await?;
 
@@ -858,18 +867,27 @@ impl RuntimeOrchestrator {
         self.publish(RuntimeEvent::Settlement(transition.event))
             .await?;
 
-        let status = self
+        let status = match self
             .adapters
             .htlc_client
             .status(settlement.terms.trade_id)
-            .await?;
+            .await
+        {
+            Ok(status) => status,
+            Err(error) => {
+                let reason = format!("maker HTLC status poll failed: {error}");
+                self.record_settlement_failure(settlement, quote, tx_signatures, &reason)
+                    .await?;
+                return Err(AppError::solana(reason));
+            }
+        };
         if status != SettlementStatus::Initiated {
             let reason = format!("maker HTLC validation returned {status:?}");
             self.record_settlement_failure(settlement, quote, tx_signatures, &reason)
                 .await?;
             return Err(AppError::solana(reason));
         }
-        let confirmation = settlement.confirm_maker_lock(self.app_state.run_id());
+        let confirmation = settlement.confirm_maker_lock(self.app_state.run_id())?;
         self.publish(RuntimeEvent::Settlement(confirmation.event))
             .await
     }

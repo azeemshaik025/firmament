@@ -3,7 +3,11 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use firmament::assets::AssetRegistry;
-use firmament::events::{InventoryEvent, QuoteEvent, RuntimeEvent, SettlementEvent, SwapEvent};
+use firmament::db::Db;
+use firmament::events::{
+    EventMetadata, InventoryEvent, QuoteEvent, RuntimeEvent, SettlementEvent, SwapEvent,
+};
+use firmament::ledger::{LedgerAccountId, LedgerEventConsumer, SqliteLedgerRepository};
 use firmament::ports::{BalanceReader, GatewayClient, HtlcClient, PriceProvider, SwapExecutor};
 use firmament::rfq::{RfqRequest, RfqResponse};
 use firmament::settlement::SettlementLeg;
@@ -870,4 +874,391 @@ impl BalanceReader for FakeBalanceReader {
             .pop()
             .ok_or_else(|| AppError::internal("fake balance reader has no snapshots"))
     }
+}
+
+fn run_id() -> firmament::types::RuntimeRunId {
+    firmament::types::RuntimeRunId::generate()
+}
+
+fn settlement_event(event: SettlementEvent) -> RuntimeEvent {
+    RuntimeEvent::Settlement(event)
+}
+
+fn htlc_receipt(
+    trade_id: TradeId,
+    leg: SettlementLeg,
+    asset: AssetId,
+    raw_amount: u64,
+    status: SettlementStatus,
+) -> HtlcReceipt {
+    HtlcReceipt {
+        trade_id,
+        leg,
+        amount: TokenAmount::new(asset, AmountRaw::new(raw_amount)),
+        status,
+        signature: Some(TxSignature::new(format!(
+            "{leg:?}-{trade_id}-{status:?}"
+        ))),
+    }
+}
+
+#[tokio::test]
+async fn inventory_path_emits_full_ledger_sequence() {
+    // Drives the LedgerEventConsumer with a synthetic, ordered settlement
+    // sequence and asserts ledger balances at every transition checkpoint.
+    //
+    // This is the load-bearing assertion for Task 5c: the consumer must
+    // emit working_custody -> reserved -> pending_escrow -> htlc_escrow ->
+    // trading on the maker output leg, and external -> receivable ->
+    // working_custody on the taker input leg.
+
+    let db = Db::open_in_memory().expect("open in-memory db");
+    let consumer = LedgerEventConsumer::new(&db);
+    let repository = SqliteLedgerRepository::new(&db);
+
+    let trade_id = TradeId::generate();
+    let run = run_id();
+
+    // Seed working custody with the maker's output asset (SOL).
+    let maker_output_amount: u64 = 500_000_000;
+    let taker_input_amount: u64 = 1_000_000;
+    let seed = firmament::ledger::LedgerTransactionBuilder::new("test_seed", trade_id.as_uuid())
+        .description("seed maker SOL working custody")
+        .idempotency_key(format!("seed:{trade_id}:working_sol"))
+        .debit(LedgerAccountId::working(sol()), AmountRaw::new(maker_output_amount))
+        .credit(
+            LedgerAccountId::external(sol(), "seed"),
+            AmountRaw::new(maker_output_amount),
+        )
+        .build()
+        .expect("balanced seed");
+    repository
+        .save_transaction(&seed)
+        .expect("save seed");
+
+    // Sanity-check the seed.
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::working(sol()))
+            .expect("working sol after seed"),
+        i128::from(maker_output_amount)
+    );
+
+    // Step 1: Submitted{TakerInput} — informational, no movement.
+    consumer
+        .consume(&settlement_event(SettlementEvent::Submitted {
+            metadata: EventMetadata::new(run),
+            receipt: htlc_receipt(
+                trade_id,
+                SettlementLeg::TakerInput,
+                usdc(),
+                taker_input_amount,
+                SettlementStatus::Initiated,
+            ),
+        }))
+        .expect("submitted taker input");
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::receivable(usdc(), trade_id.to_string()))
+            .expect("receivable before confirmation"),
+        0,
+        "Submitted{{TakerInput}} must not open the receivable"
+    );
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::working(sol()))
+            .expect("working sol after submitted taker input"),
+        i128::from(maker_output_amount),
+        "Submitted{{TakerInput}} must not touch maker working custody"
+    );
+
+    // Step 2: Confirmed{TakerInput} — opens receivable on input asset.
+    consumer
+        .consume(&settlement_event(SettlementEvent::Confirmed {
+            metadata: EventMetadata::new(run),
+            receipt: htlc_receipt(
+                trade_id,
+                SettlementLeg::TakerInput,
+                usdc(),
+                taker_input_amount,
+                SettlementStatus::Initiated,
+            ),
+        }))
+        .expect("confirmed taker input");
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::receivable(usdc(), trade_id.to_string()))
+            .expect("receivable after confirmation"),
+        i128::from(taker_input_amount)
+    );
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::external(usdc(), "htlc:taker_input"))
+            .expect("external taker_input after confirmation"),
+        -i128::from(taker_input_amount)
+    );
+
+    // Step 3: Submitted{MakerOutput} — emits working_custody -> reserved
+    // and then reserved -> pending_escrow back-to-back.
+    consumer
+        .consume(&settlement_event(SettlementEvent::Submitted {
+            metadata: EventMetadata::new(run),
+            receipt: htlc_receipt(
+                trade_id,
+                SettlementLeg::MakerOutput,
+                sol(),
+                maker_output_amount,
+                SettlementStatus::Initiated,
+            ),
+        }))
+        .expect("submitted maker output");
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::working(sol()))
+            .expect("working sol after maker submit"),
+        0
+    );
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::reserved(sol(), trade_id.to_string()))
+            .expect("reserved after maker submit"),
+        0,
+        "reserved nets to zero after both transitions land"
+    );
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::pending_escrow(sol()))
+            .expect("pending_escrow after maker submit"),
+        i128::from(maker_output_amount)
+    );
+
+    // Step 4: Confirmed{MakerOutput} — pending_escrow -> htlc_escrow.
+    consumer
+        .consume(&settlement_event(SettlementEvent::Confirmed {
+            metadata: EventMetadata::new(run),
+            receipt: htlc_receipt(
+                trade_id,
+                SettlementLeg::MakerOutput,
+                sol(),
+                maker_output_amount,
+                SettlementStatus::Initiated,
+            ),
+        }))
+        .expect("confirmed maker output");
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::pending_escrow(sol()))
+            .expect("pending_escrow after maker confirm"),
+        0
+    );
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::htlc_escrow(sol()))
+            .expect("htlc_escrow after maker confirm"),
+        i128::from(maker_output_amount)
+    );
+
+    // Step 5: Redeemed{MakerOutput} — taker redeems maker leg into trading.
+    consumer
+        .consume(&settlement_event(SettlementEvent::Redeemed {
+            metadata: EventMetadata::new(run),
+            receipt: htlc_receipt(
+                trade_id,
+                SettlementLeg::MakerOutput,
+                sol(),
+                maker_output_amount,
+                SettlementStatus::Redeemed,
+            ),
+        }))
+        .expect("redeemed maker output");
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::htlc_escrow(sol()))
+            .expect("htlc_escrow after redeem maker"),
+        0
+    );
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::trading(sol()))
+            .expect("trading after redeem maker"),
+        i128::from(maker_output_amount)
+    );
+
+    // Step 6: Redeemed{TakerInput} — maker claims taker input into working.
+    consumer
+        .consume(&settlement_event(SettlementEvent::Redeemed {
+            metadata: EventMetadata::new(run),
+            receipt: htlc_receipt(
+                trade_id,
+                SettlementLeg::TakerInput,
+                usdc(),
+                taker_input_amount,
+                SettlementStatus::Redeemed,
+            ),
+        }))
+        .expect("redeemed taker input");
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::receivable(usdc(), trade_id.to_string()))
+            .expect("receivable after maker redeem"),
+        0
+    );
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::working(usdc()))
+            .expect("working usdc after maker redeem"),
+        i128::from(taker_input_amount)
+    );
+
+    // Final invariants: ledger fully balanced per asset.
+    let report = repository.integrity_report().expect("integrity report");
+    assert!(report.healthy, "ledger should balance: {report:?}");
+}
+
+#[tokio::test]
+async fn maker_output_refund_after_confirmation_unwinds_htlc_escrow() {
+    // Drives the consumer through Submitted{MakerOutput} +
+    // Confirmed{MakerOutput} so the trade lives in htlc_escrow, then a
+    // Refunded{MakerOutput} must reverse htlc_escrow -> working_custody.
+    let db = Db::open_in_memory().expect("open in-memory db");
+    let consumer = LedgerEventConsumer::new(&db);
+    let repository = SqliteLedgerRepository::new(&db);
+
+    let trade_id = TradeId::generate();
+    let run = run_id();
+    let maker_output_amount: u64 = 250_000_000;
+
+    let seed = firmament::ledger::LedgerTransactionBuilder::new(
+        "test_seed",
+        trade_id.as_uuid(),
+    )
+    .description("seed maker SOL working custody")
+    .idempotency_key(format!("seed:{trade_id}:working_sol"))
+    .debit(LedgerAccountId::working(sol()), AmountRaw::new(maker_output_amount))
+    .credit(
+        LedgerAccountId::external(sol(), "seed"),
+        AmountRaw::new(maker_output_amount),
+    )
+    .build()
+    .expect("balanced seed");
+    repository.save_transaction(&seed).expect("save seed");
+
+    consumer
+        .consume(&settlement_event(SettlementEvent::Submitted {
+            metadata: EventMetadata::new(run),
+            receipt: htlc_receipt(
+                trade_id,
+                SettlementLeg::MakerOutput,
+                sol(),
+                maker_output_amount,
+                SettlementStatus::Initiated,
+            ),
+        }))
+        .expect("submitted maker output");
+    consumer
+        .consume(&settlement_event(SettlementEvent::Confirmed {
+            metadata: EventMetadata::new(run),
+            receipt: htlc_receipt(
+                trade_id,
+                SettlementLeg::MakerOutput,
+                sol(),
+                maker_output_amount,
+                SettlementStatus::Initiated,
+            ),
+        }))
+        .expect("confirmed maker output");
+
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::htlc_escrow(sol()))
+            .expect("htlc_escrow before refund"),
+        i128::from(maker_output_amount)
+    );
+
+    consumer
+        .consume(&settlement_event(SettlementEvent::Refunded {
+            metadata: EventMetadata::new(run),
+            receipt: htlc_receipt(
+                trade_id,
+                SettlementLeg::MakerOutput,
+                sol(),
+                maker_output_amount,
+                SettlementStatus::Refunded,
+            ),
+        }))
+        .expect("refunded maker output");
+
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::htlc_escrow(sol()))
+            .expect("htlc_escrow after refund"),
+        0
+    );
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::working(sol()))
+            .expect("working sol after refund"),
+        i128::from(maker_output_amount)
+    );
+}
+
+#[tokio::test]
+async fn taker_input_refund_closes_receivable_back_to_external() {
+    // Drives Confirmed{TakerInput} (opens receivable), then
+    // Refunded{TakerInput} (closes the receivable back into external).
+    let db = Db::open_in_memory().expect("open in-memory db");
+    let consumer = LedgerEventConsumer::new(&db);
+    let repository = SqliteLedgerRepository::new(&db);
+
+    let trade_id = TradeId::generate();
+    let run = run_id();
+    let taker_input_amount: u64 = 750_000;
+
+    consumer
+        .consume(&settlement_event(SettlementEvent::Confirmed {
+            metadata: EventMetadata::new(run),
+            receipt: htlc_receipt(
+                trade_id,
+                SettlementLeg::TakerInput,
+                usdc(),
+                taker_input_amount,
+                SettlementStatus::Initiated,
+            ),
+        }))
+        .expect("confirmed taker input");
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::receivable(usdc(), trade_id.to_string()))
+            .expect("receivable after confirm"),
+        i128::from(taker_input_amount)
+    );
+
+    consumer
+        .consume(&settlement_event(SettlementEvent::Refunded {
+            metadata: EventMetadata::new(run),
+            receipt: htlc_receipt(
+                trade_id,
+                SettlementLeg::TakerInput,
+                usdc(),
+                taker_input_amount,
+                SettlementStatus::Refunded,
+            ),
+        }))
+        .expect("refunded taker input");
+
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::receivable(usdc(), trade_id.to_string()))
+            .expect("receivable after refund"),
+        0
+    );
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::external(usdc(), "htlc:taker_input"))
+            .expect("external taker_input after refund"),
+        0
+    );
+
+    let report = repository.integrity_report().expect("integrity report");
+    assert!(report.healthy, "refund should leave ledger balanced");
 }

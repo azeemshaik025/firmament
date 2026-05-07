@@ -13,6 +13,7 @@ use crate::domain::types::{
     HtlcInitiation, HtlcReceipt, QuoteId, RuntimeRunId, SettlementStatus, TokenAmount, TradeId,
     TxSignature, WalletRole,
 };
+use crate::error::{AppError, AppResult};
 
 /// Immutable terms needed to run a two-leg HTLC settlement.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -225,23 +226,22 @@ impl TwoSidedSettlement {
     ///
     /// Reuses the cached lock receipt (mutated by [`Self::record_taker_lock`])
     /// and emits [`SettlementEvent::Confirmed`].
-    #[must_use]
-    pub fn confirm_taker_lock(&self, run_id: RuntimeRunId) -> SettlementTransition {
-        let receipt = self.taker_input_leg.lock_receipt.clone().unwrap_or_else(|| {
-            self.receipt(
-                SettlementLeg::TakerInput,
-                self.terms.taker_input.clone(),
-                SettlementStatus::Initiated,
-                None,
-            )
-        });
-        SettlementTransition {
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error when called before
+    /// [`Self::record_taker_lock`] has populated the lock receipt.
+    pub fn confirm_taker_lock(&self, run_id: RuntimeRunId) -> AppResult<SettlementTransition> {
+        let receipt = self.taker_input_leg.lock_receipt.clone().ok_or_else(|| {
+            AppError::internal("confirm_taker_lock called before record_taker_lock")
+        })?;
+        Ok(SettlementTransition {
             step: SettlementStep::TakerLockConfirmed,
             event: SettlementEvent::Confirmed {
                 metadata: EventMetadata::new(run_id),
                 receipt,
             },
-        }
+        })
     }
 
     /// Record maker destination HTLC submission (post-RPC, pre-confirmation).
@@ -275,23 +275,22 @@ impl TwoSidedSettlement {
     ///
     /// Reuses the cached lock receipt (mutated by [`Self::record_maker_lock`])
     /// and emits [`SettlementEvent::Confirmed`].
-    #[must_use]
-    pub fn confirm_maker_lock(&self, run_id: RuntimeRunId) -> SettlementTransition {
-        let receipt = self.maker_output_leg.lock_receipt.clone().unwrap_or_else(|| {
-            self.receipt(
-                SettlementLeg::MakerOutput,
-                self.terms.maker_output.clone(),
-                SettlementStatus::Initiated,
-                None,
-            )
-        });
-        SettlementTransition {
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error when called before
+    /// [`Self::record_maker_lock`] has populated the lock receipt.
+    pub fn confirm_maker_lock(&self, run_id: RuntimeRunId) -> AppResult<SettlementTransition> {
+        let receipt = self.maker_output_leg.lock_receipt.clone().ok_or_else(|| {
+            AppError::internal("confirm_maker_lock called before record_maker_lock")
+        })?;
+        Ok(SettlementTransition {
             step: SettlementStep::MakerLockConfirmed,
             event: SettlementEvent::Confirmed {
                 metadata: EventMetadata::new(run_id),
                 receipt,
             },
-        }
+        })
     }
 
     /// Record taker redemption of maker output.
@@ -479,7 +478,9 @@ mod tests {
             crate::domain::events::SettlementEvent::Submitted { .. }
         ));
 
-        let taker_lock_confirmed = settlement.confirm_taker_lock(run_id);
+        let taker_lock_confirmed = settlement
+            .confirm_taker_lock(run_id)
+            .expect("confirm_taker_lock returns transition after record_taker_lock");
         assert!(matches!(
             taker_lock_confirmed.step,
             SettlementStep::TakerLockConfirmed
@@ -497,7 +498,9 @@ mod tests {
             crate::domain::events::SettlementEvent::Submitted { .. }
         ));
 
-        let maker_lock_confirmed = settlement.confirm_maker_lock(run_id);
+        let maker_lock_confirmed = settlement
+            .confirm_maker_lock(run_id)
+            .expect("confirm_maker_lock returns transition after record_maker_lock");
         assert!(matches!(
             maker_lock_confirmed.step,
             SettlementStep::MakerLockConfirmed
@@ -522,6 +525,31 @@ mod tests {
             maker_redeem.event,
             crate::domain::events::SettlementEvent::Redeemed { .. }
         ));
+    }
+
+    #[test]
+    fn confirm_taker_lock_errors_before_record_taker_lock() {
+        let run_id = crate::domain::types::RuntimeRunId::generate();
+        let settlement = TwoSidedSettlement::new(terms());
+
+        let error = settlement
+            .confirm_taker_lock(run_id)
+            .expect_err("confirm_taker_lock without record_taker_lock should error");
+        assert!(error.to_string().contains("confirm_taker_lock"));
+    }
+
+    #[test]
+    fn confirm_maker_lock_errors_before_record_maker_lock() {
+        let run_id = crate::domain::types::RuntimeRunId::generate();
+        let mut settlement = TwoSidedSettlement::new(terms());
+        // Advance through taker phases without locking maker output.
+        let _ = settlement.record_taker_lock(run_id, Some("sig".into()));
+        let _ = settlement.confirm_taker_lock(run_id).expect("taker confirm");
+
+        let error = settlement
+            .confirm_maker_lock(run_id)
+            .expect_err("confirm_maker_lock without record_maker_lock should error");
+        assert!(error.to_string().contains("confirm_maker_lock"));
     }
 
     #[test]

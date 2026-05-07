@@ -12,7 +12,8 @@ use uuid::Uuid;
 
 use crate::adapters::persistence::db::{Db, sqlite_error};
 use crate::domain::events::{GatewayEvent, RuntimeEvent, SettlementEvent, SwapEvent};
-use crate::domain::types::{AmountRaw, AssetId};
+use crate::domain::settlement::SettlementLeg;
+use crate::domain::types::{AmountRaw, AssetId, HtlcReceipt, TradeId};
 use crate::error::AppError;
 
 /// Ledger account buckets used by the Solana-only runtime.
@@ -810,7 +811,7 @@ impl<'db> LedgerEventConsumer<'db> {
     /// to create a transaction but fail validation or persistence.
     pub fn consume(&self, event: &RuntimeEvent) -> Result<LedgerConsumeSummary, AppError> {
         let mut summary = LedgerConsumeSummary::default();
-        let transactions = transactions_for_event(event, &mut summary)?;
+        let transactions = self.transactions_for_event(event, &mut summary)?;
 
         for transaction in transactions {
             match self.repository.save_transaction(&transaction)? {
@@ -821,137 +822,469 @@ impl<'db> LedgerEventConsumer<'db> {
 
         Ok(summary)
     }
+
+    /// Look up the most recent settlement-lifecycle idempotency-key suffix for
+    /// the given trade. Returns `None` if no transitions have been recorded yet
+    /// (e.g. consumer restart with empty DB, or refund arrives before any lock).
+    ///
+    /// Used by refund handling to determine which phase to reverse.
+    fn latest_trade_phase_suffix(
+        &self,
+        trade_id: TradeId,
+    ) -> Result<Option<String>, AppError> {
+        let prefix = format!("ledger:trade:{trade_id}:");
+        let pattern = format!("{prefix}%");
+        self.repository
+            .db
+            .with_connection(|connection| {
+                connection
+                    .query_row(
+                        "SELECT idempotency_key FROM ledger_transactions
+                         WHERE idempotency_key LIKE ?1
+                         ORDER BY created_at DESC
+                         LIMIT 1",
+                        params![pattern],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()
+                    .map_err(sqlite_error)
+            })
+            .map(|maybe_key| {
+                maybe_key.map(|key| key.trim_start_matches(prefix.as_str()).to_owned())
+            })
+    }
 }
 
-#[allow(clippy::too_many_lines)]
-fn transactions_for_event(
-    event: &RuntimeEvent,
-    summary: &mut LedgerConsumeSummary,
-) -> Result<Vec<LedgerTransaction>, AppError> {
-    let mut transactions = Vec::new();
-    match event {
-        RuntimeEvent::Gateway(GatewayEvent::RefillRequested { metadata, amount }) => {
-            transactions.push(
-                LedgerTransactionBuilder::new("gateway_refill_requested", metadata.event_id)
-                    .description("Gateway refill requested")
-                    .idempotency_key(format!(
-                        "ledger:event:{}:gateway_refill_requested",
-                        metadata.event_id
-                    ))
-                    .debit(
-                        LedgerAccountId::pending_gateway_deposit(amount.asset.clone()),
-                        amount.amount_raw,
-                    )
-                    .credit(
-                        LedgerAccountId::gateway(amount.asset.clone()),
-                        amount.amount_raw,
-                    )
-                    .build_at(metadata.occurred_at)?,
-            );
-        }
-        RuntimeEvent::Gateway(GatewayEvent::RefillCompleted { metadata, receipt }) => {
-            transactions.push(
-                LedgerTransactionBuilder::new("gateway_refill_completed", metadata.event_id)
-                    .description("Gateway refill completed into working custody")
-                    .idempotency_key(format!(
-                        "ledger:event:{}:gateway_refill_completed",
-                        metadata.event_id
-                    ))
-                    .debit(
-                        LedgerAccountId::working(receipt.amount.asset.clone()),
-                        receipt.amount.amount_raw,
-                    )
-                    .credit(
-                        LedgerAccountId::pending_gateway_deposit(receipt.amount.asset.clone()),
-                        receipt.amount.amount_raw,
-                    )
-                    .build_at(metadata.occurred_at)?,
-            );
-        }
-        RuntimeEvent::Swap(SwapEvent::Executed { metadata, receipt }) => {
-            if let Some(output_amount) = &receipt.output_amount {
+/// Idempotency key suffixes for settlement-lifecycle ledger transitions.
+///
+/// Stable strings — appended to `ledger:trade:{trade_id}:` to form the full
+/// idempotency key. The refund handler reads back the latest suffix for a
+/// trade and uses it to choose which phase to reverse.
+mod settlement_suffix {
+    pub(super) const RESERVE_INVENTORY: &str = "reserve_inventory";
+    pub(super) const RECEIVABLE_OPEN: &str = "receivable_open";
+    pub(super) const RESERVED_TO_PENDING_ESCROW: &str = "reserved_to_pending_escrow";
+    pub(super) const PENDING_ESCROW_TO_HTLC_ESCROW: &str = "pending_escrow_to_htlc_escrow";
+    pub(super) const HTLC_ESCROW_TO_TRADING: &str = "htlc_escrow_to_trading";
+    pub(super) const RECEIVABLE_TO_CUSTODY: &str = "receivable_to_custody";
+    pub(super) const REFUND_REVERSE: &str = "refund_reverse";
+}
+
+/// Stable qualifier for the per-trade `external` account that mirrors the
+/// taker-input HTLC PDA holding the funds before maker redemption.
+const TAKER_INPUT_HTLC_EXTERNAL: &str = "htlc:taker_input";
+
+fn settlement_idempotency_key(trade_id: TradeId, suffix: &str) -> String {
+    format!("ledger:trade:{trade_id}:{suffix}")
+}
+
+impl<'db> LedgerEventConsumer<'db> {
+    #[allow(clippy::too_many_lines)]
+    fn transactions_for_event(
+        &self,
+        event: &RuntimeEvent,
+        summary: &mut LedgerConsumeSummary,
+    ) -> Result<Vec<LedgerTransaction>, AppError> {
+        let mut transactions = Vec::new();
+        match event {
+            RuntimeEvent::Gateway(GatewayEvent::RefillRequested { metadata, amount }) => {
                 transactions.push(
-                    LedgerTransactionBuilder::new("swap_executed", metadata.event_id)
-                        .description("Jupiter swap output arrived in working custody")
+                    LedgerTransactionBuilder::new("gateway_refill_requested", metadata.event_id)
+                        .description("Gateway refill requested")
                         .idempotency_key(format!(
-                            "ledger:event:{}:swap_executed_output",
+                            "ledger:event:{}:gateway_refill_requested",
                             metadata.event_id
                         ))
                         .debit(
-                            LedgerAccountId::working(output_amount.asset.clone()),
-                            output_amount.amount_raw,
+                            LedgerAccountId::pending_gateway_deposit(amount.asset.clone()),
+                            amount.amount_raw,
                         )
                         .credit(
-                            LedgerAccountId::rebalance(output_amount.asset.clone()),
-                            output_amount.amount_raw,
+                            LedgerAccountId::gateway(amount.asset.clone()),
+                            amount.amount_raw,
                         )
                         .build_at(metadata.occurred_at)?,
                 );
-            } else {
+            }
+            RuntimeEvent::Gateway(GatewayEvent::RefillCompleted { metadata, receipt }) => {
+                transactions.push(
+                    LedgerTransactionBuilder::new("gateway_refill_completed", metadata.event_id)
+                        .description("Gateway refill completed into working custody")
+                        .idempotency_key(format!(
+                            "ledger:event:{}:gateway_refill_completed",
+                            metadata.event_id
+                        ))
+                        .debit(
+                            LedgerAccountId::working(receipt.amount.asset.clone()),
+                            receipt.amount.amount_raw,
+                        )
+                        .credit(
+                            LedgerAccountId::pending_gateway_deposit(receipt.amount.asset.clone()),
+                            receipt.amount.amount_raw,
+                        )
+                        .build_at(metadata.occurred_at)?,
+                );
+            }
+            RuntimeEvent::Swap(SwapEvent::Executed { metadata, receipt }) => {
+                if let Some(output_amount) = &receipt.output_amount {
+                    transactions.push(
+                        LedgerTransactionBuilder::new("swap_executed", metadata.event_id)
+                            .description("Jupiter swap output arrived in working custody")
+                            .idempotency_key(format!(
+                                "ledger:event:{}:swap_executed_output",
+                                metadata.event_id
+                            ))
+                            .debit(
+                                LedgerAccountId::working(output_amount.asset.clone()),
+                                output_amount.amount_raw,
+                            )
+                            .credit(
+                                LedgerAccountId::rebalance(output_amount.asset.clone()),
+                                output_amount.amount_raw,
+                            )
+                            .build_at(metadata.occurred_at)?,
+                    );
+                } else {
+                    summary
+                        .ignored
+                        .push("swap_executed missing output_amount".to_owned());
+                }
+            }
+            RuntimeEvent::Gateway(GatewayEvent::BalanceChecked { .. }) => {
                 summary
                     .ignored
-                    .push("swap_executed missing output_amount".to_owned());
+                    .push("gateway balance check is a snapshot, not a movement".to_owned());
+            }
+            RuntimeEvent::Gateway(GatewayEvent::Failed { .. }) => {
+                summary
+                    .ignored
+                    .push("gateway failure has no token movement amount".to_owned());
+            }
+            RuntimeEvent::Settlement(settlement_event) => {
+                self.append_settlement_transactions(settlement_event, summary, &mut transactions)?;
+            }
+            RuntimeEvent::Quote(_) => {
+                summary
+                    .ignored
+                    .push("quote event has no internal token movement".to_owned());
+            }
+            RuntimeEvent::Risk(_) => {
+                summary
+                    .ignored
+                    .push("risk event has no token movement".to_owned());
+            }
+            RuntimeEvent::Inventory(_) => {
+                summary.ignored.push(
+                    "inventory event is observational; balances stay derived from entries"
+                        .to_owned(),
+                );
+            }
+            RuntimeEvent::System(_) => {
+                summary
+                    .ignored
+                    .push("system event has no token movement".to_owned());
+            }
+            RuntimeEvent::Swap(SwapEvent::PriceObserved { .. } | SwapEvent::Quoted { .. }) => {
+                summary
+                    .ignored
+                    .push("swap price/quote event has no executed token movement".to_owned());
+            }
+            RuntimeEvent::Swap(SwapEvent::Failed { .. }) => {
+                summary
+                    .ignored
+                    .push("swap failure has no token movement amount".to_owned());
             }
         }
-        RuntimeEvent::Gateway(GatewayEvent::BalanceChecked { .. }) => {
-            summary
-                .ignored
-                .push("gateway balance check is a snapshot, not a movement".to_owned());
-        }
-        RuntimeEvent::Gateway(GatewayEvent::Failed { .. }) => {
-            summary
-                .ignored
-                .push("gateway failure has no token movement amount".to_owned());
-        }
-        RuntimeEvent::Settlement(settlement_event) => {
-            let reason = match settlement_event {
-                SettlementEvent::Started { .. } => "settlement started has no asset amount",
-                SettlementEvent::Submitted { .. } => {
-                    "settlement submitted receipt is ignored until T5c rewires the consumer"
-                }
-                SettlementEvent::Confirmed { .. } => {
-                    "settlement confirmed receipt is ignored until T5c rewires the consumer"
-                }
-                SettlementEvent::Redeemed { .. } => "settlement redeemed receipt has no amount",
-                SettlementEvent::Refunded { .. } => "settlement refunded receipt has no amount",
-                SettlementEvent::StatusChanged { .. } => "settlement status change has no amount",
-                SettlementEvent::Failed { .. } => "settlement failure has no token movement amount",
-            };
-            summary.ignored.push(reason.to_owned());
-        }
-        RuntimeEvent::Quote(_) => {
-            summary
-                .ignored
-                .push("quote event has no internal token movement".to_owned());
-        }
-        RuntimeEvent::Risk(_) => {
-            summary
-                .ignored
-                .push("risk event has no token movement".to_owned());
-        }
-        RuntimeEvent::Inventory(_) => {
-            summary.ignored.push(
-                "inventory event is observational; balances stay derived from entries".to_owned(),
-            );
-        }
-        RuntimeEvent::System(_) => {
-            summary
-                .ignored
-                .push("system event has no token movement".to_owned());
-        }
-        RuntimeEvent::Swap(SwapEvent::PriceObserved { .. } | SwapEvent::Quoted { .. }) => {
-            summary
-                .ignored
-                .push("swap price/quote event has no executed token movement".to_owned());
-        }
-        RuntimeEvent::Swap(SwapEvent::Failed { .. }) => {
-            summary
-                .ignored
-                .push("swap failure has no token movement amount".to_owned());
-        }
+
+        Ok(transactions)
     }
 
-    Ok(transactions)
+    /// Translate one settlement event into the corresponding lifecycle
+    /// movements. See module-level docs for the full state-transition table.
+    ///
+    /// Repricing-pass note: v1 acts on every `Confirmed { TakerInput }` event
+    /// and trusts the orchestrator to gate it. If a subsequent `Refunded` or
+    /// `Failed` event arrives, the refund branch unwinds whichever phase the
+    /// trade reached.
+    #[allow(clippy::too_many_lines)]
+    fn append_settlement_transactions(
+        &self,
+        event: &SettlementEvent,
+        summary: &mut LedgerConsumeSummary,
+        transactions: &mut Vec<LedgerTransaction>,
+    ) -> Result<(), AppError> {
+        match event {
+            SettlementEvent::Started { .. } => {
+                summary
+                    .ignored
+                    .push("settlement started has no asset amount".to_owned());
+            }
+            SettlementEvent::Submitted { metadata, receipt } => {
+                match receipt.leg {
+                    SettlementLeg::TakerInput => {
+                        // Taker-leg submission is informational only — the
+                        // maker waits for confirmation before reserving
+                        // inventory. No ledger movement.
+                        summary.ignored.push(
+                            "submitted taker-input HTLC reserves no inventory until confirmation"
+                                .to_owned(),
+                        );
+                    }
+                    SettlementLeg::MakerOutput => {
+                        // Maker submitted their HTLC. v1 design note: the
+                        // `working_custody → reserved` reservation is
+                        // semantically tied to `Confirmed { TakerInput }`,
+                        // but that receipt only carries the input asset and
+                        // amount, not the maker-output sizing. The
+                        // `Submitted { MakerOutput }` receipt is the first
+                        // event that carries both pieces (asset, amount) for
+                        // the output leg, so the consumer emits BOTH the
+                        // `reserve_inventory` and `reserved_to_pending_escrow`
+                        // transitions here. The reserved account lands at
+                        // zero net balance immediately, but the audit log
+                        // still records the intermediate reservation.
+                        let trade_id = receipt.trade_id;
+                        let asset = receipt.amount.asset.clone();
+                        let amount = receipt.amount.amount_raw;
+                        transactions.push(
+                            LedgerTransactionBuilder::new("trade", trade_id.as_uuid())
+                                .description("maker output reserved: working_custody -> reserved")
+                                .idempotency_key(settlement_idempotency_key(
+                                    trade_id,
+                                    settlement_suffix::RESERVE_INVENTORY,
+                                ))
+                                .debit(
+                                    LedgerAccountId::reserved(
+                                        asset.clone(),
+                                        trade_id.to_string(),
+                                    ),
+                                    amount,
+                                )
+                                .credit(LedgerAccountId::working(asset.clone()), amount)
+                                .build_at(metadata.occurred_at)?,
+                        );
+                        transactions.push(
+                            LedgerTransactionBuilder::new("trade", trade_id.as_uuid())
+                                .description(
+                                    "maker output HTLC submitted: reserved -> pending_escrow",
+                                )
+                                .idempotency_key(settlement_idempotency_key(
+                                    trade_id,
+                                    settlement_suffix::RESERVED_TO_PENDING_ESCROW,
+                                ))
+                                .debit(LedgerAccountId::pending_escrow(asset.clone()), amount)
+                                .credit(
+                                    LedgerAccountId::reserved(asset, trade_id.to_string()),
+                                    amount,
+                                )
+                                .build_at(metadata.occurred_at)?,
+                        );
+                    }
+                }
+            }
+            SettlementEvent::Confirmed { metadata, receipt } => match receipt.leg {
+                SettlementLeg::TakerInput => {
+                    // Taker lock confirmed (repricing-pass treated as implicit
+                    // for v1): open a receivable claim against the external
+                    // HTLC PDA for the taker-input asset.
+                    //
+                    // The matching `working_custody -> reserved` movement on
+                    // the maker-output asset is emitted at
+                    // `Submitted { MakerOutput }` time because that is the
+                    // first event whose receipt carries the output asset and
+                    // amount. See the Submitted arm above for details.
+                    let trade_id = receipt.trade_id;
+                    let taker_input = &receipt.amount;
+                    transactions.push(
+                        LedgerTransactionBuilder::new("trade", trade_id.as_uuid())
+                            .description(
+                                "taker input HTLC confirmed: open receivable against external (input asset)"
+                            )
+                            .idempotency_key(settlement_idempotency_key(
+                                trade_id,
+                                settlement_suffix::RECEIVABLE_OPEN,
+                            ))
+                            .debit(
+                                LedgerAccountId::receivable(
+                                    taker_input.asset.clone(),
+                                    trade_id.to_string(),
+                                ),
+                                taker_input.amount_raw,
+                            )
+                            .credit(
+                                LedgerAccountId::external(
+                                    taker_input.asset.clone(),
+                                    TAKER_INPUT_HTLC_EXTERNAL,
+                                ),
+                                taker_input.amount_raw,
+                            )
+                            .build_at(metadata.occurred_at)?,
+                    );
+                }
+                SettlementLeg::MakerOutput => {
+                    // Maker lock confirmed on chain: pending_escrow ->
+                    // htlc_escrow.
+                    let trade_id = receipt.trade_id;
+                    let asset = receipt.amount.asset.clone();
+                    let amount = receipt.amount.amount_raw;
+                    transactions.push(
+                        LedgerTransactionBuilder::new("trade", trade_id.as_uuid())
+                            .description("maker output HTLC confirmed: pending_escrow -> htlc_escrow")
+                            .idempotency_key(settlement_idempotency_key(
+                                trade_id,
+                                settlement_suffix::PENDING_ESCROW_TO_HTLC_ESCROW,
+                            ))
+                            .debit(LedgerAccountId::htlc_escrow(asset.clone()), amount)
+                            .credit(LedgerAccountId::pending_escrow(asset), amount)
+                            .build_at(metadata.occurred_at)?,
+                    );
+                }
+            },
+            SettlementEvent::Redeemed { metadata, receipt } => match receipt.leg {
+                SettlementLeg::MakerOutput => {
+                    // Taker redeemed maker's output HTLC: htlc_escrow ->
+                    // trading.
+                    let trade_id = receipt.trade_id;
+                    let asset = receipt.amount.asset.clone();
+                    let amount = receipt.amount.amount_raw;
+                    transactions.push(
+                        LedgerTransactionBuilder::new("trade", trade_id.as_uuid())
+                            .description("taker redeemed maker output: htlc_escrow -> trading")
+                            .idempotency_key(settlement_idempotency_key(
+                                trade_id,
+                                settlement_suffix::HTLC_ESCROW_TO_TRADING,
+                            ))
+                            .debit(LedgerAccountId::trading(asset.clone()), amount)
+                            .credit(LedgerAccountId::htlc_escrow(asset), amount)
+                            .build_at(metadata.occurred_at)?,
+                    );
+                }
+                SettlementLeg::TakerInput => {
+                    // Maker redeemed taker's input HTLC: receivable ->
+                    // working_custody.
+                    let trade_id = receipt.trade_id;
+                    let asset = receipt.amount.asset.clone();
+                    let amount = receipt.amount.amount_raw;
+                    transactions.push(
+                        LedgerTransactionBuilder::new("trade", trade_id.as_uuid())
+                            .description(
+                                "maker redeemed taker input: receivable -> working_custody",
+                            )
+                            .idempotency_key(settlement_idempotency_key(
+                                trade_id,
+                                settlement_suffix::RECEIVABLE_TO_CUSTODY,
+                            ))
+                            .debit(LedgerAccountId::working(asset.clone()), amount)
+                            .credit(
+                                LedgerAccountId::receivable(asset, trade_id.to_string()),
+                                amount,
+                            )
+                            .build_at(metadata.occurred_at)?,
+                    );
+                }
+            },
+            SettlementEvent::Refunded { metadata, receipt } => {
+                self.append_refund_transaction(metadata.occurred_at, receipt, transactions)?;
+            }
+            SettlementEvent::StatusChanged { .. } => {
+                summary
+                    .ignored
+                    .push("settlement status change has no token movement".to_owned());
+            }
+            SettlementEvent::Failed { .. } => {
+                // Failed before reservation: nothing to unwind. Once a
+                // reservation has landed, refunds drive the reversal.
+                summary
+                    .ignored
+                    .push("settlement failure has no token movement amount".to_owned());
+            }
+        }
+        Ok(())
+    }
+
+    /// Reverse the most recent live position for a refunded leg.
+    ///
+    /// We pick the unwind path by reading the trade's most recent
+    /// settlement-lifecycle idempotency-key suffix from the database
+    /// (Option A — explicit phase tracking via the persisted ledger).
+    fn append_refund_transaction(
+        &self,
+        occurred_at: OffsetDateTime,
+        receipt: &HtlcReceipt,
+        transactions: &mut Vec<LedgerTransaction>,
+    ) -> Result<(), AppError> {
+        let trade_id = receipt.trade_id;
+        let asset = receipt.amount.asset.clone();
+        let amount = receipt.amount.amount_raw;
+        let key = settlement_idempotency_key(trade_id, settlement_suffix::REFUND_REVERSE);
+
+        let latest_suffix = self.latest_trade_phase_suffix(trade_id)?;
+        let builder = match (receipt.leg, latest_suffix.as_deref()) {
+            (SettlementLeg::TakerInput, _) => {
+                // Taker input refund: close the receivable opened on
+                // Confirmed{TakerInput}. Reverses external <- receivable.
+                LedgerTransactionBuilder::new("trade", trade_id.as_uuid())
+                    .description("taker input refunded: receivable -> external")
+                    .idempotency_key(key)
+                    .debit(
+                        LedgerAccountId::external(asset.clone(), TAKER_INPUT_HTLC_EXTERNAL),
+                        amount,
+                    )
+                    .credit(
+                        LedgerAccountId::receivable(asset, trade_id.to_string()),
+                        amount,
+                    )
+            }
+            (
+                SettlementLeg::MakerOutput,
+                Some(settlement_suffix::PENDING_ESCROW_TO_HTLC_ESCROW),
+            ) => {
+                // Maker HTLC was confirmed (sat in htlc_escrow): unwind to
+                // working_custody.
+                LedgerTransactionBuilder::new("trade", trade_id.as_uuid())
+                    .description("maker output refunded from htlc_escrow: htlc_escrow -> working_custody")
+                    .idempotency_key(key)
+                    .debit(LedgerAccountId::working(asset.clone()), amount)
+                    .credit(LedgerAccountId::htlc_escrow(asset), amount)
+            }
+            (SettlementLeg::MakerOutput, Some(settlement_suffix::RESERVED_TO_PENDING_ESCROW)) => {
+                // Maker HTLC was submitted but never confirmed: pending_escrow
+                // -> working_custody.
+                LedgerTransactionBuilder::new("trade", trade_id.as_uuid())
+                    .description(
+                        "maker output refunded from pending_escrow: pending_escrow -> working_custody",
+                    )
+                    .idempotency_key(key)
+                    .debit(LedgerAccountId::working(asset.clone()), amount)
+                    .credit(LedgerAccountId::pending_escrow(asset), amount)
+            }
+            (SettlementLeg::MakerOutput, Some(settlement_suffix::RESERVE_INVENTORY)) => {
+                // Reservation in place but maker never submitted:
+                // reserved -> working_custody.
+                LedgerTransactionBuilder::new("trade", trade_id.as_uuid())
+                    .description("maker output refunded before submission: reserved -> working_custody")
+                    .idempotency_key(key)
+                    .debit(LedgerAccountId::working(asset.clone()), amount)
+                    .credit(
+                        LedgerAccountId::reserved(asset, trade_id.to_string()),
+                        amount,
+                    )
+            }
+            (SettlementLeg::MakerOutput, _) => {
+                // No prior phase observed (consumer restart with empty DB or
+                // refund arrived before any lock landed). Operator will need
+                // to manually post the adjustment; we log via summary.ignored.
+                tracing::warn!(
+                    trade_id = %trade_id,
+                    "MakerOutput refund without observed phase; skipping ledger reversal"
+                );
+                return Ok(());
+            }
+        };
+
+        transactions.push(builder.build_at(occurred_at)?);
+        Ok(())
+    }
 }
 
 fn format_timestamp(timestamp: OffsetDateTime) -> Result<String, AppError> {
