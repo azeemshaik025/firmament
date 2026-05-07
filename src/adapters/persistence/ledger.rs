@@ -37,6 +37,14 @@ pub enum LedgerAccountType {
     Trading,
     /// Money outside the solver boundary.
     External,
+    /// Earmarked working-custody funds for an in-flight trade. Still in the wallet, just reserved.
+    Reserved,
+    /// Earmarked Gateway USDC for an in-flight trade.
+    GatewayReserved,
+    /// Submitted Jupiter swap input awaiting on-chain confirmation.
+    PendingDexSpend,
+    /// Inbound funds claim initiated, awaiting confirmation.
+    Receivable,
 }
 
 impl LedgerAccountType {
@@ -52,6 +60,10 @@ impl LedgerAccountType {
             Self::Fees => "fees",
             Self::Trading => "trading",
             Self::External => "external",
+            Self::Reserved => "reserved",
+            Self::GatewayReserved => "gateway_reserved",
+            Self::PendingDexSpend => "pending_dex_spend",
+            Self::Receivable => "receivable",
         }
     }
 }
@@ -76,6 +88,10 @@ impl TryFrom<&str> for LedgerAccountType {
             "fees" => Ok(Self::Fees),
             "trading" => Ok(Self::Trading),
             "external" => Ok(Self::External),
+            "reserved" => Ok(Self::Reserved),
+            "gateway_reserved" => Ok(Self::GatewayReserved),
+            "pending_dex_spend" => Ok(Self::PendingDexSpend),
+            "receivable" => Ok(Self::Receivable),
             _ => Err(AppError::persistence(format!(
                 "invalid ledger account type: {value}"
             ))),
