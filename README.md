@@ -89,6 +89,7 @@ RPC, API keys, caps, and a verified cbBTC Solana mint.
 
 ## HTTP API
 
+- `GET /health`
 - `POST /v1/rfq`
 - `POST /v1/quotes/{quote_id}/wallet-settlement`
 - `POST /v1/trades/{trade_id}/taker-lock`
@@ -96,7 +97,8 @@ RPC, API keys, caps, and a verified cbBTC Solana mint.
 - `GET /v1/trades/{trade_id}`
 - `GET /v1/runtime/state`
 - `GET /v1/runtime/events`
-- `GET /v1/admin/summary`
+- `GET /v1/runtime/ledger`
+- `GET /v1/runtime/trades`
 
 When the live orchestrator is not attached, mutating RFQ routes return an
 unavailable response instead of pretending to settle.
@@ -106,7 +108,7 @@ unavailable response instead of pretending to settle.
 The web app is intentionally minimal:
 
 - `/app` is the swap demo surface.
-- `/app/admin` is a password-gated read-only runtime summary.
+- `/app/runtime` is the public read-only Live Runtime summary.
 - Public takers connect a Solana browser wallet and use the wallet-settlement
   endpoints.
 
@@ -125,10 +127,6 @@ Useful commands:
 npm run landing:dev
 npm run landing:build
 ```
-
-Admin login uses Argon2id PHC password hashes from
-`FIRMAMENT_ADMIN_PASSWORD_HASHES` and an HttpOnly signed session cookie using
-`FIRMAMENT_ADMIN_SESSION_SECRET`.
 
 ## Tests
 

@@ -44,7 +44,7 @@ Judge-facing rubric to optimize for:
 - **Novelty:** emphasize inventory-aware firm RFQs, risk rejection, rebalancing,
   Gateway refill, ledger/P&L, and operator supervision as the differentiated
   liquidity-operations layer.
-- **UX:** make the taker flow simple, but make the operator/admin proof clear:
+- **UX:** make the taker flow simple, but make the Live Runtime proof clear:
   inventory, risk, settlement state, rebalances, Gateway state, and accounting.
 - **Open-source/composability:** keep the HTTP API and runtime modules easy for
   other Solana apps to integrate or fork.
@@ -99,7 +99,7 @@ Implement these modules:
 - `risk`: allowlist, max notional, inventory threshold, exposure limits, stale price checks.
 - `ledger`: SQLite entries for quote, fill, HTLC escrow, fees, rebalance, and P&L.
 - `runtime`: event bus and state projection consumed by API and web app.
-- `frontend`: minimal Vite swap demo and read-only admin stats surface.
+- `frontend`: minimal Vite swap demo and public read-only Live Runtime surface.
 - `landing`: Next.js project positioning page for submission material.
 
 Use official docs as implementation references:
@@ -131,13 +131,17 @@ Expose HTTP API for the web app:
   - returns inventory, risk, P&L, active RFQs, rebalances, and recent events.
 - `GET /v1/runtime/events`
   - returns recent runtime events for external app/demo inspection.
+- `GET /v1/runtime/ledger`
+  - returns public read-only ledger/accounting balances for the runtime UI.
+- `GET /v1/runtime/trades`
+  - returns public read-only recent trade summaries and aggregate counts.
 
 Web app views:
 
 - **Swap:** minimal DEX-style demo page with browser wallet connect, asset/amount
   validation, firm quote request, wallet settlement steps, notification bar, and
   a small user-friendly runtime proof panel.
-- **Admin:** password-gated read-only runtime summary for inventory, risk,
+- **Live Runtime:** public read-only runtime summary for inventory, risk,
   ledger/P&L, RFQs, rebalances, Gateway state, and recent events.
 
 ## Demo Scenario
@@ -152,7 +156,7 @@ Web app views:
 7. Inventory drift appears in the web app.
 8. Runtime performs Jupiter rebalance if thresholds are crossed.
 9. Runtime performs Circle Gateway Solana USDC refill if working USDC falls below threshold.
-10. Web app shows user-friendly settlement status and network proof; admin shows runtime inventory, ledger/P&L, rebalances, Gateway state, and recent events.
+10. Web app shows user-friendly settlement status and network proof; Live Runtime shows runtime inventory, ledger/P&L, rebalances, Gateway state, and recent events.
 
 ## Test Plan
 
@@ -178,7 +182,7 @@ Web app views:
 - Manual demo acceptance:
   - one successful tiny SOL->USDC quote/fill is visible in the web app.
   - user-facing failures use simple swap language such as "No liquidity sources found."
-  - admin stats show runtime inventory, events, and accounting after the run.
+  - Live Runtime stats show runtime inventory, events, and accounting after the run.
   - P&L and ledger remain internally balanced after the run.
 
 ## Assumptions And Defaults
