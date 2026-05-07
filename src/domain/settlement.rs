@@ -101,10 +101,14 @@ pub enum SettlementPhase {
 pub enum SettlementStep {
     /// Flow start.
     Started,
-    /// Taker locks source funds.
+    /// Taker locks source funds (transaction submitted).
     TakerLock,
-    /// Maker locks destination funds.
+    /// Taker lock confirmed on chain.
+    TakerLockConfirmed,
+    /// Maker locks destination funds (transaction submitted).
     MakerLock,
+    /// Maker lock confirmed on chain.
+    MakerLockConfirmed,
     /// Taker redeems destination funds.
     TakerRedeem,
     /// Maker redeems source funds.
@@ -190,7 +194,10 @@ impl TwoSidedSettlement {
         }
     }
 
-    /// Record taker source HTLC initiation.
+    /// Record taker source HTLC submission (post-RPC, pre-confirmation).
+    ///
+    /// Emits [`SettlementEvent::Submitted`]. Pair with
+    /// [`Self::confirm_taker_lock`] once the on-chain account is observed.
     #[must_use]
     pub fn record_taker_lock(
         &mut self,
@@ -207,14 +214,40 @@ impl TwoSidedSettlement {
         self.taker_input_leg.lock_receipt = Some(receipt.clone());
         SettlementTransition {
             step: SettlementStep::TakerLock,
-            event: SettlementEvent::Initiated {
+            event: SettlementEvent::Submitted {
                 metadata: EventMetadata::new(run_id),
                 receipt,
             },
         }
     }
 
-    /// Record maker destination HTLC initiation.
+    /// Record taker source HTLC confirmation.
+    ///
+    /// Reuses the cached lock receipt (mutated by [`Self::record_taker_lock`])
+    /// and emits [`SettlementEvent::Confirmed`].
+    #[must_use]
+    pub fn confirm_taker_lock(&self, run_id: RuntimeRunId) -> SettlementTransition {
+        let receipt = self.taker_input_leg.lock_receipt.clone().unwrap_or_else(|| {
+            self.receipt(
+                SettlementLeg::TakerInput,
+                self.terms.taker_input.clone(),
+                SettlementStatus::Initiated,
+                None,
+            )
+        });
+        SettlementTransition {
+            step: SettlementStep::TakerLockConfirmed,
+            event: SettlementEvent::Confirmed {
+                metadata: EventMetadata::new(run_id),
+                receipt,
+            },
+        }
+    }
+
+    /// Record maker destination HTLC submission (post-RPC, pre-confirmation).
+    ///
+    /// Emits [`SettlementEvent::Submitted`]. Pair with
+    /// [`Self::confirm_maker_lock`] once the on-chain account is observed.
     #[must_use]
     pub fn record_maker_lock(
         &mut self,
@@ -231,7 +264,30 @@ impl TwoSidedSettlement {
         self.maker_output_leg.lock_receipt = Some(receipt.clone());
         SettlementTransition {
             step: SettlementStep::MakerLock,
-            event: SettlementEvent::Initiated {
+            event: SettlementEvent::Submitted {
+                metadata: EventMetadata::new(run_id),
+                receipt,
+            },
+        }
+    }
+
+    /// Record maker destination HTLC confirmation.
+    ///
+    /// Reuses the cached lock receipt (mutated by [`Self::record_maker_lock`])
+    /// and emits [`SettlementEvent::Confirmed`].
+    #[must_use]
+    pub fn confirm_maker_lock(&self, run_id: RuntimeRunId) -> SettlementTransition {
+        let receipt = self.maker_output_leg.lock_receipt.clone().unwrap_or_else(|| {
+            self.receipt(
+                SettlementLeg::MakerOutput,
+                self.terms.maker_output.clone(),
+                SettlementStatus::Initiated,
+                None,
+            )
+        });
+        SettlementTransition {
+            step: SettlementStep::MakerLockConfirmed,
+            event: SettlementEvent::Confirmed {
                 metadata: EventMetadata::new(run_id),
                 receipt,
             },
@@ -420,7 +476,17 @@ mod tests {
         assert!(matches!(taker_lock.step, SettlementStep::TakerLock));
         assert!(matches!(
             taker_lock.event,
-            crate::domain::events::SettlementEvent::Initiated { .. }
+            crate::domain::events::SettlementEvent::Submitted { .. }
+        ));
+
+        let taker_lock_confirmed = settlement.confirm_taker_lock(run_id);
+        assert!(matches!(
+            taker_lock_confirmed.step,
+            SettlementStep::TakerLockConfirmed
+        ));
+        assert!(matches!(
+            taker_lock_confirmed.event,
+            crate::domain::events::SettlementEvent::Confirmed { .. }
         ));
 
         let maker_lock = settlement.record_maker_lock(run_id, Some("maker-lock-sig".into()));
@@ -428,7 +494,17 @@ mod tests {
         assert!(matches!(maker_lock.step, SettlementStep::MakerLock));
         assert!(matches!(
             maker_lock.event,
-            crate::domain::events::SettlementEvent::Initiated { .. }
+            crate::domain::events::SettlementEvent::Submitted { .. }
+        ));
+
+        let maker_lock_confirmed = settlement.confirm_maker_lock(run_id);
+        assert!(matches!(
+            maker_lock_confirmed.step,
+            SettlementStep::MakerLockConfirmed
+        ));
+        assert!(matches!(
+            maker_lock_confirmed.event,
+            crate::domain::events::SettlementEvent::Confirmed { .. }
         ));
 
         let taker_redeem = settlement.record_taker_redeem(run_id, Some("taker-redeem-sig".into()));

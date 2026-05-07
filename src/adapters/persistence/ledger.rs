@@ -906,7 +906,12 @@ fn transactions_for_event(
         RuntimeEvent::Settlement(settlement_event) => {
             let reason = match settlement_event {
                 SettlementEvent::Started { .. } => "settlement started has no asset amount",
-                SettlementEvent::Initiated { .. } => "settlement initiated receipt has no amount",
+                SettlementEvent::Submitted { .. } => {
+                    "settlement submitted receipt is ignored until T5c rewires the consumer"
+                }
+                SettlementEvent::Confirmed { .. } => {
+                    "settlement confirmed receipt is ignored until T5c rewires the consumer"
+                }
                 SettlementEvent::Redeemed { .. } => "settlement redeemed receipt has no amount",
                 SettlementEvent::Refunded { .. } => "settlement refunded receipt has no amount",
                 SettlementEvent::StatusChanged { .. } => "settlement status change has no amount",

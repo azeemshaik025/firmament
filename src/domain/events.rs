@@ -114,11 +114,28 @@ pub enum SettlementEvent {
         /// Quote identifier that produced the trade.
         quote_id: QuoteId,
     },
-    /// HTLC transaction was initiated.
-    Initiated {
+    /// HTLC transaction was submitted on chain (not yet confirmed).
+    ///
+    /// Emitted immediately after the transaction lands in the mempool / RPC,
+    /// before any confirmation signal is observed. Replaces the pre-T5b
+    /// `Initiated` variant in conjunction with [`SettlementEvent::Confirmed`];
+    /// downstream consumers that previously matched on `"type": "initiated"`
+    /// must now handle `"submitted"` and `"confirmed"` independently.
+    Submitted {
         /// Event metadata.
         metadata: EventMetadata,
-        /// HTLC receipt.
+        /// HTLC receipt with leg, amount, and pending status/signature.
+        receipt: HtlcReceipt,
+    },
+    /// HTLC transaction was confirmed on chain.
+    ///
+    /// Emitted after the on-chain HTLC account is observed (status poll
+    /// reports `Initiated` against the live program state), signalling that
+    /// the lock has reached at least the configured commitment level.
+    Confirmed {
+        /// Event metadata.
+        metadata: EventMetadata,
+        /// HTLC receipt with confirmed status.
         receipt: HtlcReceipt,
     },
     /// HTLC was redeemed.

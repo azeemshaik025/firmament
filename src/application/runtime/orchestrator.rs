@@ -24,8 +24,8 @@ use crate::application::rfq::{
 use crate::config::AppConfig;
 use crate::domain::assets::AssetRegistry;
 use crate::domain::events::{
-    EventMetadata, GatewayEvent, InventoryEvent, RuntimeEvent, SettlementEvent, SwapEvent,
-    SystemEvent,
+    EventMetadata, GatewayEvent, InventoryEvent, QuoteEvent, RuntimeEvent, SettlementEvent,
+    SwapEvent, SystemEvent,
 };
 use crate::domain::inventory::{InventoryPolicy, InventorySnapshot as ValuedInventorySnapshot};
 use crate::domain::quote_engine::InventorySnapshot as QuoteInventorySnapshot;
@@ -378,6 +378,9 @@ impl RuntimeOrchestrator {
     /// Returns balance-reader or event-publish errors. Risk rejections are
     /// returned as successful [`RfqResponse::Rejected`] values.
     pub async fn request_rfq(&self, request: RfqRequest) -> AppResult<RfqResponse> {
+        let now = OffsetDateTime::now_utc();
+        self.expire_stored_quotes(now).await?;
+
         let balance_snapshot = self
             .adapters
             .balance_reader
@@ -393,7 +396,6 @@ impl RuntimeOrchestrator {
             self.app_state.config(),
             quote_inventory_from_balance(self.app_state.config(), &balance_snapshot),
         );
-        let now = OffsetDateTime::now_utc();
         let outcome = request_quote(
             request,
             &context,
@@ -423,6 +425,32 @@ impl RuntimeOrchestrator {
         }
 
         Ok(response)
+    }
+
+    async fn expire_stored_quotes(&self, now: OffsetDateTime) -> AppResult<()> {
+        let expired_quote_ids = {
+            let mut quotes = self.quotes.write().await;
+            let expired_quote_ids = quotes
+                .iter()
+                .filter_map(|(quote_id, quote)| (quote.expires_at <= now).then_some(*quote_id))
+                .collect::<Vec<_>>();
+
+            for quote_id in &expired_quote_ids {
+                quotes.remove(quote_id);
+            }
+
+            expired_quote_ids
+        };
+
+        for quote_id in expired_quote_ids {
+            self.publish(RuntimeEvent::Quote(QuoteEvent::Expired {
+                metadata: EventMetadata::new(self.app_state.run_id()),
+                quote_id,
+            }))
+            .await?;
+        }
+
+        Ok(())
     }
 
     /// Accept a stored quote, run the two-sided HTLC flow, refresh inventory,
@@ -625,6 +653,13 @@ impl RuntimeOrchestrator {
         );
         self.publish(RuntimeEvent::Settlement(transition.event))
             .await?;
+        // TODO(v0.2): wire real confirmation polling for the wallet flow.
+        // The browser-driven path posts the signed taker tx via
+        // `record_external_initiate`, which already confirms the signature
+        // before returning, so for v1 we treat the submission as confirmed.
+        let confirmation = state.settlement.confirm_taker_lock(self.app_state.run_id());
+        self.publish(RuntimeEvent::Settlement(confirmation.event))
+            .await?;
 
         let maker_lock = self
             .adapters
@@ -640,6 +675,12 @@ impl RuntimeOrchestrator {
             maker_lock.signature.as_ref().map(ToString::to_string),
         );
         self.publish(RuntimeEvent::Settlement(transition.event))
+            .await?;
+        // TODO(v0.2): wire real confirmation polling for the wallet flow.
+        // The maker leg uses `initiate_with_external_redeemer` which submits
+        // and signs locally; for v1 we treat the submission as confirmed.
+        let confirmation = state.settlement.confirm_maker_lock(self.app_state.run_id());
+        self.publish(RuntimeEvent::Settlement(confirmation.event))
             .await?;
 
         let response = WalletTakerLockResult {
@@ -791,6 +832,9 @@ impl RuntimeOrchestrator {
                 .await?;
             return Err(AppError::solana(reason));
         }
+        let confirmation = settlement.confirm_taker_lock(self.app_state.run_id());
+        self.publish(RuntimeEvent::Settlement(confirmation.event))
+            .await?;
 
         let maker_lock = match self
             .adapters
@@ -812,6 +856,21 @@ impl RuntimeOrchestrator {
             maker_lock.signature.as_ref().map(ToString::to_string),
         );
         self.publish(RuntimeEvent::Settlement(transition.event))
+            .await?;
+
+        let status = self
+            .adapters
+            .htlc_client
+            .status(settlement.terms.trade_id)
+            .await?;
+        if status != SettlementStatus::Initiated {
+            let reason = format!("maker HTLC validation returned {status:?}");
+            self.record_settlement_failure(settlement, quote, tx_signatures, &reason)
+                .await?;
+            return Err(AppError::solana(reason));
+        }
+        let confirmation = settlement.confirm_maker_lock(self.app_state.run_id());
+        self.publish(RuntimeEvent::Settlement(confirmation.event))
             .await
     }
 

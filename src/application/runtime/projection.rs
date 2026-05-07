@@ -194,7 +194,9 @@ impl RuntimeState {
                 self.rfq.active_settlement_count =
                     self.rfq.active_settlement_count.saturating_sub(1);
             }
-            SettlementEvent::Initiated { .. } | SettlementEvent::Redeemed { .. } => {}
+            SettlementEvent::Submitted { .. }
+            | SettlementEvent::Confirmed { .. }
+            | SettlementEvent::Redeemed { .. } => {}
         }
     }
 
