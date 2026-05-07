@@ -1,6 +1,7 @@
 import { DemoSequence } from "@/components/demo-sequence";
 
 const appHref = "http://127.0.0.1:3000/app/";
+const runtimeHref = `${appHref}runtime`;
 
 const proofPoints = [
   ["Assets", "USDC / SOL / cbBTC"],
@@ -78,11 +79,11 @@ const apiProof = [
   ["Runtime", "state + events"],
 ];
 
-const proofNotes = [
-  "Demo-scoped tiny amounts",
-  "Protocol workers are configurable",
-  "Swap UI is only the proof surface",
-  "No production custody or audit claim",
+const footerSignals = [
+  { code: "01", label: "Inventory-aware RFQs" },
+  { code: "02", label: "Policy-gated settlement" },
+  { code: "03", label: "Ledger-backed accounting" },
+  { code: "04", label: "Automated book repair" },
 ];
 
 export default function Home() {
@@ -119,9 +120,8 @@ export default function Home() {
           <p className="eyebrow">Solana RFQ Maker Runtime</p>
           <h1 id="hero-title">Firmament</h1>
           <p className="hero-lede">
-            Managed liquidity infrastructure for Solana apps and treasuries:
-            quote from governed inventory, reject unsafe flow, settle through
-            Solana HTLCs, then repair the book with ledger-backed operations.
+            Managed liquidity for Solana apps and treasuries, with firm RFQs,
+            policy checks, HTLC settlement, and ledger-backed book repair.
           </p>
           <div className="hero-actions">
             <a
@@ -133,7 +133,7 @@ export default function Home() {
               Launch app
             </a>
             <a className="button button-secondary" href="#runtime">
-              View runtime proof
+              View runtime
             </a>
           </div>
         </div>
@@ -191,10 +191,10 @@ export default function Home() {
       <section className="section runtime-section" id="runtime">
         <div className="section-heading">
           <p className="section-kicker">Live Runtime</p>
-          <h2>Public runtime proof, no admin gate.</h2>
+          <h2>Runtime state, open for inspection.</h2>
           <p>
-            Anyone can inspect health, balances, trades, repair state, and
-            ledger-backed accounting.
+            Health, balances, trades, repair state, and ledger-backed
+            accounting are available from the public app surface.
           </p>
         </div>
         <div className="runtime-layout">
@@ -212,12 +212,28 @@ export default function Home() {
               ))}
             </div>
           </div>
-          <div className="runtime-aside">
-            <span>Judge-facing proof</span>
-            <p>
-              One read-only surface shows that the maker runtime is actually
-              alive.
-            </p>
+          <div className="runtime-cta-panel">
+            <div>
+              <span className="runtime-panel-label">Runtime console</span>
+              <h3>Inspect the live book.</h3>
+              <p>
+                Open the read-only app view for health, inventory, trades, and
+                ledger-backed balances.
+              </p>
+            </div>
+            <div className="runtime-checks" aria-label="Runtime console properties">
+              <span>Public</span>
+              <span>Read-only</span>
+              <span>Ledger-backed</span>
+            </div>
+            <a
+              className="button button-primary runtime-button"
+              href={runtimeHref}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Open runtime
+            </a>
           </div>
         </div>
       </section>
@@ -260,16 +276,43 @@ export default function Home() {
         </div>
       </section>
 
-      <footer className="site-footer">
-        <div>
-          <span>Firmament</span>
-          <strong>Solana RFQ Maker Runtime</strong>
+      <footer className="site-footer" aria-label="Firmament footer">
+        <div className="footer-wordmark" aria-hidden="true">
+          <span>Firm</span>
+          <span>ament</span>
         </div>
-        <ul aria-label="Demo scope notes">
-          {proofNotes.map((note) => (
-            <li key={note}>{note}</li>
+        <div className="footer-content">
+          <div className="footer-brand">
+            <span className="brand-mark footer-mark" aria-hidden="true">
+              <span />
+              <span />
+              <span />
+              <span />
+            </span>
+            <div>
+              <strong>
+                <span>Firm</span>ament
+              </strong>
+              <p>Execution infrastructure for Solana apps and treasuries.</p>
+            </div>
+          </div>
+          <div className="footer-actions" aria-label="Footer links">
+            <a href={appHref} target="_blank" rel="noreferrer">
+              Launch app
+            </a>
+            <a href={runtimeHref} target="_blank" rel="noreferrer">
+              Runtime
+            </a>
+          </div>
+        </div>
+        <div className="footer-signals" aria-label="Runtime capabilities">
+          {footerSignals.map((signal) => (
+            <span key={signal.code}>
+              <b>{signal.code}</b>
+              {signal.label}
+            </span>
           ))}
-        </ul>
+        </div>
       </footer>
     </main>
   );
