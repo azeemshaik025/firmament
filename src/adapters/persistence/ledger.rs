@@ -67,6 +67,27 @@ impl LedgerAccountType {
             Self::Receivable => "receivable",
         }
     }
+
+    /// Account types that must never hold a negative balance.
+    ///
+    /// Used by the integrity reporter and the `/v1/runtime/ledger` endpoint's
+    /// `healthy` flag. Excludes P&L (Trading, Fees), boundary (External),
+    /// and transit (Rebalance) accounts which can legitimately go either
+    /// direction.
+    #[must_use]
+    pub const fn protected_account_types() -> &'static [Self] {
+        &[
+            Self::WorkingCustody,
+            Self::Reserved,
+            Self::Gateway,
+            Self::GatewayReserved,
+            Self::HtlcEscrow,
+            Self::PendingEscrow,
+            Self::PendingDexSpend,
+            Self::Receivable,
+            Self::PendingGatewayDeposit,
+        ]
+    }
 }
 
 impl Display for LedgerAccountType {
@@ -1555,5 +1576,28 @@ mod tests {
             let parsed = LedgerAccountType::try_from(s.as_str()).expect("parse known variant");
             assert_eq!(parsed, variant, "round trip failed for {variant:?}");
         }
+    }
+
+    #[test]
+    fn protected_account_types_excludes_pnl_buckets() {
+        use std::collections::HashSet;
+        let protected: HashSet<_> = LedgerAccountType::protected_account_types()
+            .iter()
+            .copied()
+            .collect();
+        assert!(protected.contains(&LedgerAccountType::WorkingCustody));
+        assert!(protected.contains(&LedgerAccountType::Reserved));
+        assert!(protected.contains(&LedgerAccountType::Gateway));
+        assert!(protected.contains(&LedgerAccountType::GatewayReserved));
+        assert!(protected.contains(&LedgerAccountType::HtlcEscrow));
+        assert!(protected.contains(&LedgerAccountType::PendingEscrow));
+        assert!(protected.contains(&LedgerAccountType::PendingDexSpend));
+        assert!(protected.contains(&LedgerAccountType::Receivable));
+        assert!(protected.contains(&LedgerAccountType::PendingGatewayDeposit));
+        // P&L / boundary accounts are NOT protected from going negative.
+        assert!(!protected.contains(&LedgerAccountType::Trading));
+        assert!(!protected.contains(&LedgerAccountType::Fees));
+        assert!(!protected.contains(&LedgerAccountType::External));
+        assert!(!protected.contains(&LedgerAccountType::Rebalance));
     }
 }
