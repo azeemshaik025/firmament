@@ -841,7 +841,7 @@ impl<'db> LedgerEventConsumer<'db> {
                     .query_row(
                         "SELECT idempotency_key FROM ledger_transactions
                          WHERE idempotency_key LIKE ?1
-                         ORDER BY created_at DESC
+                         ORDER BY created_at DESC, id DESC
                          LIMIT 1",
                         params![pattern],
                         |row| row.get::<_, String>(0),
