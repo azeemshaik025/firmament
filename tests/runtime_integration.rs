@@ -627,7 +627,17 @@ struct FakeHtlcClient {
 struct FakeHtlcState {
     initiated: Vec<HtlcInitiation>,
     redeemed: Vec<(TradeId, String)>,
+    redeemed_legs: HashMap<TradeId, Vec<SettlementLeg>>,
     failure: Option<HtlcFailure>,
+}
+
+fn fake_leg_for_funder(funder: WalletRole) -> SettlementLeg {
+    match funder {
+        WalletRole::Maker => SettlementLeg::MakerOutput,
+        WalletRole::Taker | WalletRole::Operator | WalletRole::Gateway => {
+            SettlementLeg::TakerInput
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -661,10 +671,7 @@ impl HtlcClient for FakeHtlcClient {
         if matches!(state.failure, Some(HtlcFailure::MakerInitiate)) && state.initiated.len() == 1 {
             return Err(AppError::solana("maker initiate failed"));
         }
-        let leg = match request.funder {
-            WalletRole::Maker => SettlementLeg::MakerOutput,
-            _ => SettlementLeg::TakerInput,
-        };
+        let leg = fake_leg_for_funder(request.funder);
         let amount = request.amount.clone();
         state.initiated.push(request.clone());
         Ok(HtlcReceipt {
@@ -678,26 +685,42 @@ impl HtlcClient for FakeHtlcClient {
 
     async fn redeem(&self, trade_id: TradeId, preimage: String) -> Result<HtlcReceipt, AppError> {
         let mut state = self.inner.lock().expect("htlc lock");
-        // Prefer the maker-funded leg for this trade (taker redeems first);
-        // fall back to any leg for the trade.
-        let source = state
+        let trade_initiations: Vec<HtlcInitiation> = state
             .initiated
             .iter()
-            .find(|init| init.trade_id == trade_id && init.funder == WalletRole::Maker)
-            .or_else(|| state.initiated.iter().find(|init| init.trade_id == trade_id));
-        let (leg, amount) = match source {
-            Some(init) => (
-                match init.funder {
-                    WalletRole::Maker => SettlementLeg::MakerOutput,
-                    _ => SettlementLeg::TakerInput,
-                },
-                init.amount.clone(),
-            ),
-            None => (
-                SettlementLeg::MakerOutput,
-                TokenAmount::new(AssetId::from("USDC"), AmountRaw::new(0)),
-            ),
-        };
+            .filter(|init| init.trade_id == trade_id)
+            .cloned()
+            .collect();
+        if trade_initiations.is_empty() {
+            return Err(AppError::validation(format!(
+                "fake htlc client: unknown HTLC trade {trade_id}"
+            )));
+        }
+
+        // Mirror the production adapter: taker redeem (MakerOutput) runs first,
+        // then maker redeem (TakerInput). Pick the first leg that has not yet
+        // been redeemed for this trade.
+        let already = state.redeemed_legs.entry(trade_id).or_default();
+        let order = [SettlementLeg::MakerOutput, SettlementLeg::TakerInput];
+        let leg = order
+            .into_iter()
+            .find(|candidate| {
+                trade_initiations
+                    .iter()
+                    .any(|init| fake_leg_for_funder(init.funder) == *candidate)
+                    && !already.contains(candidate)
+            })
+            .ok_or_else(|| {
+                AppError::validation(format!(
+                    "fake htlc client: all legs already redeemed for trade {trade_id}"
+                ))
+            })?;
+        already.push(leg);
+        let init = trade_initiations
+            .iter()
+            .find(|init| fake_leg_for_funder(init.funder) == leg)
+            .expect("matching initiation exists");
+        let amount = init.amount.clone();
         state.redeemed.push((trade_id, preimage));
         Ok(HtlcReceipt {
             trade_id,
@@ -710,20 +733,17 @@ impl HtlcClient for FakeHtlcClient {
 
     async fn refund(&self, trade_id: TradeId) -> Result<HtlcReceipt, AppError> {
         let state = self.inner.lock().expect("htlc lock");
-        let source = state.initiated.iter().find(|init| init.trade_id == trade_id);
-        let (leg, amount) = match source {
-            Some(init) => (
-                match init.funder {
-                    WalletRole::Maker => SettlementLeg::MakerOutput,
-                    _ => SettlementLeg::TakerInput,
-                },
-                init.amount.clone(),
-            ),
-            None => (
-                SettlementLeg::TakerInput,
-                TokenAmount::new(AssetId::from("USDC"), AmountRaw::new(0)),
-            ),
-        };
+        let init = state
+            .initiated
+            .iter()
+            .find(|init| init.trade_id == trade_id)
+            .ok_or_else(|| {
+                AppError::validation(format!(
+                    "fake htlc client: unknown HTLC trade {trade_id}"
+                ))
+            })?;
+        let leg = fake_leg_for_funder(init.funder);
+        let amount = init.amount.clone();
         Ok(HtlcReceipt {
             trade_id,
             leg,
