@@ -639,6 +639,45 @@ impl<'db> SqliteLedgerRepository<'db> {
         })
     }
 
+    /// Sum signed balances across every qualifier for a given
+    /// `(account_type, asset_id)`.
+    ///
+    /// Useful for accounts that are sharded by `trade_id` qualifier such as
+    /// `reserved`, `gateway_reserved`, `pending_dex_spend`, and `receivable`.
+    /// The returned value is signed: callers that need a non-negative gate
+    /// should clamp with `.max(0)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a persistence error when `SQLite` read or decode fails.
+    pub fn aggregate_balance_by_type(
+        &self,
+        account_type: LedgerAccountType,
+        asset_id: &AssetId,
+    ) -> Result<i128, AppError> {
+        self.db.with_connection(|connection| {
+            let mut statement = connection
+                .prepare(
+                    "SELECT amount_raw FROM ledger_entries
+                     WHERE account_type = ?1
+                       AND asset_id = ?2",
+                )
+                .map_err(sqlite_error)?;
+            let rows = statement
+                .query_map(
+                    params![account_type.to_string(), asset_id.as_str()],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(sqlite_error)?;
+
+            let mut balance = 0_i128;
+            for row in rows {
+                balance += parse_amount_raw(&row.map_err(sqlite_error)?)?;
+            }
+            Ok(balance)
+        })
+    }
+
     /// Return all non-zero derived balances.
     ///
     /// # Errors

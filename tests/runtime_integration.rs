@@ -123,7 +123,30 @@ async fn persistent_harness_with_persistence(
     options: RuntimeOrchestratorOptions,
     persistence: Arc<RuntimePersistence>,
 ) -> RuntimeOrchestrator {
-    let app_state = bootstrap(AppConfig::default())
+    persistent_harness_with_config(
+        AppConfig::default(),
+        price_provider,
+        htlc_client,
+        swap_executor,
+        gateway_client,
+        balance_reader,
+        options,
+        persistence,
+    )
+    .await
+}
+
+async fn persistent_harness_with_config(
+    config: AppConfig,
+    price_provider: FakePriceProvider,
+    htlc_client: FakeHtlcClient,
+    swap_executor: FakeSwapExecutor,
+    gateway_client: FakeGatewayClient,
+    balance_reader: FakeBalanceReader,
+    options: RuntimeOrchestratorOptions,
+    persistence: Arc<RuntimePersistence>,
+) -> RuntimeOrchestrator {
+    let app_state = bootstrap(config)
         .await
         .expect("bootstrap runtime state");
     RuntimeOrchestrator::new_with_persistence(
@@ -653,6 +676,73 @@ fn drain_working_custody(persistence: &Arc<RuntimePersistence>, asset: &AssetId,
         .expect("save drain ledger transaction");
 }
 
+fn seed_gateway_balance(persistence: &Arc<RuntimePersistence>, asset: &AssetId, amount: u64) {
+    if amount == 0 {
+        return;
+    }
+    let transaction = firmament::ledger::LedgerTransactionBuilder::new(
+        "test_seed_gateway",
+        uuid::Uuid::now_v7(),
+    )
+    .description("seed gateway USDC for Gateway-quoteability test")
+    .idempotency_key(format!(
+        "test:seed:gateway:{}:{}:{}",
+        asset.as_str(),
+        amount,
+        uuid::Uuid::now_v7(),
+    ))
+    .debit(LedgerAccountId::gateway(asset.clone()), AmountRaw::new(amount))
+    .credit(
+        LedgerAccountId::external(asset.clone(), "seed_gateway"),
+        AmountRaw::new(amount),
+    )
+    .build()
+    .expect("balanced gateway seed transaction");
+    persistence
+        .save_ledger_transaction(&transaction)
+        .expect("save gateway seed ledger transaction");
+}
+
+fn seed_gateway_reserved(
+    persistence: &Arc<RuntimePersistence>,
+    asset: &AssetId,
+    trade_id: &str,
+    amount: u64,
+) {
+    if amount == 0 {
+        return;
+    }
+    // Seed gateway_reserved against an external bookkeeping account so the
+    // gateway account itself stays at its full seeded size. The T9 gate is
+    // `gateway − sum(gateway_reserved:*)`, which depends on both legs being
+    // observable independently in the ledger.
+    let transaction = firmament::ledger::LedgerTransactionBuilder::new(
+        "test_seed_gateway_reserved",
+        uuid::Uuid::now_v7(),
+    )
+    .description("seed gateway_reserved USDC for in-flight trade")
+    .idempotency_key(format!(
+        "test:seed:gateway_reserved:{}:{}:{}:{}",
+        asset.as_str(),
+        trade_id,
+        amount,
+        uuid::Uuid::now_v7(),
+    ))
+    .debit(
+        LedgerAccountId::gateway_reserved(asset.clone(), trade_id.to_owned()),
+        AmountRaw::new(amount),
+    )
+    .credit(
+        LedgerAccountId::external(asset.clone(), "seed_gateway_reserved"),
+        AmountRaw::new(amount),
+    )
+    .build()
+    .expect("balanced gateway_reserved seed transaction");
+    persistence
+        .save_ledger_transaction(&transaction)
+        .expect("save gateway_reserved seed ledger transaction");
+}
+
 #[tokio::test]
 async fn rfq_quoteability_uses_ledger_working_custody_not_live_balance() {
     // Live wallet reader returns ZERO SOL — if the gate used the live
@@ -717,6 +807,98 @@ async fn rfq_quoteability_uses_ledger_working_custody_not_live_balance() {
             panic!(
                 "expected rejection once ledger working_custody was drained, got Accepted: {quote:?}"
             )
+        }
+    }
+}
+
+#[tokio::test]
+async fn rfq_gateway_quoteability_uses_ledger_minus_reserved() {
+    // T9: when working_custody is insufficient for the requested output, the
+    // RFQ gate must consider the Gateway-backed path. The Gateway gate uses
+    // FREE Gateway USDC = gateway − sum(gateway_reserved:USDC:*). With
+    // SOL=$200 reference price:
+    //   - gateway:USDC = 1_000_000_000 (1000 USDC)
+    //   - gateway_reserved:USDC[trade-A] = 400_000_000 (400 USDC)
+    //   - free Gateway USDC = 600 USDC → covers up to 3.0 SOL output
+    //
+    // RFQ for 500 USDC input (2.5 SOL output) → Accepted via Gateway path.
+    // RFQ for 700 USDC input (3.5 SOL output) → Rejected (free Gateway short).
+    //
+    // The default risk limits cap notional at $2/quote so this test bumps
+    // them to $1000 to make the gate the load-bearing assertion.
+    let mut config = AppConfig::default();
+    config.risk.max_quote_notional_usd = Decimal::from(1_000);
+    config.risk.max_trade_notional_usd = Decimal::from(1_000);
+    config.risk.max_daily_notional_usd = Decimal::from(10_000);
+    config.risk.max_non_stable_asset_notional_usd = Decimal::from(1_000);
+
+    // SOL = $200 reference: 1 USDC = 0.005 SOL, 1 SOL = 200 USDC.
+    let price_provider = FakePriceProvider {
+        prices: Arc::new(HashMap::from([
+            (AssetPair::new(usdc(), sol()), Decimal::new(5, 3)),
+            (AssetPair::new(sol(), usdc()), Decimal::from(200)),
+        ])),
+    };
+
+    let zero_sol_inventory = balance_snapshot(vec![
+        TokenAmount::new(usdc(), AmountRaw::new(0)),
+        TokenAmount::new(sol(), AmountRaw::new(0)),
+        TokenAmount::new(cbbtc(), AmountRaw::new(0)),
+    ]);
+
+    let persistence = Arc::new(
+        RuntimePersistence::open_in_memory(AssetRegistry::default()).expect("persistence"),
+    );
+    // working_custody:SOL = 0 (force Gateway path). USDC seeded so the input
+    // asset still appears in the ledger snapshot.
+    seed_working_custody(&persistence, &usdc(), 100_000_000);
+    seed_gateway_balance(&persistence, &usdc(), 1_000_000_000);
+    seed_gateway_reserved(&persistence, &usdc(), "trade-A", 400_000_000);
+
+    let orchestrator = persistent_harness_with_config(
+        config,
+        price_provider,
+        FakeHtlcClient::default(),
+        FakeSwapExecutor::default(),
+        FakeGatewayClient::default(),
+        FakeBalanceReader::new(vec![
+            zero_sol_inventory.clone(),
+            zero_sol_inventory.clone(),
+            zero_sol_inventory,
+        ]),
+        RuntimeOrchestratorOptions::default(),
+        Arc::clone(&persistence),
+    )
+    .await;
+
+    // Scenario A: 500 USDC → 2.5 SOL output ≤ 3.0 SOL synthetic Gateway
+    // supply → ACCEPT.
+    let response = orchestrator
+        .request_rfq(rfq(500_000_000))
+        .await
+        .expect("request 500 USDC quote");
+    assert!(
+        matches!(response, RfqResponse::Accepted(_)),
+        "expected Accepted via Gateway path (500 USDC < 600 free), got {response:?}"
+    );
+
+    // Scenario B: 700 USDC → 3.5 SOL output > 3.0 SOL synthetic Gateway
+    // supply → REJECT for inventory.
+    let response = orchestrator
+        .request_rfq(rfq(700_000_000))
+        .await
+        .expect("request 700 USDC quote");
+    match response {
+        RfqResponse::Rejected(rejection) => {
+            assert_eq!(
+                rejection.reason,
+                RejectionReason::InventoryBelowQuoteableThreshold,
+                "expected InventoryBelowQuoteableThreshold (700 USDC > 600 free), got {:?}",
+                rejection.reason
+            );
+        }
+        RfqResponse::Accepted(quote) => {
+            panic!("expected Gateway-path rejection at 700 USDC, got Accepted: {quote:?}")
         }
     }
 }

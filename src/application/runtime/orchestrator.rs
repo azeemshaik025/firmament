@@ -10,7 +10,7 @@ use tokio::sync::RwLock;
 
 use crate::adapters::persistence::db::Db;
 use crate::adapters::persistence::ledger::{
-    LedgerAccountId, LedgerEventConsumer, LedgerSaveOutcome, LedgerTransaction,
+    LedgerAccountId, LedgerAccountType, LedgerEventConsumer, LedgerSaveOutcome, LedgerTransaction,
     SqliteLedgerRepository,
 };
 use crate::adapters::persistence::pnl::{PnlCategory, PnlEstimate, PnlPriceBook, PnlRepository};
@@ -267,6 +267,33 @@ impl RuntimePersistence {
         Ok(AmountRaw::new(clamped))
     }
 
+    /// Return the FREE Gateway balance for an asset, defined as the Gateway
+    /// account balance minus the sum of every `gateway_reserved:asset:*`
+    /// qualifier.
+    ///
+    /// Used by the RFQ Gateway-quoteability gate: when `working_custody` is
+    /// insufficient for the requested output, the maker may still source the
+    /// fill via the Gateway-backed path provided the free Gateway balance
+    /// covers it after deducting in-flight reservations.
+    ///
+    /// Negative balances (gateway drift) are clamped to zero. Use
+    /// [`Self::summary`] to surface integrity drift instead.
+    ///
+    /// # Errors
+    ///
+    /// Returns a persistence error when either ledger read fails.
+    pub fn gateway_free_balance(&self, asset: &AssetId) -> AppResult<AmountRaw> {
+        let ledger = SqliteLedgerRepository::new(self.db.as_ref());
+        let gateway = ledger.account_balance(&LedgerAccountId::gateway(asset.clone()))?;
+        let reserved =
+            ledger.aggregate_balance_by_type(LedgerAccountType::GatewayReserved, asset)?;
+        // Clamp reserved to non-negative: a negative reserved balance would
+        // indicate ledger drift and must not bump the gate.
+        let free = gateway.saturating_sub(reserved.max(0));
+        let clamped = u64::try_from(free.max(0)).unwrap_or(u64::MAX);
+        Ok(AmountRaw::new(clamped))
+    }
+
     /// Persist a ledger transaction directly. Used by tests and operator
     /// reconciliation flows that need to seed or adjust ledger state without
     /// going through the runtime event consumer.
@@ -431,11 +458,19 @@ impl RuntimeOrchestrator {
         // is still emitted above for visibility/reconciliation but no longer
         // gates the RFQ. When no persistence is wired (legacy harness tests),
         // fall back to the live snapshot so behaviour is unchanged.
-        let inventory = self
+        let mut inventory = self
             .ledger_quote_inventory(&balance_snapshot)?
             .unwrap_or_else(|| {
                 quote_inventory_from_balance(self.app_state.config(), &balance_snapshot)
             });
+        // T9: if the output asset's working_custody is short, the maker may
+        // still source the fill via the Circle Gateway path. Augment the
+        // output-asset supply with FREE Gateway USDC (gateway minus
+        // gateway_reserved), converted into output-asset units via the
+        // reference price. The risk gate then evaluates against the combined
+        // inventory + Gateway-derived supply.
+        self.augment_inventory_with_gateway_supply(&request, &mut inventory)
+            .await?;
         let context = RfqContext::from_config(self.app_state.config(), inventory);
         let outcome = request_quote(
             request,
@@ -1416,7 +1451,132 @@ fn quote_inventory_from_balance(
     }
 }
 
+/// Convert a raw USDC amount into the equivalent raw amount of `output_asset`
+/// using the supplied USDC -> output `output_per_input` price. Returns zero
+/// when any of the conversions overflows or the price is non-positive — the
+/// caller treats the synthetic supply as absent in that case.
+fn convert_usdc_to_asset_raw(
+    usdc_raw: AmountRaw,
+    usdc_decimals: u8,
+    usdc_to_output_price: Decimal,
+    output_decimals: u8,
+) -> u64 {
+    use rust_decimal::prelude::ToPrimitive;
+
+    if usdc_to_output_price <= Decimal::ZERO {
+        return 0;
+    }
+    let mut usdc_factor = Decimal::ONE;
+    for _ in 0..usdc_decimals {
+        usdc_factor *= Decimal::from(10);
+    }
+    let mut output_factor = Decimal::ONE;
+    for _ in 0..output_decimals {
+        output_factor *= Decimal::from(10);
+    }
+    let usdc_ui = Decimal::from(usdc_raw.as_u64()) / usdc_factor;
+    let output_ui = usdc_ui * usdc_to_output_price;
+    let scaled = (output_ui * output_factor).trunc();
+    scaled.to_u64().unwrap_or(0)
+}
+
 impl RuntimeOrchestrator {
+    /// Treat FREE Gateway USDC as additional supply for the requested output
+    /// asset. T9 scope: this only widens the gate the inventory-first risk
+    /// rule sees — it does not yet formalize an `ExecutionPath` enum or wire a
+    /// distinct settlement path (that is worktree C, T-C1).
+    ///
+    /// Behaviour:
+    /// * No persistence wired -> nothing to do.
+    /// * Output asset is USDC -> add free Gateway USDC directly.
+    /// * Output asset is non-USDC -> fetch the `(USDC, output)` reference
+    ///   price and convert free Gateway USDC into output-asset units.
+    /// * Free Gateway USDC is zero or the asset/mint is unknown -> nothing
+    ///   to add.
+    async fn augment_inventory_with_gateway_supply(
+        &self,
+        request: &RfqRequest,
+        inventory: &mut QuoteInventorySnapshot,
+    ) -> AppResult<()> {
+        let Some(persistence) = self.persistence.as_ref() else {
+            return Ok(());
+        };
+
+        let usdc = AssetId::from("USDC");
+        let free_gateway_usdc = persistence.gateway_free_balance(&usdc)?;
+        if free_gateway_usdc.is_zero() {
+            return Ok(());
+        }
+
+        let Some(output_asset) = self
+            .app_state
+            .config()
+            .assets
+            .supported
+            .iter()
+            .find(|asset| asset.enabled && asset.mint == request.output_mint)
+            .cloned()
+        else {
+            // Unknown output mint — request_quote will reject with
+            // UnsupportedAsset before reaching the inventory gate.
+            return Ok(());
+        };
+
+        let synthetic_output_raw = if output_asset.id == usdc {
+            free_gateway_usdc.as_u64()
+        } else {
+            let usdc_decimals = self
+                .app_state
+                .config()
+                .assets
+                .supported
+                .iter()
+                .find(|asset| asset.enabled && asset.id == usdc)
+                .map_or(6, |asset| asset.decimals);
+            let pair = crate::domain::types::AssetPair::new(usdc.clone(), output_asset.id.clone());
+            let Ok(reference_price) = self
+                .adapters
+                .price_provider
+                .reference_price(pair)
+                .await
+            else {
+                // No price route from USDC to the output asset. The Gateway
+                // path requires a feasible Jupiter route in the live runtime;
+                // when the price feed cannot value it, surface no synthetic
+                // supply and let the inventory-first gate decide.
+                return Ok(());
+            };
+            convert_usdc_to_asset_raw(
+                free_gateway_usdc,
+                usdc_decimals,
+                reference_price.output_per_input,
+                output_asset.decimals,
+            )
+        };
+
+        if synthetic_output_raw == 0 {
+            return Ok(());
+        }
+
+        // Fold the synthetic supply into the existing balance entry, or push a
+        // new one if the asset isn't in the snapshot yet.
+        if let Some(entry) = inventory
+            .balances
+            .iter_mut()
+            .find(|amount| amount.asset == output_asset.id)
+        {
+            let combined = entry.amount_raw.as_u64().saturating_add(synthetic_output_raw);
+            entry.amount_raw = AmountRaw::new(combined);
+        } else {
+            inventory.balances.push(TokenAmount::new(
+                output_asset.id.clone(),
+                AmountRaw::new(synthetic_output_raw),
+            ));
+        }
+
+        Ok(())
+    }
+
     /// Build an RFQ inventory snapshot from the ledger's `working_custody`
     /// balances when durable persistence is wired. Returns `None` when no
     /// persistence is configured so callers can fall back to the live wallet
