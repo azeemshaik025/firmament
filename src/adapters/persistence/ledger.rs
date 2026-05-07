@@ -193,6 +193,38 @@ impl LedgerAccountId {
     pub fn external(asset: AssetId, qualifier: impl Into<String>) -> Self {
         Self::new(LedgerAccountType::External, asset, Some(qualifier.into()))
     }
+
+    /// Reserved working-custody funds for a trade. Qualifier is the trade ID.
+    #[must_use]
+    pub fn reserved(asset: AssetId, trade_id: impl Into<String>) -> Self {
+        Self::new(LedgerAccountType::Reserved, asset, Some(trade_id.into()))
+    }
+
+    /// Reserved Gateway USDC for a trade. Qualifier is the trade ID.
+    #[must_use]
+    pub fn gateway_reserved(asset: AssetId, trade_id: impl Into<String>) -> Self {
+        Self::new(
+            LedgerAccountType::GatewayReserved,
+            asset,
+            Some(trade_id.into()),
+        )
+    }
+
+    /// Pending Jupiter swap input. Qualifier is the trade ID.
+    #[must_use]
+    pub fn pending_dex_spend(asset: AssetId, trade_id: impl Into<String>) -> Self {
+        Self::new(
+            LedgerAccountType::PendingDexSpend,
+            asset,
+            Some(trade_id.into()),
+        )
+    }
+
+    /// Inbound claim awaiting confirmation. Qualifier is the trade ID.
+    #[must_use]
+    pub fn receivable(asset: AssetId, trade_id: impl Into<String>) -> Self {
+        Self::new(LedgerAccountType::Receivable, asset, Some(trade_id.into()))
+    }
 }
 
 /// Immutable ledger transaction.
