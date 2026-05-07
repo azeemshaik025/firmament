@@ -888,10 +888,7 @@ impl<'db> LedgerEventConsumer<'db> {
     /// (e.g. consumer restart with empty DB, or refund arrives before any lock).
     ///
     /// Used by refund handling to determine which phase to reverse.
-    fn latest_trade_phase_suffix(
-        &self,
-        trade_id: TradeId,
-    ) -> Result<Option<String>, AppError> {
+    fn latest_trade_phase_suffix(&self, trade_id: TradeId) -> Result<Option<String>, AppError> {
         let prefix = format!("ledger:trade:{trade_id}:");
         let pattern = format!("{prefix}%");
         self.repository
@@ -938,7 +935,7 @@ fn settlement_idempotency_key(trade_id: TradeId, suffix: &str) -> String {
     format!("ledger:trade:{trade_id}:{suffix}")
 }
 
-impl<'db> LedgerEventConsumer<'db> {
+impl LedgerEventConsumer<'_> {
     #[allow(clippy::too_many_lines)]
     fn transactions_for_event(
         &self,
@@ -1114,10 +1111,7 @@ impl<'db> LedgerEventConsumer<'db> {
                                     settlement_suffix::RESERVE_INVENTORY,
                                 ))
                                 .debit(
-                                    LedgerAccountId::reserved(
-                                        asset.clone(),
-                                        trade_id.to_string(),
-                                    ),
+                                    LedgerAccountId::reserved(asset.clone(), trade_id.to_string()),
                                     amount,
                                 )
                                 .credit(LedgerAccountId::working(asset.clone()), amount)
@@ -1189,7 +1183,9 @@ impl<'db> LedgerEventConsumer<'db> {
                     let amount = receipt.amount.amount_raw;
                     transactions.push(
                         LedgerTransactionBuilder::new("trade", trade_id.as_uuid())
-                            .description("maker output HTLC confirmed: pending_escrow -> htlc_escrow")
+                            .description(
+                                "maker output HTLC confirmed: pending_escrow -> htlc_escrow",
+                            )
                             .idempotency_key(settlement_idempotency_key(
                                 trade_id,
                                 settlement_suffix::PENDING_ESCROW_TO_HTLC_ESCROW,
@@ -1302,7 +1298,9 @@ impl<'db> LedgerEventConsumer<'db> {
                 // Maker HTLC was confirmed (sat in htlc_escrow): unwind to
                 // working_custody.
                 LedgerTransactionBuilder::new("trade", trade_id.as_uuid())
-                    .description("maker output refunded from htlc_escrow: htlc_escrow -> working_custody")
+                    .description(
+                        "maker output refunded from htlc_escrow: htlc_escrow -> working_custody",
+                    )
                     .idempotency_key(key)
                     .debit(LedgerAccountId::working(asset.clone()), amount)
                     .credit(LedgerAccountId::htlc_escrow(asset), amount)
@@ -1322,7 +1320,9 @@ impl<'db> LedgerEventConsumer<'db> {
                 // Reservation in place but maker never submitted:
                 // reserved -> working_custody.
                 LedgerTransactionBuilder::new("trade", trade_id.as_uuid())
-                    .description("maker output refunded before submission: reserved -> working_custody")
+                    .description(
+                        "maker output refunded before submission: reserved -> working_custody",
+                    )
                     .idempotency_key(key)
                     .debit(LedgerAccountId::working(asset.clone()), amount)
                     .credit(

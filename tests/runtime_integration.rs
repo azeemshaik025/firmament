@@ -10,10 +10,10 @@ use firmament::events::{
 use firmament::ledger::{LedgerAccountId, LedgerEventConsumer, SqliteLedgerRepository};
 use firmament::ports::{BalanceReader, GatewayClient, HtlcClient, PriceProvider, SwapExecutor};
 use firmament::rfq::{RfqRequest, RfqResponse};
-use firmament::settlement::SettlementLeg;
 use firmament::runtime::{
     RuntimeAdapters, RuntimeOrchestrator, RuntimeOrchestratorOptions, RuntimePersistence,
 };
+use firmament::settlement::SettlementLeg;
 use firmament::types::{
     AmountRaw, AssetId, AssetPair, BalanceSnapshot, GatewayReceipt, GatewayRefillRequest,
     HtlcInitiation, HtlcReceipt, MintAddress, QuoteId, ReferencePrice, RejectionReason,
@@ -136,6 +136,7 @@ async fn persistent_harness_with_persistence(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn persistent_harness_with_config(
     config: AppConfig,
     price_provider: FakePriceProvider,
@@ -146,9 +147,7 @@ async fn persistent_harness_with_config(
     options: RuntimeOrchestratorOptions,
     persistence: Arc<RuntimePersistence>,
 ) -> RuntimeOrchestrator {
-    let app_state = bootstrap(config)
-        .await
-        .expect("bootstrap runtime state");
+    let app_state = bootstrap(config).await.expect("bootstrap runtime state");
     RuntimeOrchestrator::new_with_persistence(
         app_state,
         RuntimeAdapters {
@@ -637,7 +636,10 @@ fn seed_working_custody(persistence: &Arc<RuntimePersistence>, asset: &AssetId, 
         amount,
         uuid::Uuid::now_v7(),
     ))
-    .debit(LedgerAccountId::working(asset.clone()), AmountRaw::new(amount))
+    .debit(
+        LedgerAccountId::working(asset.clone()),
+        AmountRaw::new(amount),
+    )
     .credit(
         LedgerAccountId::external(asset.clone(), "seed"),
         AmountRaw::new(amount),
@@ -668,7 +670,10 @@ fn drain_working_custody(persistence: &Arc<RuntimePersistence>, asset: &AssetId,
         LedgerAccountId::external(asset.clone(), "drain"),
         AmountRaw::new(amount),
     )
-    .credit(LedgerAccountId::working(asset.clone()), AmountRaw::new(amount))
+    .credit(
+        LedgerAccountId::working(asset.clone()),
+        AmountRaw::new(amount),
+    )
     .build()
     .expect("balanced drain transaction");
     persistence
@@ -680,24 +685,25 @@ fn seed_gateway_balance(persistence: &Arc<RuntimePersistence>, asset: &AssetId, 
     if amount == 0 {
         return;
     }
-    let transaction = firmament::ledger::LedgerTransactionBuilder::new(
-        "test_seed_gateway",
-        uuid::Uuid::now_v7(),
-    )
-    .description("seed gateway USDC for Gateway-quoteability test")
-    .idempotency_key(format!(
-        "test:seed:gateway:{}:{}:{}",
-        asset.as_str(),
-        amount,
-        uuid::Uuid::now_v7(),
-    ))
-    .debit(LedgerAccountId::gateway(asset.clone()), AmountRaw::new(amount))
-    .credit(
-        LedgerAccountId::external(asset.clone(), "seed_gateway"),
-        AmountRaw::new(amount),
-    )
-    .build()
-    .expect("balanced gateway seed transaction");
+    let transaction =
+        firmament::ledger::LedgerTransactionBuilder::new("test_seed_gateway", uuid::Uuid::now_v7())
+            .description("seed gateway USDC for Gateway-quoteability test")
+            .idempotency_key(format!(
+                "test:seed:gateway:{}:{}:{}",
+                asset.as_str(),
+                amount,
+                uuid::Uuid::now_v7(),
+            ))
+            .debit(
+                LedgerAccountId::gateway(asset.clone()),
+                AmountRaw::new(amount),
+            )
+            .credit(
+                LedgerAccountId::external(asset.clone(), "seed_gateway"),
+                AmountRaw::new(amount),
+            )
+            .build()
+            .expect("balanced gateway seed transaction");
     persistence
         .save_ledger_transaction(&transaction)
         .expect("save gateway seed ledger transaction");
@@ -951,9 +957,7 @@ struct FakeHtlcState {
 fn fake_leg_for_funder(funder: WalletRole) -> SettlementLeg {
     match funder {
         WalletRole::Maker => SettlementLeg::MakerOutput,
-        WalletRole::Taker | WalletRole::Operator | WalletRole::Gateway => {
-            SettlementLeg::TakerInput
-        }
+        WalletRole::Taker | WalletRole::Operator | WalletRole::Gateway => SettlementLeg::TakerInput,
     }
 }
 
@@ -1055,9 +1059,7 @@ impl HtlcClient for FakeHtlcClient {
             .iter()
             .find(|init| init.trade_id == trade_id)
             .ok_or_else(|| {
-                AppError::validation(format!(
-                    "fake htlc client: unknown HTLC trade {trade_id}"
-                ))
+                AppError::validation(format!("fake htlc client: unknown HTLC trade {trade_id}"))
             })?;
         let leg = fake_leg_for_funder(init.funder);
         let amount = init.amount.clone();
@@ -1209,12 +1211,11 @@ fn htlc_receipt(
         leg,
         amount: TokenAmount::new(asset, AmountRaw::new(raw_amount)),
         status,
-        signature: Some(TxSignature::new(format!(
-            "{leg:?}-{trade_id}-{status:?}"
-        ))),
+        signature: Some(TxSignature::new(format!("{leg:?}-{trade_id}-{status:?}"))),
     }
 }
 
+#[allow(clippy::too_many_lines)]
 #[tokio::test]
 async fn inventory_path_emits_full_ledger_sequence() {
     // Drives the LedgerEventConsumer with a synthetic, ordered settlement
@@ -1238,16 +1239,17 @@ async fn inventory_path_emits_full_ledger_sequence() {
     let seed = firmament::ledger::LedgerTransactionBuilder::new("test_seed", trade_id.as_uuid())
         .description("seed maker SOL working custody")
         .idempotency_key(format!("seed:{trade_id}:working_sol"))
-        .debit(LedgerAccountId::working(sol()), AmountRaw::new(maker_output_amount))
+        .debit(
+            LedgerAccountId::working(sol()),
+            AmountRaw::new(maker_output_amount),
+        )
         .credit(
             LedgerAccountId::external(sol(), "seed"),
             AmountRaw::new(maker_output_amount),
         )
         .build()
         .expect("balanced seed");
-    repository
-        .save_transaction(&seed)
-        .expect("save seed");
+    repository.save_transaction(&seed).expect("save seed");
 
     // Sanity-check the seed.
     assert_eq!(
@@ -1441,19 +1443,19 @@ async fn maker_output_refund_after_confirmation_unwinds_htlc_escrow() {
     let run = run_id();
     let maker_output_amount: u64 = 250_000_000;
 
-    let seed = firmament::ledger::LedgerTransactionBuilder::new(
-        "test_seed",
-        trade_id.as_uuid(),
-    )
-    .description("seed maker SOL working custody")
-    .idempotency_key(format!("seed:{trade_id}:working_sol"))
-    .debit(LedgerAccountId::working(sol()), AmountRaw::new(maker_output_amount))
-    .credit(
-        LedgerAccountId::external(sol(), "seed"),
-        AmountRaw::new(maker_output_amount),
-    )
-    .build()
-    .expect("balanced seed");
+    let seed = firmament::ledger::LedgerTransactionBuilder::new("test_seed", trade_id.as_uuid())
+        .description("seed maker SOL working custody")
+        .idempotency_key(format!("seed:{trade_id}:working_sol"))
+        .debit(
+            LedgerAccountId::working(sol()),
+            AmountRaw::new(maker_output_amount),
+        )
+        .credit(
+            LedgerAccountId::external(sol(), "seed"),
+            AmountRaw::new(maker_output_amount),
+        )
+        .build()
+        .expect("balanced seed");
     repository.save_transaction(&seed).expect("save seed");
 
     consumer
