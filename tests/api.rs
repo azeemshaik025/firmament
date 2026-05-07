@@ -31,6 +31,15 @@ async fn test_orchestrator_router() -> axum::Router {
     let app_state = bootstrap(AppConfig::default())
         .await
         .expect("bootstrap state");
+    let persistence = Arc::new(
+        RuntimePersistence::open_in_memory(firmament::assets::AssetRegistry::default())
+            .expect("persistence"),
+    );
+    // RFQ inventory now reads from ledger working_custody. Seed the ledger
+    // with matching maker SOL/USDC so legacy API tests still observe an
+    // accepted quote on the same inputs.
+    seed_working_custody(&persistence, AssetId::from("SOL"), 200_000_000);
+    seed_working_custody(&persistence, AssetId::from("USDC"), 10_000_000);
     let orchestrator = RuntimeOrchestrator::new_with_persistence(
         app_state,
         RuntimeAdapters {
@@ -43,13 +52,40 @@ async fn test_orchestrator_router() -> axum::Router {
                 post_settlement_inventory(),
             ])),
         },
-        Arc::new(
-            RuntimePersistence::open_in_memory(firmament::assets::AssetRegistry::default())
-                .expect("persistence"),
-        ),
+        persistence,
         RuntimeOrchestratorOptions::default(),
     );
     api::router_with_orchestrator(Arc::new(orchestrator))
+}
+
+fn seed_working_custody(persistence: &Arc<RuntimePersistence>, asset: AssetId, amount: u64) {
+    if amount == 0 {
+        return;
+    }
+    let transaction = firmament::ledger::LedgerTransactionBuilder::new(
+        "test_seed_working_custody",
+        uuid::Uuid::now_v7(),
+    )
+    .description("seed working custody for API RFQ test")
+    .idempotency_key(format!(
+        "test:api:seed:working:{}:{}:{}",
+        asset.as_str(),
+        amount,
+        uuid::Uuid::now_v7(),
+    ))
+    .debit(
+        firmament::ledger::LedgerAccountId::working(asset.clone()),
+        AmountRaw::new(amount),
+    )
+    .credit(
+        firmament::ledger::LedgerAccountId::external(asset, "seed"),
+        AmountRaw::new(amount),
+    )
+    .build()
+    .expect("balanced seed transaction");
+    persistence
+        .save_ledger_transaction(&transaction)
+        .expect("save seed ledger transaction");
 }
 
 async fn response_json(response: axum::response::Response) -> Value {

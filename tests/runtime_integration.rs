@@ -114,13 +114,14 @@ async fn harness(
     )
 }
 
-async fn persistent_harness(
+async fn persistent_harness_with_persistence(
     price_provider: FakePriceProvider,
     htlc_client: FakeHtlcClient,
     swap_executor: FakeSwapExecutor,
     gateway_client: FakeGatewayClient,
     balance_reader: FakeBalanceReader,
     options: RuntimeOrchestratorOptions,
+    persistence: Arc<RuntimePersistence>,
 ) -> RuntimeOrchestrator {
     let app_state = bootstrap(AppConfig::default())
         .await
@@ -134,9 +135,7 @@ async fn persistent_harness(
             gateway_client: Arc::new(gateway_client),
             balance_reader: Arc::new(balance_reader),
         },
-        Arc::new(
-            RuntimePersistence::open_in_memory(AssetRegistry::default()).expect("persistence"),
-        ),
+        persistence,
         options,
     )
 }
@@ -199,13 +198,23 @@ async fn runtime_happy_path_orchestrates_rfq_settlement_inventory_and_automation
 
 #[tokio::test]
 async fn runtime_fake_adapter_flow_feeds_balanced_ledger_and_pnl_projection() {
-    let orchestrator = persistent_harness(
+    let persistence = Arc::new(
+        RuntimePersistence::open_in_memory(AssetRegistry::default()).expect("persistence"),
+    );
+    // RFQ inventory now reads from the ledger's working_custody. Seed the
+    // ledger to match the live wallet snapshot so this end-to-end test still
+    // observes the same accept/settle path.
+    seed_working_custody(&persistence, &sol(), 200_000_000);
+    seed_working_custody(&persistence, &usdc(), 10_000_000);
+
+    let orchestrator = persistent_harness_with_persistence(
         FakePriceProvider::default(),
         FakeHtlcClient::default(),
         FakeSwapExecutor::default(),
         FakeGatewayClient::default(),
         FakeBalanceReader::new(vec![quote_inventory(), post_settlement_drift_inventory()]),
         RuntimeOrchestratorOptions::default(),
+        persistence,
     )
     .await;
 
@@ -587,6 +596,128 @@ fn accepted_quote_id(result: Result<RfqResponse, AppError>) -> QuoteId {
     match result.expect("request quote") {
         RfqResponse::Accepted(quote) => quote.quote_id,
         RfqResponse::Rejected(rejection) => panic!("expected accepted quote: {rejection:?}"),
+    }
+}
+
+fn seed_working_custody(persistence: &Arc<RuntimePersistence>, asset: &AssetId, amount: u64) {
+    if amount == 0 {
+        return;
+    }
+    let transaction = firmament::ledger::LedgerTransactionBuilder::new(
+        "test_seed_working_custody",
+        uuid::Uuid::now_v7(),
+    )
+    .description("seed working custody for RFQ inventory test")
+    .idempotency_key(format!(
+        "test:seed:working:{}:{}:{}",
+        asset.as_str(),
+        amount,
+        uuid::Uuid::now_v7(),
+    ))
+    .debit(LedgerAccountId::working(asset.clone()), AmountRaw::new(amount))
+    .credit(
+        LedgerAccountId::external(asset.clone(), "seed"),
+        AmountRaw::new(amount),
+    )
+    .build()
+    .expect("balanced seed transaction");
+    persistence
+        .save_ledger_transaction(&transaction)
+        .expect("save seed ledger transaction");
+}
+
+fn drain_working_custody(persistence: &Arc<RuntimePersistence>, asset: &AssetId, amount: u64) {
+    if amount == 0 {
+        return;
+    }
+    let transaction = firmament::ledger::LedgerTransactionBuilder::new(
+        "test_drain_working_custody",
+        uuid::Uuid::now_v7(),
+    )
+    .description("drain working custody for RFQ inventory test")
+    .idempotency_key(format!(
+        "test:drain:working:{}:{}:{}",
+        asset.as_str(),
+        amount,
+        uuid::Uuid::now_v7(),
+    ))
+    .debit(
+        LedgerAccountId::external(asset.clone(), "drain"),
+        AmountRaw::new(amount),
+    )
+    .credit(LedgerAccountId::working(asset.clone()), AmountRaw::new(amount))
+    .build()
+    .expect("balanced drain transaction");
+    persistence
+        .save_ledger_transaction(&transaction)
+        .expect("save drain ledger transaction");
+}
+
+#[tokio::test]
+async fn rfq_quoteability_uses_ledger_working_custody_not_live_balance() {
+    // Live wallet reader returns ZERO SOL — if the gate used the live
+    // snapshot, every quote would reject for inventory. The ledger working
+    // custody is the new operational source of truth.
+    let zero_sol_inventory = balance_snapshot(vec![
+        TokenAmount::new(usdc(), AmountRaw::new(10_000_000)),
+        TokenAmount::new(sol(), AmountRaw::new(0)),
+        TokenAmount::new(cbbtc(), AmountRaw::new(0)),
+    ]);
+
+    let persistence = Arc::new(
+        RuntimePersistence::open_in_memory(AssetRegistry::default()).expect("persistence"),
+    );
+    // Seed ledger working_custody with SOL well above quoteable threshold +
+    // gas buffer so the RFQ should be accepted purely on the ledger view.
+    seed_working_custody(&persistence, &sol(), 200_000_000);
+    // USDC is the input asset — having some on the ledger keeps the snapshot
+    // truthful but the gate is on the output asset.
+    seed_working_custody(&persistence, &usdc(), 10_000_000);
+
+    let orchestrator = persistent_harness_with_persistence(
+        FakePriceProvider::default(),
+        FakeHtlcClient::default(),
+        FakeSwapExecutor::default(),
+        FakeGatewayClient::default(),
+        FakeBalanceReader::new(vec![zero_sol_inventory.clone(), zero_sol_inventory]),
+        RuntimeOrchestratorOptions::default(),
+        Arc::clone(&persistence),
+    )
+    .await;
+
+    // Scenario A: ledger has SOL, live wallet reports zero — should ACCEPT.
+    let response = orchestrator
+        .request_rfq(rfq(100_000))
+        .await
+        .expect("request quote");
+    assert!(
+        matches!(response, RfqResponse::Accepted(_)),
+        "expected Accepted, got {response:?}"
+    );
+
+    // Scenario B: drain the ledger working_custody to zero. Live wallet
+    // reader still has its same configuration (which would have looked
+    // healthy if it were authoritative), but the ledger now says no SOL.
+    drain_working_custody(&persistence, &sol(), 200_000_000);
+
+    let response = orchestrator
+        .request_rfq(rfq(100_000))
+        .await
+        .expect("request quote after drain");
+    match response {
+        RfqResponse::Rejected(rejection) => {
+            assert_eq!(
+                rejection.reason,
+                RejectionReason::InventoryBelowQuoteableThreshold,
+                "expected InventoryBelowQuoteableThreshold, got {:?}",
+                rejection.reason
+            );
+        }
+        RfqResponse::Accepted(quote) => {
+            panic!(
+                "expected rejection once ledger working_custody was drained, got Accepted: {quote:?}"
+            )
+        }
     }
 }
 

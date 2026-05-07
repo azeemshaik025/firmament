@@ -9,7 +9,10 @@ use time::OffsetDateTime;
 use tokio::sync::RwLock;
 
 use crate::adapters::persistence::db::Db;
-use crate::adapters::persistence::ledger::{LedgerEventConsumer, SqliteLedgerRepository};
+use crate::adapters::persistence::ledger::{
+    LedgerAccountId, LedgerEventConsumer, LedgerSaveOutcome, LedgerTransaction,
+    SqliteLedgerRepository,
+};
 use crate::adapters::persistence::pnl::{PnlCategory, PnlEstimate, PnlPriceBook, PnlRepository};
 use crate::adapters::solana::htlc::{generate_secret, hash_secret};
 use crate::application::rebalance::{
@@ -248,6 +251,37 @@ impl RuntimePersistence {
         })
     }
 
+    /// Return the ledger working-custody balance for an asset on Solana.
+    ///
+    /// Negative balances are clipped to zero — the gate only cares about
+    /// quotable supply, not signed integrity. Use [`Self::summary`] to
+    /// surface integrity drift instead.
+    ///
+    /// # Errors
+    ///
+    /// Returns a persistence error when the ledger read fails.
+    pub fn working_custody_balance(&self, asset: &AssetId) -> AppResult<AmountRaw> {
+        let ledger = SqliteLedgerRepository::new(self.db.as_ref());
+        let balance = ledger.account_balance(&LedgerAccountId::working(asset.clone()))?;
+        let clamped = u64::try_from(balance.max(0)).unwrap_or(u64::MAX);
+        Ok(AmountRaw::new(clamped))
+    }
+
+    /// Persist a ledger transaction directly. Used by tests and operator
+    /// reconciliation flows that need to seed or adjust ledger state without
+    /// going through the runtime event consumer.
+    ///
+    /// # Errors
+    ///
+    /// Returns a persistence error when the transaction is invalid or the
+    /// `SQLite` write fails.
+    pub fn save_ledger_transaction(
+        &self,
+        transaction: &LedgerTransaction,
+    ) -> AppResult<LedgerSaveOutcome> {
+        SqliteLedgerRepository::new(self.db.as_ref()).save_transaction(transaction)
+    }
+
     /// Return the latest P&L projection.
     ///
     /// # Errors
@@ -392,10 +426,17 @@ impl RuntimeOrchestrator {
         }))
         .await?;
 
-        let context = RfqContext::from_config(
-            self.app_state.config(),
-            quote_inventory_from_balance(self.app_state.config(), &balance_snapshot),
-        );
+        // Quoteability reads from the ledger's working_custody when persistence
+        // is wired (the operational source of truth). The live wallet snapshot
+        // is still emitted above for visibility/reconciliation but no longer
+        // gates the RFQ. When no persistence is wired (legacy harness tests),
+        // fall back to the live snapshot so behaviour is unchanged.
+        let inventory = self
+            .ledger_quote_inventory(&balance_snapshot)?
+            .unwrap_or_else(|| {
+                quote_inventory_from_balance(self.app_state.config(), &balance_snapshot)
+            });
+        let context = RfqContext::from_config(self.app_state.config(), inventory);
         let outcome = request_quote(
             request,
             &context,
@@ -1372,6 +1413,36 @@ fn quote_inventory_from_balance(
         balances: balance_snapshot.balances.clone(),
         targets: balance_snapshot.balances.clone(),
         observed_at: balance_snapshot.observed_at,
+    }
+}
+
+impl RuntimeOrchestrator {
+    /// Build an RFQ inventory snapshot from the ledger's `working_custody`
+    /// balances when durable persistence is wired. Returns `None` when no
+    /// persistence is configured so callers can fall back to the live wallet
+    /// snapshot.
+    fn ledger_quote_inventory(
+        &self,
+        balance_snapshot: &BalanceSnapshot,
+    ) -> AppResult<Option<QuoteInventorySnapshot>> {
+        let Some(persistence) = self.persistence.as_ref() else {
+            return Ok(None);
+        };
+
+        let mut balances = Vec::with_capacity(self.app_state.config().assets.supported.len());
+        for asset in &self.app_state.config().assets.supported {
+            if !asset.enabled {
+                continue;
+            }
+            let amount = persistence.working_custody_balance(&asset.id)?;
+            balances.push(TokenAmount::new(asset.id.clone(), amount));
+        }
+
+        Ok(Some(QuoteInventorySnapshot {
+            balances: balances.clone(),
+            targets: balances,
+            observed_at: balance_snapshot.observed_at,
+        }))
     }
 }
 
