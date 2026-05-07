@@ -1,0 +1,18 @@
+{
+  "name": "firmament",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "predev": "test -d web/app/node_modules || npm ci --prefix web/app",
+    "dev": "npm --prefix web/app run dev",
+    "preapp:dev": "test -d web/app/node_modules || npm ci --prefix web/app",
+    "app:dev": "npm --prefix web/app run dev",
+    "prelanding:dev": "test -d landing/node_modules || npm ci --prefix landing",
+    "landing:dev": "npm --prefix landing run dev -- -p ${FIRMAMENT_LANDING_PORT:-3001}",
+    "preapp:build": "test -d web/app/node_modules || npm ci --prefix web/app",
+    "app:build": "npm --prefix web/app run build",
+    "prelanding:build": "test -d landing/node_modules || npm ci --prefix landing",
+    "landing:build": "npm --prefix landing run build",
+    "build": "npm run app:build && npm run landing:build"
+  }
+}

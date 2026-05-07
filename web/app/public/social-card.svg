@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" role="img" aria-labelledby="title desc">
+  <title id="title">Firmament social preview</title>
+  <desc id="desc">Firmament: risk-gated RFQs, Jupiter + Gateway repair, and ledger proof.</desc>
+  <defs>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M 32 0 L 0 0 0 32" fill="none" stroke="#2b3448" stroke-width="1"/>
+    </pattern>
+    <linearGradient id="panel" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1c202b"/>
+      <stop offset="0.58" stop-color="#20293a"/>
+      <stop offset="1" stop-color="#14251f"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="630" fill="#dfe7ff"/>
+  <rect width="1200" height="630" fill="url(#grid)" opacity="0.72"/>
+  <rect x="48" y="48" width="1104" height="534" rx="18" fill="url(#panel)" stroke="#1c202b" stroke-width="8"/>
+  <rect x="48" y="48" width="1104" height="534" rx="18" fill="url(#grid)" opacity="0.34"/>
+
+  <g transform="translate(92 86)">
+    <rect width="70" height="70" rx="8" fill="#f8fbff"/>
+    <rect x="12" y="12" width="20" height="20" rx="2" fill="#00a6ff"/>
+    <rect x="38" y="12" width="20" height="20" rx="2" fill="#16a34a"/>
+    <rect x="12" y="38" width="20" height="20" rx="2" fill="#d97706"/>
+    <rect x="38" y="38" width="20" height="20" rx="2" fill="#7107e7"/>
+  </g>
+
+  <text x="184" y="128" fill="#f8fbff" font-family="'Arial Black', Impact, sans-serif" font-size="42" font-weight="900">Firmament</text>
+  <text x="92" y="260" fill="#f8fbff" font-family="'Arial Black', Impact, sans-serif" font-size="118" font-weight="900">Runtime</text>
+  <text x="566" y="260" fill="#9fb7ff" font-family="'Arial Black', Impact, sans-serif" font-size="118" font-weight="900">proof</text>
+
+  <text x="96" y="336" fill="#dfe7ff" font-family="'JetBrains Mono', ui-monospace, monospace" font-size="34" font-weight="800">Risk-gated RFQs. Jupiter + Gateway repair. Ledger proof.</text>
+  <text x="96" y="392" fill="#9fb7ff" font-family="'JetBrains Mono', ui-monospace, monospace" font-size="24" font-weight="800">Execution infrastructure for Solana apps and treasuries.</text>
+
+  <g font-family="'JetBrains Mono', ui-monospace, monospace" font-size="24" font-weight="800">
+    <rect x="96" y="464" width="288" height="54" rx="6" fill="rgba(248,251,255,0.08)" stroke="#dfe7ff" stroke-width="3"/>
+    <text x="118" y="500" fill="#00a6ff">01</text>
+    <text x="166" y="500" fill="#f8fbff">Risk-gated RFQs</text>
+
+    <rect x="408" y="464" width="390" height="54" rx="6" fill="rgba(248,251,255,0.08)" stroke="#dfe7ff" stroke-width="3"/>
+    <text x="430" y="500" fill="#00a6ff">02</text>
+    <text x="478" y="500" fill="#f8fbff">Jupiter + Gateway repair</text>
+
+    <rect x="822" y="464" width="238" height="54" rx="6" fill="rgba(248,251,255,0.08)" stroke="#dfe7ff" stroke-width="3"/>
+    <text x="844" y="500" fill="#00a6ff">03</text>
+    <text x="892" y="500" fill="#f8fbff">Ledger proof</text>
+  </g>
+
+  <text x="680" y="560" fill="#ffffff" opacity="0.08" font-family="'Arial Black', Impact, sans-serif" font-size="210" font-weight="900">FIRM</text>
+</svg>

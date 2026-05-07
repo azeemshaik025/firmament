@@ -1,14 +1,36 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
+const devPort = Number(process.env.FIRMAMENT_WEB_PORT ?? '3000');
+const apiProxyTarget = process.env.FIRMAMENT_API_PROXY_TARGET ?? 'http://127.0.0.1:5050';
+
 export default defineConfig({
   plugins: [react()],
   base: '/app/',
+  define: {
+    global: 'globalThis'
+  },
+  resolve: {
+    alias: {
+      buffer: 'buffer/'
+    }
+  },
+  optimizeDeps: {
+    include: ['buffer']
+  },
   server: {
-    port: 5174,
+    host: '127.0.0.1',
+    port: devPort,
     strictPort: true,
     proxy: {
-      '/v1': 'http://127.0.0.1:5050'
+      '/health': {
+        target: apiProxyTarget,
+        changeOrigin: true
+      },
+      '/v1': {
+        target: apiProxyTarget,
+        changeOrigin: true
+      }
     }
   },
   build: {

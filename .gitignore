@@ -2,6 +2,8 @@
 
 # Frontend dependencies and compiler caches
 node_modules/
+web/**/dist/
+.next/
 *.tsbuildinfo
 .vite/
 npm-debug.log*
@@ -18,9 +20,6 @@ runtime.sqlite
 # Local agent planning/support files
 agent-context/
 agent-prompts/
-docs/
-scripts/*
-!scripts/run_demo.sh
 
 # Local secrets and environment overrides
 .env
@@ -35,3 +34,6 @@ Thumbs.db
 *~
 .idea/
 .vscode/
+
+# Local demo artifacts
+demo-evidence/

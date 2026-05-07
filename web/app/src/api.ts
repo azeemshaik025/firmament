@@ -51,20 +51,81 @@ export type TradeStepResponse = {
   taker_redeem_transaction?: UnsignedWalletTransaction;
 };
 
-export type AdminMe = {
-  authenticated: boolean;
-  username?: string;
-  expires_at?: string;
+export type TokenAmount = {
+  asset: string;
+  amount_raw: number | string;
 };
 
-export type AdminSummary = {
-  inventory: unknown;
-  risk: unknown;
-  pnl: unknown;
-  rfq: unknown;
-  rebalance: unknown;
-  gateway: unknown;
-  recent_events: unknown[];
+export type RuntimeEvent = {
+  category: string;
+  event?: {
+    type?: string;
+    metadata?: {
+      occurred_at?: RuntimeTimestamp;
+    };
+    [key: string]: unknown;
+  };
+};
+
+export type RuntimeTimestamp = string | number[];
+
+export type RuntimeStateResponse = {
+  state: {
+    run_id: string;
+    started_at: RuntimeTimestamp;
+  };
+};
+
+export type RuntimeEventsResponse = {
+  count: number;
+  events: RuntimeEvent[];
+};
+
+export type LedgerAccountType =
+  | 'working_custody'
+  | 'htlc_escrow'
+  | 'pending_escrow'
+  | 'gateway'
+  | 'pending_gateway_deposit'
+  | 'rebalance'
+  | 'fees'
+  | 'trading'
+  | 'external';
+
+export type RuntimeLedgerBalance = {
+  account_type: LedgerAccountType;
+  asset: string;
+  qualifier?: string | null;
+  balance_raw: string;
+  decimals: number;
+  display_amount: string;
+};
+
+export type RuntimeLedgerResponse = {
+  healthy: boolean;
+  entry_count: number;
+  balances: RuntimeLedgerBalance[];
+};
+
+export type RuntimeTrade = {
+  trade_id: string;
+  quote_id: string;
+  settlement_status: string;
+  input?: TokenAmount;
+  output?: TokenAmount;
+  tx_signatures: string[];
+};
+
+export type RuntimeTradesResponse = {
+  total_count: number;
+  successful_count: number;
+  trades: RuntimeTrade[];
+};
+
+export type HealthResponse = {
+  status?: string;
+  ok?: boolean;
+  [key: string]: unknown;
 };
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -78,7 +139,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
 
   const text = await response.text();
-  const body = text ? JSON.parse(text) : null;
+  const body = parseResponseBody(text);
 
   if (!response.ok) {
     const message = body?.error?.message ?? body?.message ?? `Request failed with ${response.status}`;
@@ -88,8 +149,25 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return body as T;
 }
 
+function parseResponseBody(text: string) {
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { status: text };
+  }
+}
+
 export const api = {
   assets: () => request<Asset[]>('/v1/assets'),
+  health: () => request<HealthResponse>('/health'),
+  runtimeState: () => request<RuntimeStateResponse>('/v1/runtime/state'),
+  runtimeEvents: (limit = 30) => request<RuntimeEventsResponse>(`/v1/runtime/events?limit=${limit}`),
+  runtimeLedger: (accountType?: LedgerAccountType) => {
+    const query = accountType ? `?account_type=${encodeURIComponent(accountType)}` : '';
+    return request<RuntimeLedgerResponse>(`/v1/runtime/ledger${query}`);
+  },
+  runtimeTrades: (limit = 10) => request<RuntimeTradesResponse>(`/v1/runtime/trades?limit=${limit}`),
   requestRfq: (payload: RfqRequest) => request<RfqResponse>('/v1/rfq', {
     method: 'POST',
     body: JSON.stringify(payload)
@@ -105,14 +183,5 @@ export const api = {
   takerRedeem: (tradeId: string, payload: { preimage: string; signature?: string }) => request<TradeStepResponse>(`/v1/trades/${tradeId}/taker-redeem`, {
     method: 'POST',
     body: JSON.stringify(payload)
-  }),
-  adminLogin: (payload: { username: string; password: string }) => request<AdminMe>('/v1/admin/login', {
-    method: 'POST',
-    body: JSON.stringify(payload)
-  }),
-  adminLogout: () => request<AdminMe>('/v1/admin/logout', { method: 'POST' }),
-  adminMe: () => request<AdminMe>('/v1/admin/me'),
-  adminSummary: () => request<AdminSummary>('/v1/admin/summary'),
-  rebalanceCheck: () => request<void>('/v1/admin/rebalance/check', { method: 'POST' }),
-  gatewayRefillCheck: () => request<void>('/v1/admin/gateway/refill/check', { method: 'POST' })
+  })
 };

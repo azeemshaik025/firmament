@@ -1,0 +1,23 @@
+{
+	auto_https off
+}
+
+:8080 {
+	root * /srv
+	encode zstd gzip
+
+	handle /health {
+		reverse_proxy {$FIRMAMENT_BACKEND_ORIGIN:http://firmament-solver:5050}
+	}
+
+	handle /v1/* {
+		reverse_proxy {$FIRMAMENT_BACKEND_ORIGIN:http://firmament-solver:5050}
+	}
+
+	handle /app/* {
+		try_files {path} {path}/ /app/index.html
+		file_server
+	}
+
+	redir / /app/ 302
+}
