@@ -6,6 +6,7 @@ use firmament::assets::AssetRegistry;
 use firmament::events::{InventoryEvent, QuoteEvent, RuntimeEvent, SettlementEvent, SwapEvent};
 use firmament::ports::{BalanceReader, GatewayClient, HtlcClient, PriceProvider, SwapExecutor};
 use firmament::rfq::{RfqRequest, RfqResponse};
+use firmament::settlement::SettlementLeg;
 use firmament::runtime::{
     RuntimeAdapters, RuntimeOrchestrator, RuntimeOrchestratorOptions, RuntimePersistence,
 };
@@ -287,6 +288,34 @@ async fn runtime_maker_only_mode_rejects_local_taker_settlement_before_htlc() {
 
     assert!(error.to_string().contains("wallet settlement endpoints"));
     assert_eq!(htlc.initiated_count(), 0);
+}
+
+#[tokio::test]
+async fn runtime_request_rfq_expires_stored_quotes_before_new_quote() {
+    let orchestrator = harness(
+        FakePriceProvider::default(),
+        FakeHtlcClient::default(),
+        FakeSwapExecutor::default(),
+        FakeGatewayClient::default(),
+        FakeBalanceReader::new(vec![quote_inventory(), quote_inventory()]),
+        RuntimeOrchestratorOptions::default(),
+    )
+    .await;
+
+    let mut expiring_rfq = rfq(1_000);
+    expiring_rfq.expiry_seconds = Some(1);
+    let first_quote = accepted_quote_id(orchestrator.request_rfq(expiring_rfq).await);
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+    let second_quote = accepted_quote_id(orchestrator.request_rfq(rfq(1_000_000)).await);
+
+    assert_ne!(first_quote, second_quote);
+    let state = orchestrator.runtime().snapshot().await;
+    assert_eq!(state.rfq.active_quote_count, 1);
+    let events = orchestrator.runtime().recent_events(None).await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        RuntimeEvent::Quote(QuoteEvent::Expired { quote_id, .. }) if *quote_id == first_quote
+    )));
 }
 
 #[tokio::test]
@@ -632,9 +661,16 @@ impl HtlcClient for FakeHtlcClient {
         if matches!(state.failure, Some(HtlcFailure::MakerInitiate)) && state.initiated.len() == 1 {
             return Err(AppError::solana("maker initiate failed"));
         }
+        let leg = match request.funder {
+            WalletRole::Maker => SettlementLeg::MakerOutput,
+            _ => SettlementLeg::TakerInput,
+        };
+        let amount = request.amount.clone();
         state.initiated.push(request.clone());
         Ok(HtlcReceipt {
             trade_id: request.trade_id,
+            leg,
+            amount,
             status: SettlementStatus::Initiated,
             signature: Some(TxSignature::new(format!("init-{}", state.initiated.len()))),
         })
@@ -642,17 +678,56 @@ impl HtlcClient for FakeHtlcClient {
 
     async fn redeem(&self, trade_id: TradeId, preimage: String) -> Result<HtlcReceipt, AppError> {
         let mut state = self.inner.lock().expect("htlc lock");
+        // Prefer the maker-funded leg for this trade (taker redeems first);
+        // fall back to any leg for the trade.
+        let source = state
+            .initiated
+            .iter()
+            .find(|init| init.trade_id == trade_id && init.funder == WalletRole::Maker)
+            .or_else(|| state.initiated.iter().find(|init| init.trade_id == trade_id));
+        let (leg, amount) = match source {
+            Some(init) => (
+                match init.funder {
+                    WalletRole::Maker => SettlementLeg::MakerOutput,
+                    _ => SettlementLeg::TakerInput,
+                },
+                init.amount.clone(),
+            ),
+            None => (
+                SettlementLeg::MakerOutput,
+                TokenAmount::new(AssetId::from("USDC"), AmountRaw::new(0)),
+            ),
+        };
         state.redeemed.push((trade_id, preimage));
         Ok(HtlcReceipt {
             trade_id,
+            leg,
+            amount,
             status: SettlementStatus::Redeemed,
             signature: Some(TxSignature::new(format!("redeem-{}", state.redeemed.len()))),
         })
     }
 
     async fn refund(&self, trade_id: TradeId) -> Result<HtlcReceipt, AppError> {
+        let state = self.inner.lock().expect("htlc lock");
+        let source = state.initiated.iter().find(|init| init.trade_id == trade_id);
+        let (leg, amount) = match source {
+            Some(init) => (
+                match init.funder {
+                    WalletRole::Maker => SettlementLeg::MakerOutput,
+                    _ => SettlementLeg::TakerInput,
+                },
+                init.amount.clone(),
+            ),
+            None => (
+                SettlementLeg::TakerInput,
+                TokenAmount::new(AssetId::from("USDC"), AmountRaw::new(0)),
+            ),
+        };
         Ok(HtlcReceipt {
             trade_id,
+            leg,
+            amount,
             status: SettlementStatus::Refunded,
             signature: Some(TxSignature::new("refund")),
         })

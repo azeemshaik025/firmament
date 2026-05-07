@@ -198,7 +198,12 @@ impl TwoSidedSettlement {
         signature: Option<String>,
     ) -> SettlementTransition {
         self.phase = SettlementPhase::TakerLocked;
-        let receipt = self.receipt(SettlementStatus::Initiated, signature);
+        let receipt = self.receipt(
+            SettlementLeg::TakerInput,
+            self.terms.taker_input.clone(),
+            SettlementStatus::Initiated,
+            signature,
+        );
         self.taker_input_leg.lock_receipt = Some(receipt.clone());
         SettlementTransition {
             step: SettlementStep::TakerLock,
@@ -217,7 +222,12 @@ impl TwoSidedSettlement {
         signature: Option<String>,
     ) -> SettlementTransition {
         self.phase = SettlementPhase::MakerLocked;
-        let receipt = self.receipt(SettlementStatus::Initiated, signature);
+        let receipt = self.receipt(
+            SettlementLeg::MakerOutput,
+            self.terms.maker_output.clone(),
+            SettlementStatus::Initiated,
+            signature,
+        );
         self.maker_output_leg.lock_receipt = Some(receipt.clone());
         SettlementTransition {
             step: SettlementStep::MakerLock,
@@ -229,6 +239,10 @@ impl TwoSidedSettlement {
     }
 
     /// Record taker redemption of maker output.
+    ///
+    /// The receipt's `leg` is `MakerOutput` — the leg identifies WHICH HTLC
+    /// was redeemed (the maker's output leg), not who acted. The taker is the
+    /// redeemer of that leg.
     #[must_use]
     pub fn record_taker_redeem(
         &mut self,
@@ -236,7 +250,12 @@ impl TwoSidedSettlement {
         signature: Option<String>,
     ) -> SettlementTransition {
         self.phase = SettlementPhase::TakerRedeemed;
-        let receipt = self.receipt(SettlementStatus::Redeemed, signature);
+        let receipt = self.receipt(
+            SettlementLeg::MakerOutput,
+            self.terms.maker_output.clone(),
+            SettlementStatus::Redeemed,
+            signature,
+        );
         self.maker_output_leg.redeem_receipt = Some(receipt.clone());
         SettlementTransition {
             step: SettlementStep::TakerRedeem,
@@ -248,6 +267,10 @@ impl TwoSidedSettlement {
     }
 
     /// Record maker redemption of taker input.
+    ///
+    /// The receipt's `leg` is `TakerInput` — the leg identifies WHICH HTLC
+    /// was redeemed (the taker's input leg), not who acted. The maker is the
+    /// redeemer of that leg.
     #[must_use]
     pub fn record_maker_redeem(
         &mut self,
@@ -255,7 +278,12 @@ impl TwoSidedSettlement {
         signature: Option<String>,
     ) -> SettlementTransition {
         self.phase = SettlementPhase::Complete;
-        let receipt = self.receipt(SettlementStatus::Redeemed, signature);
+        let receipt = self.receipt(
+            SettlementLeg::TakerInput,
+            self.terms.taker_input.clone(),
+            SettlementStatus::Redeemed,
+            signature,
+        );
         self.taker_input_leg.redeem_receipt = Some(receipt.clone());
         SettlementTransition {
             step: SettlementStep::MakerRedeem,
@@ -275,7 +303,11 @@ impl TwoSidedSettlement {
         signature: Option<String>,
     ) -> SettlementTransition {
         self.phase = SettlementPhase::Refunded;
-        let receipt = self.receipt(SettlementStatus::Refunded, signature);
+        let amount = match leg {
+            SettlementLeg::TakerInput => self.terms.taker_input.clone(),
+            SettlementLeg::MakerOutput => self.terms.maker_output.clone(),
+        };
+        let receipt = self.receipt(leg, amount, SettlementStatus::Refunded, signature);
         match leg {
             SettlementLeg::TakerInput => {
                 self.taker_input_leg.refund_receipt = Some(receipt.clone());
@@ -313,9 +345,17 @@ impl TwoSidedSettlement {
         }
     }
 
-    fn receipt(&self, status: SettlementStatus, signature: Option<String>) -> HtlcReceipt {
+    fn receipt(
+        &self,
+        leg: SettlementLeg,
+        amount: TokenAmount,
+        status: SettlementStatus,
+        signature: Option<String>,
+    ) -> HtlcReceipt {
         HtlcReceipt {
             trade_id: self.terms.trade_id,
+            leg,
+            amount,
             status,
             signature: signature.map(TxSignature::new),
         }

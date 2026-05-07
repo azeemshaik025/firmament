@@ -20,6 +20,7 @@ use crate::adapters::solana::client::{
     LEGACY_TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID as SOLANA_TOKEN_2022_PROGRAM_ID,
 };
 use crate::domain::assets::AssetRegistry;
+use crate::domain::settlement::SettlementLeg;
 use crate::domain::types::{
     ExternalHtlcInitiation, HtlcInitiation, HtlcReceipt, SettlementStatus, TradeId, TxSignature,
     UnsignedWalletTransaction, WalletAddress, WalletRole,
@@ -265,11 +266,10 @@ impl SolanaHtlcClient {
         preimage: &str,
     ) -> Result<Instruction, AppError> {
         let redeemer = self.wallet(leg.request.redeemer)?;
-        self.build_redeem_instruction_for_pubkey(leg, redeemer.pubkey(), preimage)
+        Self::build_redeem_instruction_for_pubkey(leg, redeemer.pubkey(), preimage)
     }
 
     fn build_redeem_instruction_for_pubkey(
-        &self,
         leg: &SolanaHtlcLeg,
         redeemer_pubkey: Pubkey,
         preimage: &str,
@@ -468,6 +468,8 @@ impl HtlcClient for SolanaHtlcClient {
         let (instruction, mut leg) = self.build_initiate_instruction(&request).await?;
         let signature = self.submit(request.funder, instruction).await?;
         leg.status = SettlementStatus::Initiated;
+        let receipt_leg = leg_for_funder(request.funder);
+        let receipt_amount = request.amount.clone();
         self.state
             .lock()
             .await
@@ -478,6 +480,8 @@ impl HtlcClient for SolanaHtlcClient {
 
         Ok(HtlcReceipt {
             trade_id: request.trade_id,
+            leg: receipt_leg,
+            amount: receipt_amount,
             status: SettlementStatus::Initiated,
             signature: Some(signature),
         })
@@ -495,6 +499,8 @@ impl HtlcClient for SolanaHtlcClient {
             .await?;
         let signature = self.submit(request.funder, instruction).await?;
         leg.status = SettlementStatus::Initiated;
+        let receipt_leg = leg_for_funder(request.funder);
+        let receipt_amount = request.amount.clone();
         self.state
             .lock()
             .await
@@ -505,6 +511,8 @@ impl HtlcClient for SolanaHtlcClient {
 
         Ok(HtlcReceipt {
             trade_id: request.trade_id,
+            leg: receipt_leg,
+            amount: receipt_amount,
             status: SettlementStatus::Initiated,
             signature: Some(signature),
         })
@@ -555,6 +563,8 @@ impl HtlcClient for SolanaHtlcClient {
             .build_initiate_instruction_for_pubkeys(&role_request, funder, redeemer)
             .await?;
         leg.status = SettlementStatus::Initiated;
+        let receipt_leg = leg_for_funder(role_request.funder);
+        let receipt_amount = role_request.amount.clone();
         self.state
             .lock()
             .await
@@ -565,6 +575,8 @@ impl HtlcClient for SolanaHtlcClient {
 
         Ok(HtlcReceipt {
             trade_id: role_request.trade_id,
+            leg: receipt_leg,
+            amount: receipt_amount,
             status: SettlementStatus::Initiated,
             signature: Some(TxSignature::new(signature.to_string())),
         })
@@ -593,7 +605,7 @@ impl HtlcClient for SolanaHtlcClient {
                 .ok_or_else(|| AppError::validation("no maker-funded HTLC leg is redeemable"))?
         };
         let instruction =
-            self.build_redeem_instruction_for_pubkey(&leg, redeemer_pubkey, &preimage)?;
+            Self::build_redeem_instruction_for_pubkey(&leg, redeemer_pubkey, &preimage)?;
         self.build_unsigned_transaction(redeemer_pubkey, instruction)
             .await
     }
@@ -620,10 +632,14 @@ impl HtlcClient for SolanaHtlcClient {
             })
             .ok_or_else(|| AppError::validation("no maker-funded HTLC leg is redeemable"))?;
         leg.status = SettlementStatus::Redeemed;
+        let receipt_leg = leg_for_funder(leg.request.funder);
+        let receipt_amount = leg.request.amount.clone();
         trade.redeemed_count = trade.redeemed_count.saturating_add(1);
 
         Ok(HtlcReceipt {
             trade_id,
+            leg: receipt_leg,
+            amount: receipt_amount,
             status: SettlementStatus::Redeemed,
             signature: Some(TxSignature::new(signature.to_string())),
         })
@@ -639,6 +655,8 @@ impl HtlcClient for SolanaHtlcClient {
         };
         let instruction = self.build_redeem_instruction(&leg, &preimage)?;
         let signature = self.submit(leg.request.redeemer, instruction).await?;
+        let receipt_leg = leg_for_funder(leg.request.funder);
+        let receipt_amount = leg.request.amount.clone();
 
         let mut state = self.state.lock().await;
         if let Some(trade) = state.get_mut(&trade_id) {
@@ -654,6 +672,8 @@ impl HtlcClient for SolanaHtlcClient {
 
         Ok(HtlcReceipt {
             trade_id,
+            leg: receipt_leg,
+            amount: receipt_amount,
             status: SettlementStatus::Redeemed,
             signature: Some(signature),
         })
@@ -676,9 +696,13 @@ impl HtlcClient for SolanaHtlcClient {
         };
         let instruction = self.build_refund_instruction(&leg)?;
         let signature = self.submit(leg.request.funder, instruction).await?;
+        let receipt_leg = leg_for_funder(leg.request.funder);
+        let receipt_amount = leg.request.amount.clone();
 
         Ok(HtlcReceipt {
             trade_id,
+            leg: receipt_leg,
+            amount: receipt_amount,
             status: SettlementStatus::Refunded,
             signature: Some(signature),
         })
@@ -711,6 +735,19 @@ impl HtlcClient for SolanaHtlcClient {
         } else {
             Ok(SettlementStatus::Pending)
         }
+    }
+}
+
+/// Map an HTLC funder wallet role to its `SettlementLeg`.
+///
+/// Taker-funded legs hold the taker's input asset (`TakerInput`); maker-funded
+/// legs hold the maker's output asset (`MakerOutput`). Only `Taker` and
+/// `Maker` roles fund HTLC legs in the two-sided flow; other wallet roles
+/// fall back to `TakerInput` so the receipt remains well-formed.
+fn leg_for_funder(funder: WalletRole) -> SettlementLeg {
+    match funder {
+        WalletRole::Maker => SettlementLeg::MakerOutput,
+        WalletRole::Taker | WalletRole::Operator | WalletRole::Gateway => SettlementLeg::TakerInput,
     }
 }
 

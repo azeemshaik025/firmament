@@ -426,10 +426,25 @@ pub enum SettlementStatus {
 }
 
 /// Receipt returned by an HTLC adapter.
+///
+/// `leg` identifies WHICH HTLC the receipt describes — not who acted on it.
+/// On `Initiated` receipts the funder of the leg performed the action; on
+/// `Redeemed` receipts the leg's redeemer performed the action; on `Refunded`
+/// receipts the funder reclaimed it. So a `Redeemed` receipt with
+/// `leg = MakerOutput` means "the maker's output HTLC was redeemed (by the
+/// taker)", while `leg = TakerInput` means "the taker's input HTLC was
+/// redeemed (by the maker)". This convention keeps the field stable across
+/// the settlement lifecycle and lets ledger consumers size debits/credits
+/// against the correct HTLC's amount.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HtlcReceipt {
     /// Trade this receipt belongs to.
     pub trade_id: TradeId,
+    /// Which HTLC leg this receipt describes (see type-level docs for the
+    /// "whose HTLC" vs "who acted" convention).
+    pub leg: crate::domain::settlement::SettlementLeg,
+    /// Asset and amount escrowed by the leg this receipt describes.
+    pub amount: TokenAmount,
     /// Updated settlement status.
     pub status: SettlementStatus,
     /// Related Solana transaction signature.

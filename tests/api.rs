@@ -5,10 +5,12 @@ use firmament::ports::{BalanceReader, GatewayClient, HtlcClient, PriceProvider, 
 use firmament::runtime::{
     RuntimeAdapters, RuntimeOrchestrator, RuntimeOrchestratorOptions, RuntimePersistence,
 };
+use firmament::settlement::SettlementLeg;
 use firmament::types::{
-    AmountRaw, AssetId, AssetPair, BalanceSnapshot, GatewayReceipt, GatewayRefillRequest,
-    HtlcInitiation, HtlcReceipt, ReferencePrice, SettlementStatus, SwapQuote, SwapReceipt,
-    SwapRequest, TokenAmount, TxSignature, WalletRole,
+    AmountRaw, AssetId, AssetPair, BalanceSnapshot, ExternalHtlcInitiation, GatewayReceipt,
+    GatewayRefillRequest, HtlcInitiation, HtlcReceipt, ReferencePrice, SettlementStatus, SwapQuote,
+    SwapReceipt, SwapRequest, TokenAmount, TxSignature, UnsignedWalletTransaction, WalletAddress,
+    WalletRole,
 };
 use firmament::{AppConfig, api, bootstrap};
 use rust_decimal::Decimal;
@@ -129,6 +131,8 @@ async fn api_legacy_accept_route_requires_wallet_settlement() {
     assert_eq!(quote_body["status"], "accepted");
     assert_eq!(quote_body["integration_status"], "runtime_orchestrated");
     assert_ne!(quote_body["quoted_output_amount_raw"], 0);
+    assert!(quote_body["expires_at"].is_string());
+    assert!(quote_body["htlc_terms"]["expires_at"].is_string());
     let quote_id = quote_body["quote_id"].as_str().expect("quote id");
 
     let response = app
@@ -151,6 +155,52 @@ async fn api_legacy_accept_route_requires_wallet_settlement() {
             .unwrap()
             .contains("wallet-settlement")
     );
+}
+
+#[tokio::test]
+async fn api_wallet_settlement_serializes_expiry_as_rfc3339_string() {
+    let app = test_orchestrator_router().await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v1/rfq")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(rfq_request().to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let quote_body = response_json(response).await;
+    assert_eq!(quote_body["status"], "accepted");
+    let quote_id = quote_body["quote_id"].as_str().expect("quote id");
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/v1/quotes/{quote_id}/wallet-settlement"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "taker_wallet": "DemoTaker111111111111111111111111111111111111",
+                        "secret_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let settlement_body = response_json(response).await;
+    assert!(settlement_body["expires_at"].is_string());
+    assert!(settlement_body["taker_lock_transaction"]["transaction_base64"].is_string());
 }
 
 #[tokio::test]
@@ -280,13 +330,39 @@ struct FakeHtlcClient {
 
 #[async_trait]
 impl HtlcClient for FakeHtlcClient {
+    async fn wallet_address(&self, role: WalletRole) -> Result<WalletAddress, firmament::AppError> {
+        Ok(WalletAddress::new(match role {
+            WalletRole::Maker => "DemoMaker111111111111111111111111111111111111",
+            WalletRole::Taker => "DemoTaker111111111111111111111111111111111111",
+            WalletRole::Operator => "DemoOperator11111111111111111111111111111111",
+            WalletRole::Gateway => "DemoGateway111111111111111111111111111111111",
+        }))
+    }
+
     async fn initiate(&self, request: HtlcInitiation) -> Result<HtlcReceipt, firmament::AppError> {
         let mut initiated = self.initiated.lock().expect("htlc lock");
+        let leg = match request.funder {
+            WalletRole::Maker => SettlementLeg::MakerOutput,
+            _ => SettlementLeg::TakerInput,
+        };
+        let amount = request.amount.clone();
         initiated.push(request.clone());
         Ok(HtlcReceipt {
             trade_id: request.trade_id,
+            leg,
+            amount,
             status: SettlementStatus::Initiated,
             signature: Some(TxSignature::new(format!("init-{}", initiated.len()))),
+        })
+    }
+
+    async fn build_external_initiate(
+        &self,
+        _request: ExternalHtlcInitiation,
+    ) -> Result<UnsignedWalletTransaction, firmament::AppError> {
+        Ok(UnsignedWalletTransaction {
+            transaction_base64: "AA==".to_owned(),
+            recent_blockhash: "fake-blockhash".to_owned(),
         })
     }
 
@@ -295,10 +371,33 @@ impl HtlcClient for FakeHtlcClient {
         trade_id: firmament::types::TradeId,
         preimage: String,
     ) -> Result<HtlcReceipt, firmament::AppError> {
+        let initiated = self.initiated.lock().expect("htlc lock");
+        // Pick the maker-funded leg for this trade if present (the taker
+        // redeems the maker's HTLC first); fall back to any leg for the trade.
+        let source = initiated
+            .iter()
+            .find(|init| init.trade_id == trade_id && init.funder == WalletRole::Maker)
+            .or_else(|| initiated.iter().find(|init| init.trade_id == trade_id));
+        let (leg, amount) = match source {
+            Some(init) => (
+                match init.funder {
+                    WalletRole::Maker => SettlementLeg::MakerOutput,
+                    _ => SettlementLeg::TakerInput,
+                },
+                init.amount.clone(),
+            ),
+            None => (
+                SettlementLeg::MakerOutput,
+                TokenAmount::new(AssetId::new("USDC"), AmountRaw::new(0)),
+            ),
+        };
+        drop(initiated);
         let mut redeemed = self.redeemed.lock().expect("htlc lock");
         redeemed.push((trade_id, preimage));
         Ok(HtlcReceipt {
             trade_id,
+            leg,
+            amount,
             status: SettlementStatus::Redeemed,
             signature: Some(TxSignature::new(format!("redeem-{}", redeemed.len()))),
         })
@@ -308,8 +407,25 @@ impl HtlcClient for FakeHtlcClient {
         &self,
         trade_id: firmament::types::TradeId,
     ) -> Result<HtlcReceipt, firmament::AppError> {
+        let initiated = self.initiated.lock().expect("htlc lock");
+        let source = initiated.iter().find(|init| init.trade_id == trade_id);
+        let (leg, amount) = match source {
+            Some(init) => (
+                match init.funder {
+                    WalletRole::Maker => SettlementLeg::MakerOutput,
+                    _ => SettlementLeg::TakerInput,
+                },
+                init.amount.clone(),
+            ),
+            None => (
+                SettlementLeg::TakerInput,
+                TokenAmount::new(AssetId::new("USDC"), AmountRaw::new(0)),
+            ),
+        };
         Ok(HtlcReceipt {
             trade_id,
+            leg,
+            amount,
             status: SettlementStatus::Refunded,
             signature: Some(TxSignature::new("refund")),
         })
