@@ -213,7 +213,9 @@ export function SwapPage() {
     return { ok: true } as const;
   }, [amount, amountValidation, sourceAsset]);
   const quoteAccepted = quote?.status === 'accepted';
-  const receiveAmount = quoteAccepted && outputAsset ? formatRawAmount(quote.quoted_output_amount_raw, outputAsset.decimals) : null;
+  const receiveAmount = quoteAccepted && outputAsset
+    ? (quote.output?.amount ?? formatRawAmount(quote.quoted_output_amount_raw, outputAsset.decimals))
+    : null;
   const flowLocked = Boolean(settlement || lock || redeem);
   const notionalOk = notionalValidation?.ok !== false;
   const primaryLabel = primaryActionLabel({
@@ -392,9 +394,9 @@ export function SwapPage() {
 
     try {
       const nextQuote = await api.requestRfq({
-        input_mint: sourceAsset.mint,
-        output_mint: outputAsset.mint,
-        input_amount_raw: parsed.raw,
+        input_asset: sourceAsset.symbol || sourceAsset.id,
+        output_asset: outputAsset.symbol || outputAsset.id,
+        amount: amount.trim(),
         taker_wallet: walletAddress,
         expiry_seconds: quoteExpirySeconds
       });

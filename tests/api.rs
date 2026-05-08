@@ -834,6 +834,456 @@ async fn trades_endpoint_excludes_rebalance_signatures() {
 }
 
 #[tokio::test]
+async fn api_rfq_accepts_friendly_request_shape() {
+    let app = test_orchestrator_router().await;
+    let body = json!({
+        "input_asset": "USDC",
+        "output_asset": "SOL",
+        "amount": "0.001",
+        "taker_wallet": "DemoTaker111111111111111111111111111111111111",
+        "expiry_seconds": 30
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v1/rfq")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let quote_body = response_json(response).await;
+    assert_eq!(quote_body["status"], "accepted");
+    // Legacy fields preserved.
+    assert!(quote_body["quote_id"].is_string());
+    assert!(quote_body["quoted_output_amount_raw"].as_u64().is_some());
+    assert!(quote_body["expires_at"].is_string());
+    // New friendly fields.
+    assert_eq!(quote_body["pair"]["input_asset"], "USDC");
+    assert_eq!(quote_body["pair"]["output_asset"], "SOL");
+    assert_eq!(quote_body["input"]["asset"], "USDC");
+    assert_eq!(quote_body["input"]["amount_raw"], "1000");
+    assert_eq!(quote_body["input"]["decimals"], 6);
+    assert_eq!(
+        quote_body["input"]["mint"],
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+    );
+    assert!(quote_body["input"]["amount"].is_string());
+    assert_eq!(quote_body["output"]["asset"], "SOL");
+    assert_eq!(quote_body["output"]["decimals"], 9);
+    assert_eq!(
+        quote_body["output"]["mint"],
+        "So11111111111111111111111111111111111111112"
+    );
+    assert!(quote_body["output"]["amount_raw"].is_string());
+    assert!(quote_body["output"]["amount"].is_string());
+    assert_eq!(quote_body["next_action"]["type"], "start_wallet_settlement");
+    assert_eq!(quote_body["next_action"]["method"], "POST");
+    assert!(
+        quote_body["next_action"]["path"]
+            .as_str()
+            .expect("path string")
+            .contains("/wallet-settlement")
+    );
+}
+
+#[tokio::test]
+async fn api_rfq_friendly_request_is_case_insensitive() {
+    let app = test_orchestrator_router().await;
+    let body = json!({
+        "input_asset": "usdc",
+        "output_asset": "sol",
+        "amount": "0.001",
+        "taker_wallet": "DemoTaker111111111111111111111111111111111111",
+        "expiry_seconds": 30
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v1/rfq")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let quote_body = response_json(response).await;
+    assert_eq!(quote_body["status"], "accepted");
+    assert_eq!(quote_body["pair"]["input_asset"], "USDC");
+    assert_eq!(quote_body["pair"]["output_asset"], "SOL");
+}
+
+#[tokio::test]
+async fn api_rfq_friendly_rejects_unsupported_asset() {
+    let app = test_orchestrator_router().await;
+    let body = json!({
+        "input_asset": "BONK",
+        "output_asset": "SOL",
+        "amount": "0.01",
+        "taker_wallet": "DemoTaker111111111111111111111111111111111111"
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v1/rfq")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = response_json(response).await;
+    assert_eq!(body["error"]["code"], "unsupported_asset");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .expect("error message")
+            .to_lowercase()
+            .contains("bonk")
+    );
+}
+
+#[tokio::test]
+async fn api_rfq_friendly_rejects_same_asset() {
+    let app = test_orchestrator_router().await;
+    let body = json!({
+        "input_asset": "SOL",
+        "output_asset": "SOL",
+        "amount": "0.01",
+        "taker_wallet": "DemoTaker111111111111111111111111111111111111"
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v1/rfq")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = response_json(response).await;
+    assert_eq!(body["error"]["code"], "same_asset");
+}
+
+#[tokio::test]
+async fn api_rfq_friendly_rejects_invalid_precision() {
+    let app = test_orchestrator_router().await;
+    // SOL has 9 decimals; 10 fractional digits is too precise.
+    let body = json!({
+        "input_asset": "SOL",
+        "output_asset": "USDC",
+        "amount": "0.0000000001",
+        "taker_wallet": "DemoTaker111111111111111111111111111111111111"
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v1/rfq")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = response_json(response).await;
+    assert_eq!(body["error"]["code"], "invalid_amount");
+}
+
+#[tokio::test]
+async fn api_rfq_friendly_rejects_zero_amount() {
+    let app = test_orchestrator_router().await;
+    let body = json!({
+        "input_asset": "SOL",
+        "output_asset": "USDC",
+        "amount": "0",
+        "taker_wallet": "DemoTaker111111111111111111111111111111111111"
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v1/rfq")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = response_json(response).await;
+    assert_eq!(body["error"]["code"], "invalid_amount");
+}
+
+#[tokio::test]
+async fn api_rfq_friendly_rejects_unparseable_amount() {
+    let app = test_orchestrator_router().await;
+    let body = json!({
+        "input_asset": "SOL",
+        "output_asset": "USDC",
+        "amount": "abc",
+        "taker_wallet": "DemoTaker111111111111111111111111111111111111"
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v1/rfq")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = response_json(response).await;
+    assert_eq!(body["error"]["code"], "invalid_amount");
+}
+
+#[tokio::test]
+async fn api_rfq_rejected_response_includes_user_facing_message() {
+    let app = test_orchestrator_router().await;
+    let mut body = rfq_request();
+    body["input_amount_raw"] = json!(3_000_000);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v1/rfq")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_json(response).await;
+    assert_eq!(body["status"], "rejected");
+    assert!(
+        body["message"].as_str().is_some(),
+        "rejected response should include a user-facing message"
+    );
+    assert!(
+        body["suggested_action"].as_str().is_some(),
+        "rejected response should include a suggested action"
+    );
+}
+
+#[tokio::test]
+async fn api_assets_endpoint_includes_aliases_kind_and_supported_outputs() {
+    let app = test_orchestrator_router().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/assets")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_json(response).await;
+    let assets = body.as_array().expect("assets array");
+    let usdc = assets
+        .iter()
+        .find(|a| a["id"] == "USDC")
+        .expect("usdc asset");
+    assert_eq!(usdc["kind"], "spl");
+    assert!(usdc["network"].is_string());
+    let aliases = usdc["aliases"].as_array().expect("aliases array");
+    let alias_strings: Vec<&str> = aliases.iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+        alias_strings.contains(&"usdc"),
+        "expected lower-case alias for USDC"
+    );
+    let supported = usdc["supported_outputs"]
+        .as_array()
+        .expect("supported_outputs array");
+    let supported_strings: Vec<&str> = supported.iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+        supported_strings.contains(&"SOL"),
+        "USDC should support SOL output"
+    );
+    assert!(usdc["quoteable_threshold_raw"].as_str().is_some());
+    assert!(usdc["quoteable_threshold"].as_str().is_some());
+
+    let sol = assets
+        .iter()
+        .find(|a| a["id"] == "SOL")
+        .expect("sol asset");
+    assert_eq!(sol["kind"], "native");
+}
+
+#[tokio::test]
+async fn api_pairs_endpoint_returns_directional_pairs() {
+    let app = test_orchestrator_router().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/pairs")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_json(response).await;
+    let pairs = body["pairs"].as_array().expect("pairs array");
+    let usdc_to_sol = pairs
+        .iter()
+        .find(|p| p["input_asset"] == "USDC" && p["output_asset"] == "SOL")
+        .expect("USDC->SOL pair");
+    assert_eq!(usdc_to_sol["input_decimals"], 6);
+    assert_eq!(usdc_to_sol["output_decimals"], 9);
+    assert!(usdc_to_sol["input_mint"].is_string());
+    assert!(usdc_to_sol["output_mint"].is_string());
+    assert!(usdc_to_sol["default_expiry_seconds"].as_u64().is_some());
+}
+
+#[tokio::test]
+async fn api_settlement_responses_include_next_action() {
+    let app = test_orchestrator_router().await;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v1/rfq")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(rfq_request().to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    let quote_body = response_json(response).await;
+    let quote_id = quote_body["quote_id"]
+        .as_str()
+        .expect("quote id")
+        .to_owned();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/v1/quotes/{quote_id}/wallet-settlement"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "taker_wallet": "DemoTaker111111111111111111111111111111111111",
+                        "secret_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    let settlement_body = response_json(response).await;
+    let trade_id = settlement_body["trade_id"]
+        .as_str()
+        .expect("trade id")
+        .to_owned();
+    assert_eq!(settlement_body["next_action"]["type"], "submit_taker_lock");
+    assert_eq!(settlement_body["next_action"]["method"], "POST");
+    assert!(
+        settlement_body["next_action"]["path"]
+            .as_str()
+            .expect("path string")
+            .contains("/taker-lock")
+    );
+
+    let lock_signature = "5".repeat(88);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/v1/trades/{trade_id}/taker-lock"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({ "signature": lock_signature }).to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    let lock_body = response_json(response).await;
+    assert_eq!(lock_body["next_action"]["type"], "submit_taker_redeem");
+    assert!(
+        lock_body["next_action"]["path"]
+            .as_str()
+            .expect("path string")
+            .contains("/taker-redeem")
+    );
+}
+
+#[tokio::test]
+async fn api_trade_response_includes_friendly_amounts() {
+    let app = test_orchestrator_router().await;
+    let trade_body = drive_completed_trade(app.clone()).await;
+    let trade_id = trade_body["trade_id"]
+        .as_str()
+        .expect("trade id")
+        .to_owned();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/trades/{trade_id}"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_json(response).await;
+    assert_eq!(body["input"]["asset"], "USDC");
+    assert_eq!(body["input"]["decimals"], 6);
+    assert_eq!(
+        body["input"]["mint"],
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+    );
+    assert!(body["input"]["amount"].is_string());
+    assert!(body["input"]["amount_raw"].is_string());
+    assert_eq!(body["output"]["asset"], "SOL");
+    assert_eq!(body["output"]["decimals"], 9);
+    // Legacy `amounts` envelope preserved.
+    assert!(body["amounts"].is_object());
+}
+
+#[tokio::test]
 async fn api_json_error_shape() {
     let app = test_router().await;
 

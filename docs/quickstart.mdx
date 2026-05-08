@@ -1,0 +1,102 @@
+---
+title: "Quickstart"
+description: "Run the local API, web app, and runtime reads."
+---
+
+# Quickstart
+
+Use this flow to start the local API and web app.
+
+## 1. Prepare config
+
+```bash
+cp .env.example .env
+cp config.example.toml config.toml
+```
+
+Secrets stay in `.env`. Non-secret policy stays in `config.toml`.
+
+Default config uses:
+
+- API bind: `127.0.0.1:5050`
+- Solana cluster label: `mainnet-beta`
+- assets: USDC, SOL, cbBTC
+- small demo caps
+- `runtime.enable_protocol_workers = false`
+
+With protocol workers disabled, the backend serves health and runtime projection routes. Mutating RFQ and settlement routes return unavailable because the live orchestrator is not attached.
+
+## 2. Start the backend
+
+```bash
+cargo run
+```
+
+The backend starts the Axum API and in-memory runtime projection.
+
+## 3. Start the web app
+
+```bash
+npm run dev
+```
+
+Open:
+
+```text
+http://127.0.0.1:3000/app/
+```
+
+Runtime view:
+
+```text
+http://127.0.0.1:3000/app/runtime
+```
+
+## 4. Inspect public runtime routes
+
+```bash
+curl http://127.0.0.1:5050/health
+curl http://127.0.0.1:5050/v1/assets
+curl http://127.0.0.1:5050/v1/pairs
+curl http://127.0.0.1:5050/v1/runtime/state
+curl http://127.0.0.1:5050/v1/runtime/events
+curl http://127.0.0.1:5050/v1/runtime/ledger
+curl 'http://127.0.0.1:5050/v1/runtime/trades?limit=10'
+```
+
+## 5. Request a friendly RFQ
+
+The friendly request shape uses asset symbols and a decimal `amount`.
+Asset identifiers are case-insensitive.
+
+```bash
+curl -X POST http://127.0.0.1:5050/v1/rfq \
+  -H 'content-type: application/json' \
+  -d '{
+    "input_asset": "USDC",
+    "output_asset": "SOL",
+    "amount": "0.001",
+    "taker_wallet": "DemoTaker111111111111111111111111111111111111",
+    "expiry_seconds": 30
+  }'
+```
+
+Accepted responses include `pair`, `input`, `output`, and a `next_action`
+hint pointing at `POST /v1/quotes/{quote_id}/wallet-settlement`. Rejected
+responses include a user-facing `message` and a `suggested_action`.
+
+The legacy mint/raw-amount request shape (`input_mint`, `output_mint`,
+`input_amount_raw`) keeps working for existing API consumers.
+
+## Live RFQ mode
+
+To run live RFQ and settlement, configure:
+
+- `SOLANA_RPC_URL`
+- exactly one maker keypair source
+- `JUPITER_API_KEY` when Jupiter is enabled
+- `CIRCLE_GATEWAY_SOLANA_ADDRESS` when Gateway is enabled
+- a verified Solana cbBTC mint in `config.toml`
+- `runtime.enable_protocol_workers = true`
+
+Keep the demo caps small before funding the maker wallet.

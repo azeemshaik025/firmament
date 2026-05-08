@@ -15,18 +15,73 @@ use crate::domain::types::{
 };
 
 /// Request body for `POST /v1/rfq`.
+///
+/// Accepts two equivalent shapes for backward compatibility:
+/// - **Friendly** (preferred): `input_asset`, `output_asset`, and a decimal
+///   `amount` string. Asset identifiers are case-insensitive.
+/// - **Legacy**: `input_mint`, `output_mint`, and `input_amount_raw` integer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RfqRequest {
-    /// Mint address provided by the taker.
-    pub input_mint: MintAddress,
-    /// Mint address requested by the taker.
-    pub output_mint: MintAddress,
-    /// Raw input amount in the input mint's native decimals.
-    pub input_amount_raw: AmountRaw,
-    /// Taker wallet address used by the demo settlement flow.
+    /// Friendly input asset symbol or id (case-insensitive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_asset: Option<String>,
+    /// Friendly output asset symbol or id (case-insensitive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_asset: Option<String>,
+    /// Friendly input amount in display units (e.g. `"0.01"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amount: Option<String>,
+    /// Legacy mint address provided by the taker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_mint: Option<MintAddress>,
+    /// Legacy mint address requested by the taker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_mint: Option<MintAddress>,
+    /// Legacy raw input amount in the input mint's native decimals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_amount_raw: Option<AmountRaw>,
+    /// Taker wallet address used by the settlement flow.
     pub taker_wallet: WalletAddress,
     /// Optional quote expiry override in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expiry_seconds: Option<u64>,
+}
+
+/// Pair summary echoed on accepted RFQ responses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RfqPair {
+    /// Input asset id (canonical case).
+    pub input_asset: String,
+    /// Output asset id (canonical case).
+    pub output_asset: String,
+}
+
+/// Display-friendly amount tuple returned alongside legacy raw fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AmountView {
+    /// Asset id (canonical case).
+    pub asset: String,
+    /// Decimal amount serialized as a string for precision-safe transport.
+    pub amount: String,
+    /// Raw integer amount serialized as a string.
+    pub amount_raw: String,
+    /// Asset native decimals.
+    pub decimals: u8,
+    /// Asset mint address. `None` for native SOL.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mint: Option<MintAddress>,
+}
+
+/// Self-describing pointer to the next call an API consumer should make.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NextAction {
+    /// Stable action identifier (e.g. `start_wallet_settlement`).
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// HTTP method.
+    pub method: String,
+    /// HTTP path with concrete identifiers substituted.
+    pub path: String,
 }
 
 /// API integration status for route handlers.
@@ -59,7 +114,7 @@ pub enum RfqResponse {
     Accepted {
         /// Runtime quote identifier.
         quote_id: QuoteId,
-        /// Quoted output amount in raw destination units.
+        /// Quoted output amount in raw destination units. Legacy field.
         quoted_output_amount_raw: AmountRaw,
         /// Spread applied by the quote engine.
         spread_bps: u16,
@@ -72,6 +127,14 @@ pub enum RfqResponse {
         risk_checks: Vec<String>,
         /// Integration status for the route handler.
         integration_status: IntegrationStatus,
+        /// Display-friendly pair echo.
+        pair: RfqPair,
+        /// Display-friendly input amount.
+        input: AmountView,
+        /// Display-friendly output amount.
+        output: AmountView,
+        /// Self-describing next call for an API consumer.
+        next_action: NextAction,
     },
     /// The RFQ was rejected by validation or risk.
     Rejected {
@@ -81,6 +144,10 @@ pub enum RfqResponse {
         risk_check_details: Vec<String>,
         /// Integration status for the route handler.
         integration_status: IntegrationStatus,
+        /// User-facing message describing the rejection.
+        message: String,
+        /// Concrete suggestion the caller can act on.
+        suggested_action: String,
     },
 }
 
@@ -101,7 +168,7 @@ pub struct QuoteAcceptResponse {
     pub integration_status: IntegrationStatus,
 }
 
-/// Public asset metadata returned to the web app.
+/// Public asset metadata returned to the web app and direct API consumers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssetResponse {
     /// Configured asset identifier.
@@ -116,6 +183,51 @@ pub struct AssetResponse {
     pub min_trade_notional_usd: Decimal,
     /// Per-asset maximum trade notional in estimated USD.
     pub max_trade_notional_usd: Decimal,
+    /// Lower-case aliases accepted by friendly RFQ requests.
+    pub aliases: Vec<String>,
+    /// Asset class: `native` or `spl`.
+    pub kind: String,
+    /// Network identifier for clients listing multiple chains.
+    pub network: String,
+    /// Asset ids accepted as the output side of a directional pair.
+    pub supported_outputs: Vec<String>,
+    /// Minimum raw working inventory required before quoting this asset,
+    /// serialized as a string so JSON consumers do not lose precision.
+    pub quoteable_threshold_raw: String,
+    /// Display-unit form of `quoteable_threshold_raw`.
+    pub quoteable_threshold: String,
+}
+
+/// Response body for `GET /v1/pairs`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairsResponse {
+    /// Configured directional pairs and basic per-pair constraints.
+    pub pairs: Vec<PairResponse>,
+}
+
+/// One directional pair plus its constraints.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairResponse {
+    /// Input asset id (canonical case).
+    pub input_asset: String,
+    /// Output asset id (canonical case).
+    pub output_asset: String,
+    /// Input mint address.
+    pub input_mint: MintAddress,
+    /// Output mint address.
+    pub output_mint: MintAddress,
+    /// Input asset decimals.
+    pub input_decimals: u8,
+    /// Output asset decimals.
+    pub output_decimals: u8,
+    /// Maximum quote notional in estimated USD (the smaller of the per-asset
+    /// caps for both legs).
+    pub max_quote_notional_usd: Decimal,
+    /// Minimum quote notional in estimated USD (the larger of the per-asset
+    /// minimums for both legs).
+    pub min_quote_notional_usd: Decimal,
+    /// Default expiry in seconds applied when a request omits `expiry_seconds`.
+    pub default_expiry_seconds: u64,
 }
 
 /// Request body for `POST /v1/quotes/{quote_id}/wallet-settlement`.
@@ -141,6 +253,8 @@ pub struct WalletSettlementResponse {
     pub expires_at: OffsetDateTime,
     /// Integration status for the route handler.
     pub integration_status: IntegrationStatus,
+    /// Self-describing next call for an API consumer.
+    pub next_action: NextAction,
 }
 
 /// Request body for recording a browser taker lock.
@@ -163,6 +277,8 @@ pub struct TakerLockResponse {
     pub tx_signatures: Vec<TxSignature>,
     /// Integration status for the route handler.
     pub integration_status: IntegrationStatus,
+    /// Self-describing next call for an API consumer.
+    pub next_action: NextAction,
 }
 
 /// Request body for preparing or recording browser taker redeem.
@@ -192,6 +308,10 @@ pub struct TakerRedeemResponse {
     pub ledger_summary: LedgerSummary,
     /// Integration status for the route handler.
     pub integration_status: IntegrationStatus,
+    /// Self-describing next call for an API consumer. `None` once the trade
+    /// is fully redeemed and no further action is required.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_action: Option<NextAction>,
 }
 
 /// Token amounts associated with a trade lookup.
@@ -233,8 +353,14 @@ pub struct TradeResponse {
     pub settlement_status: SettlementStatus,
     /// Solana transaction signatures observed so far.
     pub tx_signatures: Vec<TxSignature>,
-    /// Known trade amounts.
+    /// Known trade amounts. Legacy envelope.
     pub amounts: TradeAmounts,
+    /// Display-friendly input amount.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input: Option<AmountView>,
+    /// Display-friendly output amount.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<AmountView>,
     /// Ledger summary for the trade.
     pub ledger_summary: LedgerSummary,
     /// Integration status for the route handler.

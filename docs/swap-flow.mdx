@@ -1,0 +1,61 @@
+---
+title: "Swap Flow"
+description: "How an RFQ moves through wallet settlement."
+---
+
+# Swap Flow
+
+Firmament quotes first. Settlement starts only after the backend accepts an RFQ.
+
+## 1. Request a quote
+
+API consumers send the friendly shape:
+
+- `input_asset` and `output_asset` — case-insensitive asset symbols or ids,
+  e.g. `USDC`, `usdc`, `SOL`, `sol`, `cbBTC`, `cbbtc`. Discoverable via
+  [`GET /v1/assets`](/openapi.yaml#tag/Assets) and [`GET /v1/pairs`](/openapi.yaml#tag/Pairs).
+- `amount` — decimal string in the input asset's display units (e.g. `"0.01"`).
+- `taker_wallet` — the connected Solana wallet that will settle.
+- `expiry_seconds` (optional) — overrides the configured default.
+
+The legacy shape (`input_mint`, `output_mint`, `input_amount_raw`) is still
+accepted for existing API consumers.
+
+Accepted responses include the legacy `quote_id`, `quoted_output_amount_raw`,
+`spread_bps`, `expires_at`, `risk_checks`, and `htlc_terms` fields plus
+display-friendly `pair`, `input`, `output`, and `next_action` fields. The
+`next_action` advertises the next route to call.
+
+Rejected responses include a stable `reason` and readable
+`risk_check_details` plus a user-facing `message` and `suggested_action`.
+
+If protocol workers are disabled, RFQ routes return an unavailable error.
+
+## 2. Start wallet settlement
+
+The browser creates a SHA-256 preimage commitment and calls wallet settlement for the accepted quote.
+
+The backend creates a trade and returns an unsigned taker lock transaction. The
+response includes a `next_action` pointing at the taker-lock route.
+
+## 3. Record taker lock
+
+The connected wallet signs and submits the taker lock. The app records the signature with the backend.
+
+The runtime can then reserve maker liquidity and advance settlement state.
+
+## 4. Redeem
+
+The taker reveals the preimage. If no redeem signature is supplied, the backend returns an unsigned taker redeem transaction. If a signature is supplied, the backend records the final taker redeem step.
+
+## 5. Read trade status
+
+The trade route returns:
+
+- settlement status
+- observed transaction signatures
+- legacy `amounts` envelope plus display-friendly `input` and `output` views
+  (asset, amount, amount_raw, decimals, mint)
+- ledger summary
+
+Use it as the user-facing status source for a settlement.

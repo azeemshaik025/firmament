@@ -8,9 +8,37 @@ export type Asset = {
   // Marked optional so older runtimes without the field still type-check.
   min_trade_notional_usd?: string;
   max_trade_notional_usd?: string;
+  aliases?: string[];
+  kind?: 'native' | 'spl';
+  network?: string;
+  supported_outputs?: string[];
+  quoteable_threshold_raw?: string;
+  quoteable_threshold?: string;
 };
 
-export type RfqRequest = {
+export type Pair = {
+  input_asset: string;
+  output_asset: string;
+  input_mint: string;
+  output_mint: string;
+  input_decimals: number;
+  output_decimals: number;
+  max_quote_notional_usd: string;
+  min_quote_notional_usd: string;
+  default_expiry_seconds: number;
+};
+
+export type PairsResponse = { pairs: Pair[] };
+
+export type FriendlyRfqRequest = {
+  input_asset: string;
+  output_asset: string;
+  amount: string;
+  taker_wallet: string;
+  expiry_seconds?: number;
+};
+
+export type LegacyRfqRequest = {
   input_mint: string;
   output_mint: string;
   input_amount_raw: number;
@@ -18,21 +46,45 @@ export type RfqRequest = {
   expiry_seconds?: number;
 };
 
-export type RfqResponse =
-  | {
-      status: 'accepted';
-      quote_id: string;
-      quoted_output_amount_raw: number;
-      spread_bps: number;
-      expires_at: string;
-      risk_checks: string[];
-      htlc_terms: Record<string, unknown>;
-    }
-  | {
-      status: 'rejected';
-      reason: string;
-      risk_check_details: string[];
-    };
+export type RfqRequest = FriendlyRfqRequest | LegacyRfqRequest;
+
+export type AmountView = {
+  asset: string;
+  amount: string;
+  amount_raw: string;
+  decimals: number;
+  mint?: string;
+};
+
+export type NextAction = {
+  type: string;
+  method: string;
+  path: string;
+};
+
+export type RfqAcceptedResponse = {
+  status: 'accepted';
+  quote_id: string;
+  quoted_output_amount_raw: number;
+  spread_bps: number;
+  expires_at: string;
+  risk_checks: string[];
+  htlc_terms: Record<string, unknown>;
+  pair: { input_asset: string; output_asset: string };
+  input: AmountView;
+  output: AmountView;
+  next_action: NextAction;
+};
+
+export type RfqRejectedResponse = {
+  status: 'rejected';
+  reason: string;
+  risk_check_details: string[];
+  message: string;
+  suggested_action: string;
+};
+
+export type RfqResponse = RfqAcceptedResponse | RfqRejectedResponse;
 
 export type UnsignedWalletTransaction = {
   transaction_base64: string;
@@ -44,6 +96,7 @@ export type WalletSettlementResponse = {
   quote_id: string;
   taker_lock_transaction: UnsignedWalletTransaction;
   expires_at?: string;
+  next_action?: NextAction;
 };
 
 export type TradeStepResponse = {
@@ -53,6 +106,7 @@ export type TradeStepResponse = {
   maker_redeem_signature?: string;
   tx_signatures?: string[];
   taker_redeem_transaction?: UnsignedWalletTransaction;
+  next_action?: NextAction;
 };
 
 export type TokenAmount = {
@@ -191,6 +245,7 @@ function parseResponseBody(text: string) {
 
 export const api = {
   assets: () => request<Asset[]>('/v1/assets'),
+  pairs: () => request<PairsResponse>('/v1/pairs'),
   health: () => request<HealthResponse>('/health'),
   runtimeState: () => request<RuntimeStateResponse>('/v1/runtime/state'),
   runtimeEvents: (limit = 30) => request<RuntimeEventsResponse>(`/v1/runtime/events?limit=${limit}`),

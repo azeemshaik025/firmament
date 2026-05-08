@@ -1,0 +1,57 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "Firmament",
+  "description": "Solana RFQ maker backend for managed liquidity demos.",
+  "colors": {
+    "primary": "#3DD6C6",
+    "light": "#3DD6C6",
+    "dark": "#6EE7D8"
+  },
+  "api": {
+    "openapi": "openapi.yaml",
+    "playground": {
+      "display": "none"
+    },
+    "params": {
+      "expanded": "closed"
+    },
+    "examples": {
+      "autogenerate": false
+    }
+  },
+  "navigation": {
+    "groups": [
+      {
+        "group": "Overview",
+        "pages": ["index", "architecture"]
+      },
+      {
+        "group": "Get Started",
+        "pages": ["quickstart", "swap-flow"]
+      },
+      {
+        "group": "Runtime Proof",
+        "pages": ["runtime-proof", "operations/live-safety"]
+      },
+      {
+        "group": "Backend Reference",
+        "openapi": "openapi.yaml",
+        "pages": [
+          "GET /health",
+          "GET /v1/assets",
+          "GET /v1/pairs",
+          "POST /v1/rfq",
+          "POST /v1/quotes/{quote_id}/wallet-settlement",
+          "POST /v1/trades/{trade_id}/taker-lock",
+          "POST /v1/trades/{trade_id}/taker-redeem",
+          "GET /v1/trades/{trade_id}",
+          "GET /v1/runtime/state",
+          "GET /v1/runtime/events",
+          "GET /v1/runtime/ledger",
+          "GET /v1/runtime/trades"
+        ]
+      }
+    ]
+  }
+}

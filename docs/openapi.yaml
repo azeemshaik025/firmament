@@ -1,0 +1,1311 @@
+openapi: 3.1.0
+info:
+  title: Firmament Backend API
+  version: 0.1.0
+  summary: Public backend routes for Firmament swaps and runtime proof.
+  description: |
+    Firmament is a Solana RFQ maker backend for managed liquidity demos.
+    This specification documents the public routes used by the swap app and runtime view.
+tags:
+  - name: Health
+    description: Runtime liveness.
+  - name: Assets
+    description: Supported Solana assets.
+  - name: Pairs
+    description: Configured directional pairs and constraints.
+  - name: RFQ
+    description: Firm quote requests.
+  - name: Settlement
+    description: Browser-wallet HTLC settlement.
+  - name: Trades
+    description: Trade status lookup.
+  - name: Runtime
+    description: Read-only runtime state, events, ledger, and trades.
+paths:
+  /health:
+    get:
+      tags: [Health]
+      summary: Check runtime liveness
+      description: Returns a small liveness response when the backend API is running.
+      operationId: getHealth
+      responses:
+        "200":
+          description: Runtime is reachable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+              examples:
+                ok:
+                  value:
+                    status: ok
+                    service: firmament
+                    version: 0.1.0
+  /v1/assets:
+    get:
+      tags: [Assets]
+      summary: List supported assets
+      description: |
+        Returns the enabled asset metadata used by quote requests and the swap app.
+        Default local config uses a placeholder cbBTC mint until live mode is configured.
+        Each entry includes case-insensitive aliases, the asset class (`native`
+        or `spl`), the directional outputs that can be quoted from this asset,
+        and the per-asset quoteable threshold.
+      operationId: getAssets
+      responses:
+        "200":
+          description: Enabled assets.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Asset"
+              examples:
+                assets:
+                  value:
+                    - id: USDC
+                      symbol: USDC
+                      mint: EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
+                      decimals: 6
+                      aliases: [usdc]
+                      kind: spl
+                      network: solana-mainnet-beta
+                      supported_outputs: [SOL, cbBTC]
+                      quoteable_threshold_raw: "2000000"
+                      quoteable_threshold: "2.000000"
+                    - id: SOL
+                      symbol: SOL
+                      mint: So11111111111111111111111111111111111111112
+                      decimals: 9
+                      aliases: [sol]
+                      kind: native
+                      network: solana-mainnet-beta
+                      supported_outputs: [USDC, cbBTC]
+                      quoteable_threshold_raw: "10000000"
+                      quoteable_threshold: "0.010000000"
+  /v1/pairs:
+    get:
+      tags: [Pairs]
+      summary: List directional pairs and constraints
+      description: |
+        Returns the configured directional pairs along with per-pair decimals,
+        quote notional caps, and the default expiry applied when an RFQ omits
+        `expiry_seconds`. Use this together with `/v1/assets` to discover what
+        a friendly RFQ can request.
+      operationId: getPairs
+      responses:
+        "200":
+          description: Configured pairs.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PairsResponse"
+              examples:
+                pairs:
+                  value:
+                    pairs:
+                      - input_asset: USDC
+                        output_asset: SOL
+                        input_mint: EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
+                        output_mint: So11111111111111111111111111111111111111112
+                        input_decimals: 6
+                        output_decimals: 9
+                        max_quote_notional_usd: "2"
+                        min_quote_notional_usd: "1"
+                        default_expiry_seconds: 45
+  /v1/rfq:
+    post:
+      tags: [RFQ]
+      summary: Request a firm quote
+      description: |
+        Requests firm swap terms from the runtime.
+
+        The route accepts two equivalent request shapes:
+
+        - **Friendly** (preferred): `input_asset`, `output_asset`, and a
+          decimal `amount` string. Asset identifiers are case-insensitive and
+          accept the values listed in `/v1/assets[*].aliases`.
+        - **Legacy**: `input_mint`, `output_mint`, and `input_amount_raw`
+          integer. Existing API consumers can keep using this shape.
+
+        The response always includes the legacy raw fields plus
+        display-friendly `pair`, `input`, `output`, and `next_action` fields
+        on accepted RFQs and a `message` plus `suggested_action` on rejected
+        RFQs.
+      operationId: postRfq
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RfqRequest"
+            examples:
+              friendlyUsdcToSol:
+                summary: Friendly request
+                value:
+                  input_asset: USDC
+                  output_asset: SOL
+                  amount: "0.001"
+                  taker_wallet: DemoTaker111111111111111111111111111111111111
+                  expiry_seconds: 30
+              legacyUsdcToSol:
+                summary: Legacy request (still supported)
+                value:
+                  input_mint: EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
+                  output_mint: So11111111111111111111111111111111111111112
+                  input_amount_raw: 1000
+                  taker_wallet: DemoTaker111111111111111111111111111111111111
+                  expiry_seconds: 30
+      responses:
+        "200":
+          description: Accepted quote terms or a risk rejection.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RfqResponse"
+              examples:
+                accepted:
+                  value:
+                    status: accepted
+                    quote_id: 018f5a45-822c-7f42-9d18-9df9f88c5c7a
+                    quoted_output_amount_raw: 7200
+                    spread_bps: 35
+                    expires_at: "2026-05-08T12:00:30Z"
+                    htlc_terms:
+                      settlement_model: solana_htlc
+                      escrow_mint: So11111111111111111111111111111111111111112
+                      expires_at: "2026-05-08T12:00:30Z"
+                      hashlock: null
+                    risk_checks:
+                      - max_notional_ok
+                      - inventory_quoteable
+                    integration_status: runtime_orchestrated
+                    pair:
+                      input_asset: USDC
+                      output_asset: SOL
+                    input:
+                      asset: USDC
+                      amount: "0.001000"
+                      amount_raw: "1000"
+                      decimals: 6
+                      mint: EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
+                    output:
+                      asset: SOL
+                      amount: "0.000007200"
+                      amount_raw: "7200"
+                      decimals: 9
+                      mint: So11111111111111111111111111111111111111112
+                    next_action:
+                      type: start_wallet_settlement
+                      method: POST
+                      path: /v1/quotes/018f5a45-822c-7f42-9d18-9df9f88c5c7a/wallet-settlement
+                rejected:
+                  value:
+                    status: rejected
+                    reason: max_notional_exceeded
+                    risk_check_details:
+                      - quote notional exceeds configured max
+                    integration_status: runtime_orchestrated
+                    message: The amount exceeds a configured maximum.
+                    suggested_action: Try a smaller amount.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+  /v1/quotes/{quote_id}/wallet-settlement:
+    post:
+      tags: [Settlement]
+      summary: Start wallet settlement
+      description: Creates a trade for an accepted quote and returns an unsigned taker lock transaction for browser-wallet signing.
+      operationId: postWalletSettlement
+      parameters:
+        - $ref: "#/components/parameters/QuoteId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WalletSettlementRequest"
+            examples:
+              start:
+                value:
+                  taker_wallet: DemoTaker111111111111111111111111111111111111
+                  secret_hash: "0000000000000000000000000000000000000000000000000000000000000000"
+      responses:
+        "202":
+          description: Wallet settlement started.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WalletSettlementResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+  /v1/trades/{trade_id}/taker-lock:
+    post:
+      tags: [Settlement]
+      summary: Record taker lock signature
+      description: Records the transaction signature produced by the connected wallet after the taker lock transaction is submitted.
+      operationId: postTakerLock
+      parameters:
+        - $ref: "#/components/parameters/TradeId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TakerLockRequest"
+            examples:
+              recordLock:
+                value:
+                  signature: 5j7sVw9N8YjG6sH4cX2vKpQw6Lr8nA1bC3dE4fG5hJ6kL7mN8pQ9rS
+      responses:
+        "202":
+          description: Taker lock recorded and settlement advanced.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TakerLockResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/trades/{trade_id}/taker-redeem:
+    post:
+      tags: [Settlement]
+      summary: Prepare or record taker redeem
+      description: |
+        Prepares the unsigned taker redeem transaction when a signature is omitted.
+        Records the final redeem step when a signature is supplied.
+      operationId: postTakerRedeem
+      parameters:
+        - $ref: "#/components/parameters/TradeId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TakerRedeemRequest"
+            examples:
+              prepareRedeem:
+                value:
+                  preimage: "1111111111111111111111111111111111111111111111111111111111111111"
+              recordRedeem:
+                value:
+                  preimage: "1111111111111111111111111111111111111111111111111111111111111111"
+                  signature: 4Ew2Kq8nV7mC6bX5zP4rT3yU2iO1pL9sA8dF7gH6jK5lM4nB3vC2xZ
+      responses:
+        "200":
+          description: Unsigned taker redeem transaction prepared.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TakerRedeemResponse"
+        "202":
+          description: Taker redeem recorded and settlement advanced.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TakerRedeemResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/trades/{trade_id}:
+    get:
+      tags: [Trades]
+      summary: Get trade status
+      description: Returns settlement status, observed transaction signatures, known amounts, and ledger summary for a trade.
+      operationId: getTrade
+      parameters:
+        - $ref: "#/components/parameters/TradeId"
+      responses:
+        "200":
+          description: Trade status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TradeResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/runtime/state:
+    get:
+      tags: [Runtime]
+      summary: Get runtime state
+      description: Returns the current non-secret runtime projection used by the swap app and runtime proof surface.
+      operationId: getRuntimeState
+      responses:
+        "200":
+          description: Runtime state projection.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeStateResponse"
+  /v1/runtime/events:
+    get:
+      tags: [Runtime]
+      summary: Get runtime events
+      description: Returns recent runtime events in chronological order, optionally limited to the newest events.
+      operationId: getRuntimeEvents
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Maximum number of newest events to return.
+          schema:
+            type: integer
+            minimum: 1
+            example: 30
+      responses:
+        "200":
+          description: Recent runtime events.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeEventsResponse"
+  /v1/runtime/ledger:
+    get:
+      tags: [Runtime]
+      summary: Get runtime ledger balances
+      description: |
+        Returns derived non-zero ledger balances. The optional account_type query
+        filters the returned balances, while healthy and entry_count still describe the whole ledger.
+      operationId: getRuntimeLedger
+      parameters:
+        - name: account_type
+          in: query
+          required: false
+          description: Optional ledger account type filter.
+          schema:
+            $ref: "#/components/schemas/LedgerAccountType"
+      responses:
+        "200":
+          description: Ledger snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LedgerSnapshotResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+  /v1/runtime/trades:
+    get:
+      tags: [Runtime]
+      summary: Get recent runtime trades
+      description: Returns recent in-memory trade summaries, newest first. Limit defaults to 10 and is capped at 100.
+      operationId: getRuntimeTrades
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Number of newest trades to return.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 10
+      responses:
+        "200":
+          description: Recent trade summaries.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TradesResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+components:
+  parameters:
+    QuoteId:
+      name: quote_id
+      in: path
+      required: true
+      description: Quote identifier.
+      schema:
+        type: string
+        format: uuid
+    TradeId:
+      name: trade_id
+      in: path
+      required: true
+      description: Trade identifier.
+      schema:
+        type: string
+        format: uuid
+  responses:
+    BadRequest:
+      description: Request shape, path, or validation error.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: Requested quote or trade was not found.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ServiceUnavailable:
+      description: Runtime service is not available for the requested action.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+  schemas:
+    HealthResponse:
+      type: object
+      required: [status, service, version]
+      properties:
+        status:
+          type: string
+          example: ok
+        service:
+          type: string
+          example: firmament
+        version:
+          type: string
+          example: 0.1.0
+    Asset:
+      type: object
+      required:
+        - id
+        - symbol
+        - mint
+        - decimals
+        - aliases
+        - kind
+        - network
+        - supported_outputs
+        - quoteable_threshold_raw
+        - quoteable_threshold
+      properties:
+        id:
+          type: string
+          example: USDC
+        symbol:
+          type: string
+          example: USDC
+        mint:
+          $ref: "#/components/schemas/MintAddress"
+        decimals:
+          type: integer
+          minimum: 0
+          maximum: 18
+          example: 6
+        min_trade_notional_usd:
+          $ref: "#/components/schemas/DecimalString"
+        max_trade_notional_usd:
+          $ref: "#/components/schemas/DecimalString"
+        aliases:
+          type: array
+          items:
+            type: string
+          description: Lower-case identifiers accepted by friendly RFQ requests.
+          example: [usdc]
+        kind:
+          type: string
+          enum: [native, spl]
+          example: spl
+        network:
+          type: string
+          example: solana-mainnet-beta
+        supported_outputs:
+          type: array
+          items:
+            type: string
+          description: Asset ids that can appear as the output side of an RFQ.
+          example: [SOL, cbBTC]
+        quoteable_threshold_raw:
+          type: string
+          description: Minimum raw working inventory required before quoting this asset, serialized as a string.
+          example: "2000000"
+        quoteable_threshold:
+          type: string
+          description: Display-unit form of `quoteable_threshold_raw`.
+          example: "2.000000"
+    PairsResponse:
+      type: object
+      required: [pairs]
+      properties:
+        pairs:
+          type: array
+          items:
+            $ref: "#/components/schemas/Pair"
+    Pair:
+      type: object
+      required:
+        - input_asset
+        - output_asset
+        - input_mint
+        - output_mint
+        - input_decimals
+        - output_decimals
+        - max_quote_notional_usd
+        - min_quote_notional_usd
+        - default_expiry_seconds
+      properties:
+        input_asset:
+          type: string
+          example: USDC
+        output_asset:
+          type: string
+          example: SOL
+        input_mint:
+          $ref: "#/components/schemas/MintAddress"
+        output_mint:
+          $ref: "#/components/schemas/MintAddress"
+        input_decimals:
+          type: integer
+          minimum: 0
+          maximum: 18
+        output_decimals:
+          type: integer
+          minimum: 0
+          maximum: 18
+        max_quote_notional_usd:
+          $ref: "#/components/schemas/DecimalString"
+        min_quote_notional_usd:
+          $ref: "#/components/schemas/DecimalString"
+        default_expiry_seconds:
+          type: integer
+          minimum: 1
+          example: 45
+    RfqRequest:
+      oneOf:
+        - $ref: "#/components/schemas/FriendlyRfqRequest"
+        - $ref: "#/components/schemas/LegacyRfqRequest"
+    FriendlyRfqRequest:
+      type: object
+      required: [input_asset, output_asset, amount, taker_wallet]
+      properties:
+        input_asset:
+          type: string
+          description: Case-insensitive asset id or symbol (e.g. `USDC`, `usdc`).
+          example: USDC
+        output_asset:
+          type: string
+          example: SOL
+        amount:
+          type: string
+          description: Decimal amount in the input asset's display units, sent as a string.
+          example: "0.001"
+        taker_wallet:
+          $ref: "#/components/schemas/WalletAddress"
+        expiry_seconds:
+          type: integer
+          minimum: 1
+          example: 30
+    LegacyRfqRequest:
+      type: object
+      required: [input_mint, output_mint, input_amount_raw, taker_wallet]
+      properties:
+        input_mint:
+          $ref: "#/components/schemas/MintAddress"
+        output_mint:
+          $ref: "#/components/schemas/MintAddress"
+        input_amount_raw:
+          $ref: "#/components/schemas/AmountRaw"
+        taker_wallet:
+          $ref: "#/components/schemas/WalletAddress"
+        expiry_seconds:
+          type: integer
+          minimum: 1
+          example: 30
+    AmountView:
+      type: object
+      required: [asset, amount, amount_raw, decimals]
+      properties:
+        asset:
+          type: string
+          example: USDC
+        amount:
+          type: string
+          example: "0.001000"
+        amount_raw:
+          type: string
+          example: "1000"
+        decimals:
+          type: integer
+          minimum: 0
+          maximum: 18
+        mint:
+          $ref: "#/components/schemas/MintAddress"
+    NextAction:
+      type: object
+      required: [type, method, path]
+      properties:
+        type:
+          type: string
+          example: start_wallet_settlement
+        method:
+          type: string
+          example: POST
+        path:
+          type: string
+          example: /v1/quotes/018f5a45-822c-7f42-9d18-9df9f88c5c7a/wallet-settlement
+    RfqPair:
+      type: object
+      required: [input_asset, output_asset]
+      properties:
+        input_asset:
+          type: string
+          example: USDC
+        output_asset:
+          type: string
+          example: SOL
+    RfqResponse:
+      oneOf:
+        - $ref: "#/components/schemas/RfqAcceptedResponse"
+        - $ref: "#/components/schemas/RfqRejectedResponse"
+      discriminator:
+        propertyName: status
+    RfqAcceptedResponse:
+      type: object
+      required:
+        - status
+        - quote_id
+        - quoted_output_amount_raw
+        - spread_bps
+        - expires_at
+        - htlc_terms
+        - risk_checks
+        - integration_status
+        - pair
+        - input
+        - output
+        - next_action
+      properties:
+        status:
+          type: string
+          const: accepted
+        quote_id:
+          type: string
+          format: uuid
+        quoted_output_amount_raw:
+          $ref: "#/components/schemas/AmountRaw"
+        spread_bps:
+          type: integer
+          minimum: 0
+          maximum: 10000
+          example: 35
+        expires_at:
+          type: string
+          format: date-time
+        htlc_terms:
+          $ref: "#/components/schemas/HtlcAcceptanceTerms"
+        risk_checks:
+          type: array
+          items:
+            type: string
+        integration_status:
+          $ref: "#/components/schemas/IntegrationStatus"
+        pair:
+          $ref: "#/components/schemas/RfqPair"
+        input:
+          $ref: "#/components/schemas/AmountView"
+        output:
+          $ref: "#/components/schemas/AmountView"
+        next_action:
+          $ref: "#/components/schemas/NextAction"
+    RfqRejectedResponse:
+      type: object
+      required:
+        - status
+        - reason
+        - risk_check_details
+        - integration_status
+        - message
+        - suggested_action
+      properties:
+        status:
+          type: string
+          const: rejected
+        reason:
+          $ref: "#/components/schemas/RejectionReason"
+        risk_check_details:
+          type: array
+          items:
+            type: string
+        integration_status:
+          $ref: "#/components/schemas/IntegrationStatus"
+        message:
+          type: string
+          description: User-facing message describing the rejection.
+          example: The amount exceeds a configured maximum.
+        suggested_action:
+          type: string
+          description: Concrete suggestion the caller can act on.
+          example: Try a smaller amount.
+    HtlcAcceptanceTerms:
+      type: object
+      required: [settlement_model, escrow_mint, expires_at, hashlock]
+      properties:
+        settlement_model:
+          type: string
+          example: solana_htlc
+        escrow_mint:
+          $ref: "#/components/schemas/MintAddress"
+        expires_at:
+          type: string
+          format: date-time
+        hashlock:
+          type:
+            - string
+            - "null"
+          description: Hashlock commitment when available.
+    WalletSettlementRequest:
+      type: object
+      required: [taker_wallet, secret_hash]
+      properties:
+        taker_wallet:
+          $ref: "#/components/schemas/WalletAddress"
+        secret_hash:
+          type: string
+          pattern: "^[0-9a-fA-F]{64}$"
+          description: Hex-encoded SHA-256 preimage commitment generated by the browser.
+    WalletSettlementResponse:
+      type: object
+      required:
+        - quote_id
+        - trade_id
+        - taker_lock_transaction
+        - expires_at
+        - integration_status
+        - next_action
+      properties:
+        quote_id:
+          type: string
+          format: uuid
+        trade_id:
+          type: string
+          format: uuid
+        taker_lock_transaction:
+          $ref: "#/components/schemas/UnsignedWalletTransaction"
+        expires_at:
+          type: string
+          format: date-time
+        integration_status:
+          $ref: "#/components/schemas/IntegrationStatus"
+        next_action:
+          $ref: "#/components/schemas/NextAction"
+    TakerLockRequest:
+      type: object
+      required: [signature]
+      properties:
+        signature:
+          $ref: "#/components/schemas/TxSignature"
+    TakerLockResponse:
+      type: object
+      required:
+        - trade_id
+        - settlement_status
+        - maker_lock_signature
+        - tx_signatures
+        - integration_status
+        - next_action
+      properties:
+        trade_id:
+          type: string
+          format: uuid
+        settlement_status:
+          $ref: "#/components/schemas/SettlementStatus"
+        maker_lock_signature:
+          anyOf:
+            - $ref: "#/components/schemas/TxSignature"
+            - type: "null"
+        tx_signatures:
+          type: array
+          items:
+            $ref: "#/components/schemas/TxSignature"
+        integration_status:
+          $ref: "#/components/schemas/IntegrationStatus"
+        next_action:
+          $ref: "#/components/schemas/NextAction"
+    TakerRedeemRequest:
+      type: object
+      required: [preimage]
+      properties:
+        preimage:
+          type: string
+          pattern: "^[0-9a-fA-F]{64}$"
+          description: Hex-encoded preimage revealed at redeem time.
+        signature:
+          $ref: "#/components/schemas/TxSignature"
+    TakerRedeemResponse:
+      type: object
+      required:
+        - trade_id
+        - settlement_status
+        - taker_redeem_transaction
+        - maker_redeem_signature
+        - tx_signatures
+        - ledger_summary
+        - integration_status
+      properties:
+        trade_id:
+          type: string
+          format: uuid
+        settlement_status:
+          $ref: "#/components/schemas/SettlementStatus"
+        taker_redeem_transaction:
+          anyOf:
+            - $ref: "#/components/schemas/UnsignedWalletTransaction"
+            - type: "null"
+        maker_redeem_signature:
+          anyOf:
+            - $ref: "#/components/schemas/TxSignature"
+            - type: "null"
+        tx_signatures:
+          type: array
+          items:
+            $ref: "#/components/schemas/TxSignature"
+        ledger_summary:
+          $ref: "#/components/schemas/LedgerSummary"
+        integration_status:
+          $ref: "#/components/schemas/IntegrationStatus"
+        next_action:
+          description: Present until the trade is fully redeemed.
+          anyOf:
+            - $ref: "#/components/schemas/NextAction"
+            - type: "null"
+    TradeResponse:
+      type: object
+      required:
+        - trade_id
+        - settlement_status
+        - tx_signatures
+        - amounts
+        - ledger_summary
+        - integration_status
+      properties:
+        trade_id:
+          type: string
+          format: uuid
+        settlement_status:
+          $ref: "#/components/schemas/SettlementStatus"
+        tx_signatures:
+          type: array
+          items:
+            $ref: "#/components/schemas/TxSignature"
+        amounts:
+          $ref: "#/components/schemas/TradeAmounts"
+        input:
+          description: Display-friendly input amount, present when known.
+          anyOf:
+            - $ref: "#/components/schemas/AmountView"
+            - type: "null"
+        output:
+          description: Display-friendly output amount, present when known.
+          anyOf:
+            - $ref: "#/components/schemas/AmountView"
+            - type: "null"
+        ledger_summary:
+          $ref: "#/components/schemas/LedgerSummary"
+        integration_status:
+          $ref: "#/components/schemas/IntegrationStatus"
+    TradeAmounts:
+      type: object
+      required: [input, output]
+      properties:
+        input:
+          anyOf:
+            - $ref: "#/components/schemas/TokenAmount"
+            - type: "null"
+        output:
+          anyOf:
+            - $ref: "#/components/schemas/TokenAmount"
+            - type: "null"
+    LedgerSummary:
+      type: object
+      required: [balanced, entry_count, net_usdc_estimate]
+      properties:
+        balanced:
+          type: boolean
+        entry_count:
+          type: integer
+          minimum: 0
+        net_usdc_estimate:
+          $ref: "#/components/schemas/DecimalString"
+    RuntimeStateResponse:
+      type: object
+      required: [state]
+      properties:
+        state:
+          $ref: "#/components/schemas/RuntimeState"
+    RuntimeState:
+      type: object
+      required: [run_id, started_at, inventory, risk, pnl, rfq, rebalance, gateway, recent_events]
+      properties:
+        run_id:
+          type: string
+          format: uuid
+        started_at:
+          type: string
+          format: date-time
+        inventory:
+          $ref: "#/components/schemas/InventoryProjection"
+        risk:
+          $ref: "#/components/schemas/RiskProjection"
+        pnl:
+          $ref: "#/components/schemas/PnlProjection"
+        rfq:
+          $ref: "#/components/schemas/RfqProjection"
+        rebalance:
+          $ref: "#/components/schemas/RebalanceProjection"
+        gateway:
+          $ref: "#/components/schemas/GatewayProjection"
+        recent_events:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuntimeEvent"
+    RuntimeEventsResponse:
+      type: object
+      required: [count, events]
+      properties:
+        count:
+          type: integer
+          minimum: 0
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuntimeEvent"
+    LedgerSnapshotResponse:
+      type: object
+      required: [healthy, entry_count, balances]
+      properties:
+        healthy:
+          type: boolean
+          description: True when ledger integrity passes and protected accounts are not negative.
+        entry_count:
+          type: integer
+          minimum: 0
+          description: Total ledger entry count across the whole ledger.
+        balances:
+          type: array
+          items:
+            $ref: "#/components/schemas/LedgerBalanceEntry"
+    LedgerBalanceEntry:
+      type: object
+      required: [account_type, asset, balance_raw, decimals, display_amount]
+      properties:
+        account_type:
+          $ref: "#/components/schemas/LedgerAccountType"
+        asset:
+          type: string
+          example: USDC
+        qualifier:
+          type:
+            - string
+            - "null"
+          description: Optional ledger qualifier. Public responses never include wallet addresses.
+        balance_raw:
+          type: string
+          description: Signed raw token amount serialized as a string.
+          example: "1000000"
+        decimals:
+          type: integer
+          minimum: 0
+          maximum: 18
+          example: 6
+        display_amount:
+          type: string
+          example: "1.000000"
+    TradesResponse:
+      type: object
+      required: [total_count, successful_count, trades]
+      properties:
+        total_count:
+          type: integer
+          minimum: 0
+        successful_count:
+          type: integer
+          minimum: 0
+          description: Count of trades whose settlement status is redeemed.
+        trades:
+          type: array
+          items:
+            $ref: "#/components/schemas/TradeSummary"
+    TradeSummary:
+      type: object
+      required: [trade_id, quote_id, settlement_status, input, output, tx_signatures]
+      properties:
+        trade_id:
+          type: string
+          format: uuid
+        quote_id:
+          type: string
+          format: uuid
+        settlement_status:
+          $ref: "#/components/schemas/SettlementStatus"
+        input:
+          $ref: "#/components/schemas/RuntimeTradeAmount"
+        output:
+          $ref: "#/components/schemas/RuntimeTradeAmount"
+        tx_signatures:
+          type: array
+          items:
+            $ref: "#/components/schemas/TradeSignature"
+    RuntimeTradeAmount:
+      type: object
+      required: [asset, amount_raw, decimals, display_amount]
+      properties:
+        asset:
+          type: string
+          example: SOL
+        amount_raw:
+          type: string
+          example: "1000000"
+        decimals:
+          type: integer
+          minimum: 0
+          maximum: 18
+          example: 9
+        display_amount:
+          type: string
+          example: "0.001000000"
+    TradeSignature:
+      type: object
+      required: [kind, signature]
+      properties:
+        kind:
+          $ref: "#/components/schemas/TradeSignatureKind"
+        signature:
+          $ref: "#/components/schemas/TxSignature"
+    InventoryProjection:
+      type: object
+      required: [balances, quoteable_thresholds, max_drift_bps, status]
+      properties:
+        balances:
+          type: array
+          items:
+            $ref: "#/components/schemas/TokenAmount"
+        quoteable_thresholds:
+          type: array
+          items:
+            $ref: "#/components/schemas/TokenAmount"
+        max_drift_bps:
+          type: integer
+        status:
+          type: string
+          example: runtime_ready
+    RiskProjection:
+      type: object
+      required: [last_decision, active_rejections, require_taker_allowlist, max_price_staleness_seconds]
+      properties:
+        last_decision:
+          anyOf:
+            - $ref: "#/components/schemas/RiskDecision"
+            - type: "null"
+        active_rejections:
+          type: array
+          items:
+            $ref: "#/components/schemas/RejectionReason"
+        require_taker_allowlist:
+          type: boolean
+        max_price_staleness_seconds:
+          type: integer
+          minimum: 1
+    PnlProjection:
+      type: object
+      required:
+        - realized_spread_usdc_estimate
+        - fees_usdc_estimate
+        - rebalance_cost_usdc_estimate
+        - net_usdc_estimate
+      properties:
+        realized_spread_usdc_estimate:
+          $ref: "#/components/schemas/DecimalString"
+        fees_usdc_estimate:
+          $ref: "#/components/schemas/DecimalString"
+        rebalance_cost_usdc_estimate:
+          $ref: "#/components/schemas/DecimalString"
+        net_usdc_estimate:
+          $ref: "#/components/schemas/DecimalString"
+    RfqProjection:
+      type: object
+      required: [active_quote_count, accepted_quote_count, rejected_quote_count, active_settlement_count]
+      properties:
+        active_quote_count:
+          type: integer
+          minimum: 0
+        accepted_quote_count:
+          type: integer
+          minimum: 0
+        rejected_quote_count:
+          type: integer
+          minimum: 0
+        active_settlement_count:
+          type: integer
+          minimum: 0
+    RebalanceProjection:
+      type: object
+      required: [pending_swap_count, completed_swap_count]
+      properties:
+        pending_swap_count:
+          type: integer
+          minimum: 0
+        completed_swap_count:
+          type: integer
+          minimum: 0
+    GatewayProjection:
+      type: object
+      required: [enabled, usdc_refill_threshold_raw, usdc_refill_target_raw, status]
+      properties:
+        enabled:
+          type: boolean
+        usdc_refill_threshold_raw:
+          $ref: "#/components/schemas/AmountRaw"
+        usdc_refill_target_raw:
+          $ref: "#/components/schemas/AmountRaw"
+        status:
+          type: string
+          example: not_checked
+    RuntimeEvent:
+      type: object
+      required: [category, event]
+      properties:
+        category:
+          type: string
+          enum: [quote, settlement, swap, gateway, risk, inventory, reconciliation, system]
+        event:
+          type: object
+          additionalProperties: true
+          description: Event payload. Shape depends on the category and event type.
+    RiskDecision:
+      oneOf:
+        - type: object
+          required: [status, checks]
+          properties:
+            status:
+              type: string
+              const: accepted
+            checks:
+              type: array
+              items:
+                type: string
+        - type: object
+          required: [status, reason, details]
+          properties:
+            status:
+              type: string
+              const: rejected
+            reason:
+              $ref: "#/components/schemas/RejectionReason"
+            details:
+              type: array
+              items:
+                type: string
+      discriminator:
+        propertyName: status
+    TokenAmount:
+      type: object
+      required: [asset, amount_raw]
+      properties:
+        asset:
+          type: string
+          example: USDC
+        amount_raw:
+          $ref: "#/components/schemas/AmountRaw"
+    UnsignedWalletTransaction:
+      type: object
+      required: [transaction_base64, recent_blockhash]
+      properties:
+        transaction_base64:
+          type: string
+          description: Base64-encoded Solana transaction bytes.
+        recent_blockhash:
+          type: string
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, details]
+          properties:
+            code:
+              type: string
+              example: invalid_json
+            message:
+              type: string
+            details:
+              type: array
+              items:
+                type: string
+    IntegrationStatus:
+      type: string
+      enum: [runtime_orchestrated]
+    SettlementStatus:
+      type: string
+      enum: [pending, initiated, redeemed, refunded, failed]
+    RejectionReason:
+      type: string
+      enum:
+        - unsupported_pair
+        - unsupported_asset
+        - amount_too_small
+        - max_notional_exceeded
+        - cumulative_cap_exceeded
+        - inventory_below_quoteable_threshold
+        - exposure_limit_exceeded
+        - stale_price
+        - wallet_not_allowed
+        - gateway_unavailable
+        - external_service_unavailable
+        - validation_failed
+    LedgerAccountType:
+      type: string
+      enum:
+        - working_custody
+        - reserved
+        - pending_dex_spend
+        - receivable
+        - htlc_escrow
+        - pending_escrow
+        - gateway
+        - gateway_reserved
+        - pending_gateway_deposit
+        - rebalance
+        - fees
+        - trading
+        - external
+    TradeSignatureKind:
+      type: string
+      enum:
+        - taker_lock
+        - taker_redeem
+        - taker_refund
+        - maker_lock
+        - maker_redeem
+        - maker_refund
+        - gateway_burn
+        - gateway_mint
+        - jupiter_swap
+    AmountRaw:
+      type: integer
+      minimum: 0
+      format: int64
+      examples: [1000]
+    DecimalString:
+      type: string
+      description: Decimal value serialized by the runtime.
+      examples: ["0"]
+    MintAddress:
+      type: string
+      description: Solana mint address.
+      example: EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
+    WalletAddress:
+      type: string
+      description: Solana wallet address.
+      example: DemoTaker111111111111111111111111111111111111
+    TxSignature:
+      type: string
+      description: Solana transaction signature.

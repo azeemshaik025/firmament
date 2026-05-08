@@ -1,0 +1,48 @@
+---
+title: "Architecture"
+description: "How the Firmament backend, web app, and runtime projection fit together."
+---
+
+# Architecture
+
+Firmament has one Rust backend and two web surfaces.
+
+- Rust crate: RFQ runtime, Axum HTTP API, SQLite persistence, Solana/Jupiter/Gateway adapters
+- Vite app: taker swap demo at `/app` and runtime view at `/app/runtime`
+- Next.js landing page: project positioning for demos and submissions
+
+## Runtime path
+
+```text
+RFQ request
+  -> quote engine
+  -> risk gate
+  -> wallet-settlement terms
+  -> taker lock / redeem records
+  -> maker HTLC actions when live workers are enabled
+  -> ledger and runtime events
+  -> inventory repair checks
+```
+
+## Backend pieces
+
+The RFQ API accepts a friendly shape (`input_asset`, `output_asset`, decimal
+`amount` string) or the legacy mint/raw shape (`input_mint`, `output_mint`,
+`input_amount_raw`) plus the taker wallet and an optional expiry. It returns
+either accepted terms with display-friendly `pair`, `input`, `output`, and
+`next_action` fields or a stable rejection reason with a user-facing
+`message` and `suggested_action`.
+
+The quote engine combines reference price, spread, inventory skew, fees, and minimum-profit policy.
+
+The risk gate checks supported assets, supported pairs, notional caps, stale prices, allowlist policy, and available inventory.
+
+Settlement uses the browser wallet for taker signatures. The backend tracks trade state, observed signatures, and maker-side actions.
+
+SQLite stores ledger and P&L data. The public runtime endpoints expose derived ledger balances and recent trade summaries without wallet addresses or secrets.
+
+Jupiter and Circle Gateway are live adapters. They run only when protocol workers and required credentials are configured.
+
+## Public boundary
+
+Public docs cover the app-facing swap and runtime routes. Admin routes and the disabled legacy accept route are intentionally left out of the public reference.
