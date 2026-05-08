@@ -12,6 +12,7 @@ use crate::adapters::circle_gateway::{
     CircleGatewayClient, CircleGatewayClientConfig, GatewayMintSubmitter, USDC_MINT,
 };
 use crate::adapters::jupiter::{JupiterClient, JupiterClientConfig, JupiterWallet};
+use crate::adapters::persistence::ledger::{LedgerAccountId, LedgerTransactionBuilder};
 use crate::adapters::solana::htlc::{
     HtlcConfirmationConfig, SolanaHtlcClient, SolanaHtlcClientConfig,
 };
@@ -221,6 +222,19 @@ async fn assemble_live_runtime(
         },
     ));
 
+    // Cold-start ledger seed: when working_custody is empty for an asset
+    // the maker actually holds on chain, post a one-shot
+    // external:bootstrap_seed -> working_custody adjustment so the RFQ
+    // gate has supply to quote against immediately. Restarts no-op
+    // because working_custody is already populated. The reconciliation
+    // worker still observes drift on subsequent ticks.
+    if let Err(error) = seed_working_custody_from_chain(&orchestrator).await {
+        tracing::warn!(
+            ?error,
+            "bootstrap ledger seed failed; reconciliation will backfill on the first drift cycle"
+        );
+    }
+
     // Always-on reconciliation worker. Spawn after the orchestrator is
     // fully wired so the worker has access to the live BalanceReader,
     // CircleGatewayClient, and ledger persistence handles. Errors are
@@ -305,4 +319,75 @@ fn signing_key_from_solana_keypair(keypair: &Keypair) -> SigningKey {
     let mut secret = [0_u8; 32];
     secret.copy_from_slice(&bytes[..32]);
     SigningKey::from_bytes(&secret)
+}
+
+/// Cold-start ledger seed: when `working_custody` is zero for an asset
+/// the maker actually holds on chain, post a one-shot
+/// `external:bootstrap_seed → working_custody` transaction so the RFQ
+/// quoteability gate has supply to quote against immediately.
+///
+/// Idempotent across restarts: skips any asset whose `working_custody`
+/// already has a non-zero ledger balance. Errors on individual assets
+/// are logged and skipped — the reconciliation worker will still
+/// observe drift on subsequent ticks.
+async fn seed_working_custody_from_chain(orchestrator: &RuntimeOrchestrator) -> AppResult<()> {
+    let Some(persistence) = orchestrator.persistence_handle() else {
+        return Ok(());
+    };
+
+    let snapshot = orchestrator.balances(WalletRole::Maker).await?;
+
+    for token in snapshot.balances {
+        let asset = token.asset.clone();
+        let amount = token.amount_raw;
+
+        if amount.as_u64() == 0 {
+            continue;
+        }
+
+        let working = LedgerAccountId::working(asset.clone());
+        let current = persistence.account_balance(&working)?;
+        if current != 0 {
+            tracing::debug!(
+                asset = %asset,
+                current,
+                "working_custody already populated; skipping bootstrap seed"
+            );
+            continue;
+        }
+
+        let txn = LedgerTransactionBuilder::new("bootstrap_seed", uuid::Uuid::now_v7())
+            .description(format!(
+                "Bootstrap seed working_custody from on-chain {asset}"
+            ))
+            .idempotency_key(format!("bootstrap-seed:working_custody:{asset}"))
+            .debit(working, amount)
+            .credit(
+                LedgerAccountId::external(asset.clone(), "bootstrap_seed"),
+                amount,
+            )
+            .build()
+            .map_err(|error| {
+                AppError::persistence(format!("build bootstrap seed for {asset}: {error}"))
+            })?;
+
+        match persistence.save_ledger_transaction(&txn) {
+            Ok(_) => {
+                tracing::info!(
+                    asset = %asset,
+                    amount = amount.as_u64(),
+                    "seeded working_custody from on-chain balance"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    asset = %asset,
+                    ?error,
+                    "bootstrap seed for asset failed; reconciliation will backfill"
+                );
+            }
+        }
+    }
+
+    Ok(())
 }

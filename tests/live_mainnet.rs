@@ -6,7 +6,7 @@ use firmament::rfq::{RfqRequest, RfqResponse};
 use firmament::solana_client::SolanaClient;
 use firmament::types::{AmountRaw, AssetId, MintAddress, SettlementStatus, WalletAddress};
 use firmament::wallets::{LoadedWallet, SOLANA_RPC_URL_ENV};
-use firmament::{AppConfig, AppError, AppResult, bootstrap_live_runtime};
+use firmament::{AppConfig, AppError, AppResult, bootstrap_demo_runtime};
 use rust_decimal::Decimal;
 use solana_sdk::{pubkey::Pubkey, transaction::Transaction};
 
@@ -44,9 +44,9 @@ async fn live_cbbtc_rfq_accept_skips_without_explicit_opt_in() {
         .await
         .expect("ensure taker cbBTC ATA");
 
-    let live = bootstrap_live_runtime(config)
+    let live = bootstrap_demo_runtime(config)
         .await
-        .expect("bootstrap live runtime");
+        .expect("bootstrap demo runtime");
     let response = live
         .orchestrator
         .request_rfq(RfqRequest {
