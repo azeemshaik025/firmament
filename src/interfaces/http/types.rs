@@ -109,6 +109,7 @@ pub struct HtlcAcceptanceTerms {
 /// Response body for `POST /v1/rfq`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum RfqResponse {
     /// The runtime accepted the RFQ and produced firm quote terms.
     Accepted {

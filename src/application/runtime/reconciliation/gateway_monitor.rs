@@ -26,7 +26,7 @@ pub struct GatewayObservation {
     /// Gateway-reported raw amount.
     pub on_chain_raw: u128,
     /// Expected raw amount derived from the ledger.
-    pub expected_raw: u128,
+    pub expected_raw: i128,
     /// Signed drift `on_chain - expected`.
     pub drift_raw: i128,
     /// Outcome of the observation.
@@ -75,8 +75,9 @@ impl GatewayMonitor {
         let on_chain_raw = read_gateway_balance(orchestrator, asset).await?;
         let expected_raw = self.expected_balance(orchestrator, asset)?;
 
-        let drift_raw =
-            i128::try_from(on_chain_raw).unwrap_or(i128::MAX) - i128_from_u128(expected_raw);
+        let drift_raw = i128::try_from(on_chain_raw)
+            .unwrap_or(i128::MAX)
+            .saturating_sub(expected_raw);
 
         let dust = self.dust_for(asset);
         let window = self
@@ -136,7 +137,7 @@ impl GatewayMonitor {
         &self,
         orchestrator: &RuntimeOrchestrator,
         asset: &AssetId,
-    ) -> AppResult<u128> {
+    ) -> AppResult<i128> {
         let persistence = orchestrator
             .persistence_handle()
             .expect("reconciliation requires persistence");
@@ -145,8 +146,7 @@ impl GatewayMonitor {
         let reserved =
             persistence.aggregate_balance_by_type(LedgerAccountType::GatewayReserved, asset)?;
 
-        let signed = gateway.saturating_add(reserved.max(0));
-        Ok(u128::try_from(signed.max(0)).unwrap_or(0))
+        Ok(gateway.saturating_add(reserved.max(0)))
     }
 
     fn next_idempotency_key(&mut self, asset: &AssetId) -> String {
@@ -195,10 +195,6 @@ impl GatewayMonitor {
             }))
             .await
     }
-}
-
-fn i128_from_u128(value: u128) -> i128 {
-    i128::try_from(value).unwrap_or(i128::MAX)
 }
 
 async fn read_gateway_balance(

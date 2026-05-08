@@ -6,6 +6,7 @@ use std::io;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::info;
+use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -72,10 +73,15 @@ async fn run_maker_api(
 }
 
 fn init_tracing() -> anyhow::Result<()> {
+    let filter = EnvFilter::try_from_default_env()
+        .or_else(|_| EnvFilter::try_new("warn,firmament=info"))
+        .context("build tracing filter")?;
+
     tracing_subscriber::fmt()
         .compact()
+        .with_env_filter(filter)
         .with_target(false)
-        .with_writer(io::stderr)
+        .with_writer(io::stdout)
         .try_init()
         .map_err(|error| anyhow::anyhow!("initialize tracing subscriber: {error}"))
 }

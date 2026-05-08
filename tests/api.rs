@@ -304,6 +304,45 @@ async fn health_endpoint_returns_ok() {
 }
 
 #[tokio::test]
+async fn api_docs_playground_preflight_allows_local_docs_origin() {
+    let app = test_router().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::OPTIONS)
+                .uri("/v1/rfq")
+                .header(header::ORIGIN, "http://127.0.0.1:3002")
+                .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "content-type")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
+        Some(&header::HeaderValue::from_static("*"))
+    );
+    assert!(
+        response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_METHODS)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|methods| methods.contains("POST"))
+    );
+    assert!(
+        response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_HEADERS)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|headers| headers.contains("content-type"))
+    );
+}
+
+#[tokio::test]
 async fn assets_endpoint_exposes_per_asset_notional_limits() {
     // GET /v1/assets must include min_trade_notional_usd and
     // max_trade_notional_usd for every supported, enabled asset so the swap

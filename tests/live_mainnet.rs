@@ -133,7 +133,7 @@ async fn ensure_token_account_exists(
 /// Live smoke test for Phase 4 Gap 1: forces a Gateway-backed cbBTC RFQ by
 /// reconciling live Gateway USDC into the temp ledger and draining
 /// `working_custody:cbBTC` to zero before the RFQ. The
-/// runtime must select the GatewayToDex execution path, drive the real
+/// runtime must select the `GatewayToDex` execution path, drive the real
 /// `request_refill` and `execute_swap` adapter calls, and produce trade
 /// signatures that include `GatewayBurn`, `GatewayMint`, and `JupiterSwap`
 /// alongside the four HTLC signatures.
@@ -141,6 +141,7 @@ async fn ensure_token_account_exists(
 /// Gated behind `RUN_LIVE_GATEWAY_TESTS=1` AND `RUN_LIVE_CBBTC_RFQ_TESTS=1`
 /// so `cargo test` never accidentally hits mainnet.
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn live_gateway_backed_cbbtc_rfq_skips_without_explicit_opt_in() {
     if std::env::var("RUN_LIVE_GATEWAY_TESTS").ok().as_deref() != Some("1")
         || std::env::var("RUN_LIVE_CBBTC_RFQ_TESTS").ok().as_deref() != Some("1")

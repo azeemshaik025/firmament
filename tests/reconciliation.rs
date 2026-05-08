@@ -241,6 +241,34 @@ fn seed_gateway(persistence: &Arc<RuntimePersistence>, asset: &AssetId, amount: 
         .expect("save gateway seed");
 }
 
+fn seed_negative_gateway(persistence: &Arc<RuntimePersistence>, asset: &AssetId, amount: u64) {
+    if amount == 0 {
+        return;
+    }
+    let transaction =
+        LedgerTransactionBuilder::new("test_seed_negative_gateway", uuid::Uuid::now_v7())
+            .description("seed negative gateway balance for reconciliation test")
+            .idempotency_key(format!(
+                "test:seed:negative_gateway:{}:{}:{}",
+                asset.as_str(),
+                amount,
+                uuid::Uuid::now_v7()
+            ))
+            .debit(
+                LedgerAccountId::external(asset.clone(), "seed_negative_gateway"),
+                AmountRaw::new(amount),
+            )
+            .credit(
+                LedgerAccountId::gateway(asset.clone()),
+                AmountRaw::new(amount),
+            )
+            .build()
+            .expect("balanced negative gateway seed");
+    persistence
+        .save_ledger_transaction(&transaction)
+        .expect("save negative gateway seed");
+}
+
 fn seed_gateway_reserved(
     persistence: &Arc<RuntimePersistence>,
     asset: &AssetId,
@@ -629,6 +657,47 @@ async fn recon_gateway_positive_drift_adjusts_external_to_gateway() {
         .account_balance(&LedgerAccountId::external(usdc(), "reconciliation"))
         .expect("external");
     assert_eq!(external, -20_000);
+}
+
+#[tokio::test]
+async fn recon_gateway_repairs_negative_gateway_balance_when_provider_is_zero() {
+    let harness = build_harness().await;
+
+    seed_negative_gateway(&harness.persistence, &usdc(), 29_900_000);
+    harness.gateway_client.set(0);
+
+    let mut worker = build_worker(&harness);
+    let mut last_outcome: Option<ObservationOutcome> = None;
+    for _ in 0..3 {
+        last_outcome = Some(
+            worker
+                .tick_gateway(&usdc())
+                .await
+                .expect("gateway tick")
+                .outcome,
+        );
+    }
+
+    let key = match last_outcome.expect("three ticks ran") {
+        ObservationOutcome::Adjusted { idempotency_key } => idempotency_key,
+        other => panic!("expected Adjusted, got {other:?}"),
+    };
+    assert!(
+        key.starts_with("recon:gateway:USDC:"),
+        "unexpected gateway key: {key}"
+    );
+
+    let gateway = harness
+        .persistence
+        .account_balance(&LedgerAccountId::gateway(usdc()))
+        .expect("gateway balance");
+    assert_eq!(gateway, 0);
+
+    let external = harness
+        .persistence
+        .account_balance(&LedgerAccountId::external(usdc(), "reconciliation"))
+        .expect("external");
+    assert_eq!(external, -29_900_000);
 }
 
 #[tokio::test]

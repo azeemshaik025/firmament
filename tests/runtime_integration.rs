@@ -2653,7 +2653,7 @@ async fn settlement_repricing_failure_skips_reservation() {
 // ---------- Phase 4 Gap 1: Gateway-backed adapter wiring tests ----------
 
 /// Build a config and price book that lets a USDC-output RFQ accept on the
-/// Gateway path: SOL input → USDC output, working_custody:USDC = 0, gateway
+/// Gateway path: SOL input → USDC output, `working_custody:USDC` = 0, gateway
 /// USDC seeded.
 fn sol_to_usdc_rfq(amount_raw: u64) -> RfqRequest {
     RfqRequest {
@@ -2753,11 +2753,14 @@ async fn settlement_gateway_usdc_path_invokes_real_gateway_adapter() {
     // SwapEvent::Quoted/Executed, not the TradeSwap variants).
     let events = orchestrator.runtime().recent_events(None).await;
     assert!(
-        !events.iter().any(|event| matches!(
-            event,
-            RuntimeEvent::Swap(SwapEvent::TradeSwapSubmitted { .. })
-                | RuntimeEvent::Swap(SwapEvent::TradeSwapConfirmed { .. })
-        )),
+        !events.iter().any(|event| {
+            matches!(
+                event,
+                RuntimeEvent::Swap(
+                    SwapEvent::TradeSwapSubmitted { .. } | SwapEvent::TradeSwapConfirmed { .. }
+                )
+            )
+        }),
         "USDC-output gateway path must not emit trade-correlated swap events"
     );
 

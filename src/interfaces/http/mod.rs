@@ -1,6 +1,7 @@
 //! Local Axum operator API for RFQ route shells and runtime projection reads.
 
 pub mod auth;
+mod observability;
 pub mod runtime_read;
 pub mod types;
 
@@ -12,13 +13,15 @@ use async_trait::async_trait;
 use axum::body::Body;
 use axum::extract::rejection::{JsonRejection, PathRejection};
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
+use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use tokio::net::TcpListener;
-use tracing::info;
+use tower_http::cors::{Any, CorsLayer};
+use tracing::{error, info, warn};
 
 use crate::application::rfq;
 use crate::application::runtime::{
@@ -172,7 +175,16 @@ fn build_router(context: Arc<ApiContext>) -> Router {
             "/v1/admin/gateway/deposit/check",
             post(post_admin_gateway_deposit_check),
         )
+        .layer(docs_playground_cors())
+        .layer(middleware::from_fn(observability::log_request))
         .with_state(context)
+}
+
+fn docs_playground_cors() -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
 }
 
 /// Return true when the current config should start the local HTTP API.
@@ -370,12 +382,42 @@ impl RfqApiService for OrchestratorRfqApiService {
     async fn request_quote(&self, request: RfqRequest) -> Result<RfqResponse, ApiError> {
         let config = self.orchestrator.config();
         let domain_request = parse_rfq_request(request, config)?;
+        info!(
+            input_mint = %domain_request.input_mint,
+            output_mint = %domain_request.output_mint,
+            input_amount_raw = domain_request.input_amount_raw.as_u64(),
+            "RFQ requested"
+        );
         let fallback_output_mint = domain_request.output_mint.clone();
         let response = self
             .orchestrator
             .request_rfq(domain_request)
             .await
             .map_err(ApiError::from_app_error)?;
+        match &response {
+            rfq::RfqResponse::Accepted(quote) => {
+                info!(
+                    quote_id = %quote.quote_id,
+                    input_asset = %quote.pair.input,
+                    output_asset = %quote.pair.output,
+                    input_amount_raw = quote.input_amount.amount_raw.as_u64(),
+                    output_amount_raw = quote.output_amount.amount_raw.as_u64(),
+                    spread_bps = quote.spread_bps,
+                    execution_path = ?quote.execution_path,
+                    "RFQ accepted"
+                );
+            }
+            rfq::RfqResponse::Rejected(rejection) => {
+                let quote_id = rejection
+                    .quote_id
+                    .map_or_else(|| "unassigned".to_owned(), |quote_id| quote_id.to_string());
+                warn!(
+                    quote_id = %quote_id,
+                    reason = ?rejection.reason,
+                    "RFQ rejected"
+                );
+            }
+        }
         Ok(domain_to_api_rfq(response, fallback_output_mint, config))
     }
 
@@ -399,6 +441,12 @@ impl RfqApiService for OrchestratorRfqApiService {
             .start_wallet_settlement(quote_id, request.taker_wallet, request.secret_hash)
             .await
             .map_err(ApiError::from_app_error)?;
+        info!(
+            quote_id = %response.quote_id,
+            trade_id = %response.trade_id,
+            expires_at = %response.expires_at,
+            "wallet settlement started"
+        );
 
         let next_action = NextAction {
             kind: "submit_taker_lock".to_owned(),
@@ -425,6 +473,13 @@ impl RfqApiService for OrchestratorRfqApiService {
             .record_wallet_taker_lock(trade_id, request.signature)
             .await
             .map_err(ApiError::from_app_error)?;
+        info!(
+            trade_id = %response.trade_id,
+            settlement_status = ?response.settlement_status,
+            maker_lock_submitted = response.maker_lock_signature.is_some(),
+            signature_count = response.tx_signatures.len(),
+            "taker lock recorded"
+        );
 
         let next_action = NextAction {
             kind: "submit_taker_redeem".to_owned(),
@@ -459,6 +514,10 @@ impl RfqApiService for OrchestratorRfqApiService {
                 .prepare_wallet_taker_redeem(trade_id, request.preimage)
                 .await
                 .map_err(ApiError::from_app_error)?;
+            info!(
+                trade_id = %prepared.trade_id,
+                "taker redeem transaction prepared"
+            );
             let next_action = NextAction {
                 kind: "submit_taker_redeem".to_owned(),
                 method: "POST".to_owned(),
@@ -481,6 +540,13 @@ impl RfqApiService for OrchestratorRfqApiService {
             .complete_wallet_taker_redeem(trade_id, request.preimage, signature)
             .await
             .map_err(ApiError::from_app_error)?;
+        info!(
+            trade_id = %completed.trade.trade_id,
+            settlement_status = ?completed.trade.settlement_status,
+            maker_redeem_submitted = completed.maker_redeem_signature.is_some(),
+            signature_count = completed.trade.tx_signatures.len(),
+            "taker redeem completed"
+        );
         Ok(TakerRedeemResponse {
             trade_id: completed.trade.trade_id,
             settlement_status: completed.trade.settlement_status,
@@ -516,14 +582,18 @@ impl RfqApiService for OrchestratorRfqApiService {
         self.orchestrator
             .trigger_operator_automation_check("rebalance")
             .await
-            .map_err(ApiError::from_app_error)
+            .map_err(ApiError::from_app_error)?;
+        info!("operator rebalance check triggered");
+        Ok(())
     }
 
     async fn trigger_gateway_refill_check(&self) -> Result<(), ApiError> {
         self.orchestrator
             .trigger_operator_automation_check("gateway")
             .await
-            .map_err(ApiError::from_app_error)
+            .map_err(ApiError::from_app_error)?;
+        info!("operator Gateway refill check triggered");
+        Ok(())
     }
 
     async fn trigger_gateway_deposit_check(&self) -> Result<(), ApiError> {
@@ -531,7 +601,9 @@ impl RfqApiService for OrchestratorRfqApiService {
             .run_excess_deposit_check()
             .await
             .map(|_| ())
-            .map_err(ApiError::from_app_error)
+            .map_err(ApiError::from_app_error)?;
+        info!("operator Gateway deposit check triggered");
+        Ok(())
     }
 }
 
@@ -769,6 +841,7 @@ async fn post_admin_login(
         .iter()
         .any(|allowed| allowed == username)
     {
+        warn!(username, "admin login rejected: username is not allowed");
         return Err(ApiError::unauthorized());
     }
 
@@ -776,6 +849,10 @@ async fn post_admin_login(
     if !verify_admin_password(username, &request.password, &hashes)
         .map_err(ApiError::from_app_error)?
     {
+        warn!(
+            username,
+            "admin login rejected: password verification failed"
+        );
         return Err(ApiError::unauthorized());
     }
 
@@ -801,6 +878,7 @@ async fn post_admin_login(
     })
     .into_response();
     response.headers_mut().insert(header::SET_COOKIE, cookie);
+    info!(username, expires_at = %expires_at, "admin login succeeded");
     Ok(response)
 }
 
@@ -818,6 +896,7 @@ async fn post_admin_logout() -> Result<Response<Body>, ApiError> {
         ))
         .map_err(|error| ApiError::bad_request("invalid_cookie", error.to_string()))?,
     );
+    info!("admin logout completed");
     Ok(response)
 }
 
@@ -1024,6 +1103,21 @@ impl ApiError {
     }
 
     pub(crate) fn from_app_error(error: AppError) -> Self {
+        match &error {
+            AppError::Validation(_) | AppError::Unsupported(_) => {
+                warn!(%error, "API request rejected by application layer");
+            }
+            AppError::ExternalService { service, .. } => {
+                warn!(%service, %error, "API external dependency failed");
+            }
+            AppError::Config(_)
+            | AppError::Solana(_)
+            | AppError::Persistence(_)
+            | AppError::Internal(_) => {
+                error!(%error, "API request failed");
+            }
+        }
+
         match error {
             AppError::Validation(message) => Self::bad_request("validation_failed", message),
             AppError::Unsupported(message) => Self::new(
@@ -1071,6 +1165,7 @@ fn bind_address(config: &AppConfig) -> AppResult<SocketAddr> {
         .map_err(|error| AppError::validation(format!("invalid HTTP bind address: {error}")))
 }
 
+#[allow(clippy::too_many_lines)]
 fn parse_rfq_request(request: RfqRequest, config: &AppConfig) -> Result<rfq::RfqRequest, ApiError> {
     let RfqRequest {
         input_asset,
