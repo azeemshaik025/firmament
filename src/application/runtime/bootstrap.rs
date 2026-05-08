@@ -250,6 +250,20 @@ async fn assemble_live_runtime(
         recon_shutdown,
     ));
 
+    // Always-on automation workers (rebalance, Gateway refill, native SOL
+    // top-up). Default-off for safety; production config opts in via
+    // [runtime.automation]. Each loop honours `shutdown_signal` between
+    // ticks. The trade-driven `accept_quote` path and these workers share
+    // the orchestrator's `automation_lock` mutex so concurrent firings
+    // serialize cleanly.
+    if config.runtime.automation.enabled {
+        super::automation::spawn_workers(
+            Arc::clone(&orchestrator),
+            &config.runtime.automation,
+            Arc::clone(&shutdown_signal),
+        );
+    }
+
     Ok(LiveRuntime {
         app_state,
         orchestrator,

@@ -18,7 +18,8 @@ use crate::adapters::solana::htlc::{generate_secret, hash_secret};
 use crate::application::rebalance::{
     ActionKey, AutomationActionKind, AutomationLimits, AutomationState, DecisionBlockReason,
     GatewayRefillDecision, GatewayRefillPlan, PlannedSwap, RebalanceDecision, RebalancePolicy,
-    decide_gateway_refill, decide_rebalance, submit_gateway_refill, submit_planned_swap,
+    decide_gateway_refill, decide_inventory_rebalance, decide_native_sol_top_up,
+    submit_gateway_refill, submit_planned_swap,
 };
 use crate::application::rfq::{
     FirmQuote, QuoteAcceptance, RfqContext, RfqRequest, RfqResponse, accept_quote_for_settlement,
@@ -625,6 +626,11 @@ pub struct RuntimeOrchestrator {
     trades: Arc<RwLock<HashMap<TradeId, RuntimeTrade>>>,
     wallet_settlements: Arc<RwLock<HashMap<TradeId, WalletSettlementState>>>,
     automation_state: Arc<RwLock<AutomationState>>,
+    /// Serializes `refresh_inventory_and_automation` calls. The trade-driven
+    /// `accept_quote` path and each always-on worker share this lock so that
+    /// concurrent firings cannot double-spend the cumulative cap or stack
+    /// overlapping Jupiter/Gateway adapter actions.
+    automation_lock: Arc<tokio::sync::Mutex<()>>,
     usd_prices: Arc<RwLock<BTreeMap<AssetId, Decimal>>>,
     persistence: Option<Arc<RuntimePersistence>>,
     last_accepted_quote: Arc<RwLock<Option<QuoteId>>>,
@@ -653,6 +659,7 @@ impl RuntimeOrchestrator {
             trades: Arc::new(RwLock::new(HashMap::new())),
             wallet_settlements: Arc::new(RwLock::new(HashMap::new())),
             automation_state: Arc::new(RwLock::new(automation_state)),
+            automation_lock: Arc::new(tokio::sync::Mutex::new(())),
             usd_prices: Arc::new(RwLock::new(usd_prices)),
             persistence: None,
             last_accepted_quote: Arc::new(RwLock::new(None)),
@@ -1768,11 +1775,28 @@ impl RuntimeOrchestrator {
     /// Refresh working inventory and run rebalance and Gateway refill decisions
     /// from the resulting snapshot.
     ///
+    /// Serialized via `automation_lock` so concurrent firings (the trade
+    /// driven `accept_quote` path plus each always-on automation worker)
+    /// cannot stack overlapping Jupiter/Gateway adapter actions or
+    /// double-spend the cumulative cap.
+    ///
     /// # Errors
     ///
     /// Returns balance-reader or projection errors. Individual automation
     /// adapter failures are emitted as runtime events and summarized.
     pub async fn refresh_inventory_and_automation(&self) -> AppResult<AutomationRunSummary> {
+        let _guard = self.automation_lock.lock().await;
+        self.refresh_inventory_and_automation_locked().await
+    }
+
+    async fn refresh_inventory_and_automation_locked(&self) -> AppResult<AutomationRunSummary> {
+        let (inventory, inventory_policy) = self.refresh_automation_inventory().await?;
+        self.run_automation(&inventory, &inventory_policy).await
+    }
+
+    async fn refresh_automation_inventory(
+        &self,
+    ) -> AppResult<(ValuedInventorySnapshot, InventoryPolicy)> {
         let balance_snapshot = self
             .adapters
             .balance_reader
@@ -1799,7 +1823,61 @@ impl RuntimeOrchestrator {
             self.publish(RuntimeEvent::Inventory(event)).await?;
         }
 
-        self.run_automation(&inventory, &inventory_policy).await
+        Ok((inventory, inventory_policy))
+    }
+
+    /// Run one rebalance worker tick.
+    ///
+    /// # Errors
+    ///
+    /// Returns balance-reader or projection errors. Swap adapter failures are
+    /// emitted as runtime events and summarized.
+    pub async fn run_rebalance_check(&self) -> AppResult<AutomationRunSummary> {
+        let _guard = self.automation_lock.lock().await;
+        let (inventory, inventory_policy) = self.refresh_automation_inventory().await?;
+        let mut summary = AutomationRunSummary {
+            inventory_refreshed: true,
+            ..AutomationRunSummary::default()
+        };
+        self.run_inventory_rebalance(&inventory, &inventory_policy, &mut summary)
+            .await?;
+        Ok(summary)
+    }
+
+    /// Run one Gateway refill worker tick.
+    ///
+    /// # Errors
+    ///
+    /// Returns balance-reader or projection errors. Gateway adapter failures
+    /// are emitted as runtime events and summarized.
+    pub async fn run_gateway_refill_check(&self) -> AppResult<AutomationRunSummary> {
+        let _guard = self.automation_lock.lock().await;
+        let (inventory, inventory_policy) = self.refresh_automation_inventory().await?;
+        let mut summary = AutomationRunSummary {
+            inventory_refreshed: true,
+            ..AutomationRunSummary::default()
+        };
+        self.run_gateway_refill(&inventory, &inventory_policy, &mut summary)
+            .await?;
+        Ok(summary)
+    }
+
+    /// Run one native SOL top-up worker tick.
+    ///
+    /// # Errors
+    ///
+    /// Returns balance-reader or projection errors. Swap adapter failures are
+    /// emitted as runtime events and summarized.
+    pub async fn run_native_top_up_check(&self) -> AppResult<AutomationRunSummary> {
+        let _guard = self.automation_lock.lock().await;
+        let (inventory, inventory_policy) = self.refresh_automation_inventory().await?;
+        let mut summary = AutomationRunSummary {
+            inventory_refreshed: true,
+            ..AutomationRunSummary::default()
+        };
+        self.run_native_sol_top_up(&inventory, &inventory_policy, &mut summary)
+            .await?;
+        Ok(summary)
     }
 
     /// Publish a shutdown event. Future worker tasks can use this boundary to
@@ -1887,16 +1965,34 @@ impl RuntimeOrchestrator {
         inventory: &ValuedInventorySnapshot,
         inventory_policy: &InventoryPolicy,
     ) -> AppResult<AutomationRunSummary> {
-        let limits = AutomationLimits::from_config(self.app_state.config(), inventory_policy);
         let mut summary = AutomationRunSummary {
             inventory_refreshed: true,
             ..AutomationRunSummary::default()
         };
 
+        self.run_native_sol_top_up(inventory, inventory_policy, &mut summary)
+            .await?;
+        if summary.completed_swaps == 0 {
+            self.run_inventory_rebalance(inventory, inventory_policy, &mut summary)
+                .await?;
+        }
+        self.run_gateway_refill(inventory, inventory_policy, &mut summary)
+            .await?;
+
+        Ok(summary)
+    }
+
+    async fn run_inventory_rebalance(
+        &self,
+        inventory: &ValuedInventorySnapshot,
+        inventory_policy: &InventoryPolicy,
+        summary: &mut AutomationRunSummary,
+    ) -> AppResult<()> {
+        let limits = AutomationLimits::from_config(self.app_state.config(), inventory_policy);
         let rebalance_policy =
             RebalancePolicy::from_config(self.app_state.config(), inventory_policy);
         let automation_state = self.automation_state.read().await.clone();
-        match decide_rebalance(
+        match decide_inventory_rebalance(
             inventory,
             &automation_state,
             &limits,
@@ -1915,6 +2011,48 @@ impl RuntimeOrchestrator {
             }
         }
 
+        Ok(())
+    }
+
+    async fn run_native_sol_top_up(
+        &self,
+        inventory: &ValuedInventorySnapshot,
+        inventory_policy: &InventoryPolicy,
+        summary: &mut AutomationRunSummary,
+    ) -> AppResult<()> {
+        let limits = AutomationLimits::from_config(self.app_state.config(), inventory_policy);
+        let rebalance_policy =
+            RebalancePolicy::from_config(self.app_state.config(), inventory_policy);
+        let automation_state = self.automation_state.read().await.clone();
+        match decide_native_sol_top_up(
+            inventory,
+            &automation_state,
+            &limits,
+            &rebalance_policy,
+            OffsetDateTime::now_utc(),
+        ) {
+            RebalanceDecision::Swap(plan) => {
+                if self.submit_swap_plan(plan, &limits).await? {
+                    summary.completed_swaps += 1;
+                }
+            }
+            RebalanceDecision::NoAction { reason } => {
+                summary.blocked_reasons.push(reason);
+                self.publish_cap_block_if_needed("native SOL top-up", reason)
+                    .await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn run_gateway_refill(
+        &self,
+        inventory: &ValuedInventorySnapshot,
+        inventory_policy: &InventoryPolicy,
+        summary: &mut AutomationRunSummary,
+    ) -> AppResult<()> {
+        let limits = AutomationLimits::from_config(self.app_state.config(), inventory_policy);
         let automation_state = self.automation_state.read().await.clone();
         match decide_gateway_refill(
             inventory,
@@ -1940,7 +2078,7 @@ impl RuntimeOrchestrator {
             }
         }
 
-        Ok(summary)
+        Ok(())
     }
 
     async fn submit_swap_plan(
@@ -2109,6 +2247,18 @@ impl RuntimeOrchestrator {
                 prices.insert(price.pair.output.clone(), inverse);
             }
         }
+    }
+
+    /// Publish a runtime event through the standard projection + persistence
+    /// pipeline. Used by always-on workers that need to emit events without
+    /// going through a settlement or RFQ flow.
+    ///
+    /// # Errors
+    ///
+    /// Returns projection or persistence errors when the event cannot be
+    /// published.
+    pub async fn publish_runtime_event(&self, event: RuntimeEvent) -> AppResult<()> {
+        self.publish(event).await
     }
 
     async fn publish(&self, event: RuntimeEvent) -> AppResult<()> {

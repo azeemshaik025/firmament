@@ -1,5 +1,6 @@
 //! Bootstrap state, read projection, and runtime orchestration glue.
 
+pub mod automation;
 mod bootstrap;
 mod orchestrator;
 mod projection;

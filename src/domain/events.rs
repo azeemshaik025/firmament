@@ -51,6 +51,8 @@ pub enum RuntimeEvent {
     Inventory(InventoryEvent),
     /// Reconciliation observation tick (always emitted, even on skip).
     Reconciliation(ReconciliationEvent),
+    /// Always-on automation worker tick.
+    Automation(AutomationEvent),
     /// Runtime system event.
     System(SystemEvent),
 }
@@ -482,6 +484,59 @@ pub enum ReconciliationOutcome {
     /// Drift triggered an adjustment but a hard guard blocked it.
     Skipped {
         /// Stable, operator-facing reason.
+        reason: String,
+    },
+}
+
+/// Always-on automation worker tick event.
+///
+/// Emitted by each independent worker (rebalance, gateway refill, native
+/// SOL top-up) once per tick. The `outcome` discriminates whether the tick
+/// submitted any adapter action; downstream events
+/// (`SwapEvent::*` / `GatewayEvent::*`) carry the actual ledger-affecting
+/// movements.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AutomationEvent {
+    /// One automation worker observation tick.
+    Tick {
+        /// Event metadata.
+        metadata: EventMetadata,
+        /// Which worker fired this tick.
+        kind: AutomationKind,
+        /// Outcome of the tick.
+        outcome: AutomationOutcome,
+    },
+}
+
+/// Worker kind discriminator for [`AutomationEvent::Tick`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutomationKind {
+    /// Inventory rebalance worker.
+    Rebalance,
+    /// Circle Gateway USDC refill worker.
+    GatewayRefill,
+    /// Native SOL gas top-up worker.
+    NativeTopUp,
+}
+
+/// Outcome of one automation worker tick.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AutomationOutcome {
+    /// The tick ran but no automation action was needed.
+    NoActionNeeded,
+    /// One or more automation actions were submitted on this tick.
+    Submitted {
+        /// Number of swap actions submitted.
+        completed_swaps: usize,
+        /// Number of Gateway refills submitted.
+        completed_gateway_refills: usize,
+    },
+    /// The tick failed during automation execution.
+    Failed {
+        /// Operator-facing reason.
         reason: String,
     },
 }

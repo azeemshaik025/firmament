@@ -1143,6 +1143,16 @@ impl LedgerEventConsumer<'_> {
                         .to_owned(),
                 );
             }
+            RuntimeEvent::Automation(_) => {
+                // Always-on automation workers emit Tick events for operator
+                // visibility. The underlying Swap::* / Gateway::* events that
+                // submitted plans produce drive the ledger movements through
+                // their own arms above.
+                summary.ignored.push(
+                    "automation tick event is observational; ledger movements come from the submitted swap/gateway events"
+                        .to_owned(),
+                );
+            }
             RuntimeEvent::System(_) => {
                 summary
                     .ignored

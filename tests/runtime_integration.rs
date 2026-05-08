@@ -5,8 +5,8 @@ use async_trait::async_trait;
 use firmament::assets::AssetRegistry;
 use firmament::db::Db;
 use firmament::events::{
-    EventMetadata, GatewayEvent, InventoryEvent, QuoteEvent, RuntimeEvent, SettlementEvent,
-    SwapEvent,
+    AutomationEvent, AutomationKind, AutomationOutcome, EventMetadata, GatewayEvent,
+    InventoryEvent, QuoteEvent, RuntimeEvent, SettlementEvent, SwapEvent,
 };
 use firmament::ledger::{LedgerAccountId, LedgerEventConsumer, SqliteLedgerRepository};
 use firmament::ports::{BalanceReader, GatewayClient, HtlcClient, PriceProvider, SwapExecutor};
@@ -3032,5 +3032,320 @@ async fn settlement_jupiter_failure_after_gateway_unwinds_pending_dex_spend() {
     assert_eq!(
         pending_dex_spend, 0,
         "pending_dex_spend should be unwound after swap failure"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Always-on automation worker tests (Phase 4 Gap 3).
+// ---------------------------------------------------------------------------
+
+/// Build a worker-friendly config: relaxed per-asset limits plus an enabled
+/// automation block with a 1-second cadence.
+fn automation_enabled_config() -> AppConfig {
+    let mut config = relaxed_default_config();
+    config.runtime.automation.enabled = true;
+    config.runtime.automation.rebalance_interval_seconds = 1;
+    config.runtime.automation.gateway_refill_interval_seconds = 1;
+    config.runtime.automation.native_top_up_interval_seconds = 1;
+    config
+}
+
+/// Bootstrap a fake-adapter orchestrator with the supplied config and adapters,
+/// then spawn the always-on automation workers around it. Returns the
+/// orchestrator handle plus the shutdown notifier so tests can stop the
+/// workers between assertions.
+async fn automation_harness(
+    config: AppConfig,
+    price_provider: FakePriceProvider,
+    htlc_client: FakeHtlcClient,
+    swap_executor: FakeSwapExecutor,
+    gateway_client: FakeGatewayClient,
+    balance_reader: FakeBalanceReader,
+) -> (Arc<RuntimeOrchestrator>, Arc<tokio::sync::Notify>) {
+    let app_state = bootstrap(config.clone()).await.expect("bootstrap");
+    let orchestrator = Arc::new(RuntimeOrchestrator::new(
+        app_state,
+        RuntimeAdapters {
+            price_provider: Arc::new(price_provider),
+            htlc_client: Arc::new(htlc_client),
+            swap_executor: Arc::new(swap_executor),
+            gateway_client: Arc::new(gateway_client),
+            balance_reader: Arc::new(balance_reader),
+        },
+        RuntimeOrchestratorOptions::default(),
+    ));
+    let shutdown = Arc::new(tokio::sync::Notify::new());
+    if config.runtime.automation.enabled {
+        firmament::runtime::automation::spawn_workers(
+            Arc::clone(&orchestrator),
+            &config.runtime.automation,
+            Arc::clone(&shutdown),
+        );
+    }
+    (orchestrator, shutdown)
+}
+
+/// Inventory snapshot with SOL well above the gas buffer but USDC = $1 — short
+/// of the 60% target on a $3-equivalent book — so `decide_rebalance` will plan
+/// a SOL → USDC swap.
+fn rebalance_drift_inventory() -> BalanceSnapshot {
+    balance_snapshot(vec![
+        TokenAmount::new(usdc(), AmountRaw::new(1_000_000)),
+        TokenAmount::new(sol(), AmountRaw::new(100_000_000)),
+        TokenAmount::new(cbbtc(), AmountRaw::new(0)),
+    ])
+}
+
+/// Inventory snapshot with USDC well below the Gateway refill threshold and
+/// SOL above the gas buffer.
+fn gateway_refill_low_usdc_inventory() -> BalanceSnapshot {
+    balance_snapshot(vec![
+        TokenAmount::new(usdc(), AmountRaw::new(500_000)),
+        TokenAmount::new(sol(), AmountRaw::new(100_000_000)),
+        TokenAmount::new(cbbtc(), AmountRaw::new(0)),
+    ])
+}
+
+/// Inventory snapshot with USDC and SOL at the gas buffer floor — triggers
+/// the scoped native SOL top-up decision.
+fn native_top_up_low_sol_inventory() -> BalanceSnapshot {
+    balance_snapshot(vec![
+        TokenAmount::new(usdc(), AmountRaw::new(50_000_000)),
+        TokenAmount::new(sol(), AmountRaw::new(10_000_000)),
+        TokenAmount::new(cbbtc(), AmountRaw::new(0)),
+    ])
+}
+
+#[tokio::test]
+async fn rebalance_worker_fires_periodically_when_enabled() {
+    let swap = FakeSwapExecutor::default();
+    let (orchestrator, shutdown) = automation_harness(
+        automation_enabled_config(),
+        FakePriceProvider::default(),
+        FakeHtlcClient::default(),
+        swap.clone(),
+        FakeGatewayClient::default(),
+        FakeBalanceReader::new(vec![rebalance_drift_inventory()]),
+    )
+    .await;
+
+    // Allow a couple of ticks to fire (1s cadence + slack).
+    tokio::time::sleep(std::time::Duration::from_millis(2_500)).await;
+    shutdown.notify_waiters();
+
+    let events = orchestrator.runtime().recent_events(None).await;
+    let rebalance_ticks = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                RuntimeEvent::Automation(AutomationEvent::Tick {
+                    kind: AutomationKind::Rebalance,
+                    ..
+                })
+            )
+        })
+        .count();
+    assert!(
+        rebalance_ticks >= 1,
+        "expected at least one rebalance Automation::Tick, got {rebalance_ticks}"
+    );
+
+    let submitted = events.iter().any(|event| {
+        matches!(
+            event,
+            RuntimeEvent::Automation(AutomationEvent::Tick {
+                kind: AutomationKind::Rebalance,
+                outcome: AutomationOutcome::Submitted { .. },
+                ..
+            })
+        )
+    });
+    assert!(
+        submitted,
+        "expected at least one rebalance tick with Submitted outcome",
+    );
+    assert!(
+        swap.executed_count() >= 1,
+        "expected swap executor to be called at least once"
+    );
+}
+
+#[tokio::test]
+async fn rebalance_worker_does_not_fire_when_disabled() {
+    let swap = FakeSwapExecutor::default();
+    // Default automation config keeps `enabled = false`.
+    let (orchestrator, shutdown) = automation_harness(
+        relaxed_default_config(),
+        FakePriceProvider::default(),
+        FakeHtlcClient::default(),
+        swap.clone(),
+        FakeGatewayClient::default(),
+        FakeBalanceReader::new(vec![rebalance_drift_inventory()]),
+    )
+    .await;
+
+    tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+    shutdown.notify_waiters();
+
+    let events = orchestrator.runtime().recent_events(None).await;
+    let any_automation_tick = events
+        .iter()
+        .any(|event| matches!(event, RuntimeEvent::Automation(_)));
+    assert!(
+        !any_automation_tick,
+        "expected no Automation events when disabled"
+    );
+    assert_eq!(
+        swap.executed_count(),
+        0,
+        "expected swap executor untouched when automation is disabled"
+    );
+}
+
+#[tokio::test]
+async fn gateway_refill_worker_fires_when_working_custody_below_threshold() {
+    let gateway = FakeGatewayClient::default();
+    let (orchestrator, shutdown) = automation_harness(
+        automation_enabled_config(),
+        FakePriceProvider::default(),
+        FakeHtlcClient::default(),
+        FakeSwapExecutor::default(),
+        gateway.clone(),
+        FakeBalanceReader::new(vec![gateway_refill_low_usdc_inventory()]),
+    )
+    .await;
+
+    tokio::time::sleep(std::time::Duration::from_millis(2_500)).await;
+    shutdown.notify_waiters();
+
+    let events = orchestrator.runtime().recent_events(None).await;
+    let gateway_ticks = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                RuntimeEvent::Automation(AutomationEvent::Tick {
+                    kind: AutomationKind::GatewayRefill,
+                    ..
+                })
+            )
+        })
+        .count();
+    assert!(
+        gateway_ticks >= 1,
+        "expected at least one gateway_refill tick, got {gateway_ticks}"
+    );
+    assert!(
+        gateway.refill_count() >= 1,
+        "expected gateway refill to be requested at least once"
+    );
+}
+
+#[tokio::test]
+async fn native_top_up_worker_fires_when_native_sol_low() {
+    let swap = FakeSwapExecutor::default();
+    // The native top-up branch in `decide_rebalance` requires a non-zero USD
+    // price for SOL so the plan does not collapse to ZeroAmount. Drive an
+    // initial RFQ to seed the orchestrator's USD price book before letting
+    // the workers tick.
+    let (orchestrator, shutdown) = automation_harness(
+        automation_enabled_config(),
+        FakePriceProvider::default(),
+        FakeHtlcClient::default(),
+        swap.clone(),
+        FakeGatewayClient::default(),
+        FakeBalanceReader::new(vec![
+            quote_inventory(),
+            native_top_up_low_sol_inventory(),
+            native_top_up_low_sol_inventory(),
+        ]),
+    )
+    .await;
+
+    let response = orchestrator
+        .request_rfq(rfq(1_000_000))
+        .await
+        .expect("seed price book via RFQ");
+    assert!(matches!(response, RfqResponse::Accepted(_)));
+
+    tokio::time::sleep(std::time::Duration::from_millis(2_500)).await;
+    shutdown.notify_waiters();
+
+    let events = orchestrator.runtime().recent_events(None).await;
+    let native_ticks = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                RuntimeEvent::Automation(AutomationEvent::Tick {
+                    kind: AutomationKind::NativeTopUp,
+                    ..
+                })
+            )
+        })
+        .count();
+    assert!(
+        native_ticks >= 1,
+        "expected at least one native_top_up tick, got {native_ticks}"
+    );
+    let usdc_to_sol_swap = swap.quoted_requests().iter().any(|request| {
+        request.pair == AssetPair::new(usdc(), sol())
+            || request.pair == AssetPair::new(sol(), usdc())
+    });
+    assert!(
+        usdc_to_sol_swap || swap.executed_count() >= 1,
+        "expected the native top-up flow to invoke the swap executor"
+    );
+}
+
+#[tokio::test]
+async fn workers_do_not_race_with_trade_driven_automation() {
+    // Drive a trade-driven `accept_quote` (which calls
+    // refresh_inventory_and_automation under the same automation_lock)
+    // while the workers are actively ticking. The shared mutex means
+    // automation runs cannot interleave; cumulative-cap accounting and
+    // adapter calls stay deterministic.
+    let swap = FakeSwapExecutor::default();
+    let gateway = FakeGatewayClient::default();
+    let (orchestrator, shutdown) = automation_harness(
+        automation_enabled_config(),
+        FakePriceProvider::default(),
+        FakeHtlcClient::default(),
+        swap.clone(),
+        gateway.clone(),
+        FakeBalanceReader::new(vec![quote_inventory()]),
+    )
+    .await;
+
+    let quote_id = accepted_quote_id(orchestrator.request_rfq(rfq(1_000_000)).await);
+    orchestrator
+        .accept_quote(quote_id)
+        .await
+        .expect("trade-driven accept_quote should succeed");
+
+    tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+    shutdown.notify_waiters();
+
+    // Cumulative cap defaults to $15 and the per-action cap to $2, so we
+    // expect at most a small bounded number of swap submissions.
+    assert!(
+        swap.executed_count() <= 8,
+        "automation lock should serialize, got {} executed swaps",
+        swap.executed_count()
+    );
+    assert!(
+        gateway.refill_count() <= 8,
+        "automation lock should serialize, got {} refills",
+        gateway.refill_count()
+    );
+
+    let events = orchestrator.runtime().recent_events(None).await;
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            RuntimeEvent::Automation(AutomationEvent::Tick { .. })
+        )),
+        "expected at least one Automation::Tick from the workers"
     );
 }

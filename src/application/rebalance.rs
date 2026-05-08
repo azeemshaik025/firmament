@@ -231,8 +231,31 @@ pub fn decide_rebalance(
         };
     }
 
-    if let Some(plan) = maybe_native_sol_top_up(snapshot, state, limits, policy, now) {
-        return plan;
+    match decide_native_sol_top_up(snapshot, state, limits, policy, now) {
+        RebalanceDecision::Swap(plan) => return RebalanceDecision::Swap(plan),
+        RebalanceDecision::NoAction {
+            reason: DecisionBlockReason::NoDrift,
+        } => {}
+        no_action @ RebalanceDecision::NoAction { .. } => return no_action,
+    }
+
+    decide_inventory_rebalance(snapshot, state, limits, policy, now)
+}
+
+/// Decide the next non-top-up inventory rebalance action.
+#[must_use]
+pub fn decide_inventory_rebalance(
+    snapshot: &InventorySnapshot,
+    state: &AutomationState,
+    limits: &AutomationLimits,
+    policy: &RebalancePolicy,
+    now: OffsetDateTime,
+) -> RebalanceDecision {
+    let inventory_policy = inventory_policy_from_limits(limits);
+    if !snapshot.has_native_sol_gas_buffer(&inventory_policy) {
+        return RebalanceDecision::NoAction {
+            reason: DecisionBlockReason::NativeGasBufferInsufficient,
+        };
     }
 
     let Some(source) = snapshot
@@ -281,16 +304,24 @@ pub fn decide_rebalance(
     }
 }
 
-fn maybe_native_sol_top_up(
+/// Decide whether the maker wallet needs a native SOL top-up.
+#[must_use]
+pub fn decide_native_sol_top_up(
     snapshot: &InventorySnapshot,
     state: &AutomationState,
     limits: &AutomationLimits,
     policy: &RebalancePolicy,
     now: OffsetDateTime,
-) -> Option<RebalanceDecision> {
-    let sol_position = snapshot.position(&policy.sol_asset)?;
+) -> RebalanceDecision {
+    let Some(sol_position) = snapshot.position(&policy.sol_asset) else {
+        return RebalanceDecision::NoAction {
+            reason: DecisionBlockReason::UnsupportedAsset,
+        };
+    };
     if sol_position.balance_raw.as_u64() >= policy.native_sol_top_up_target_raw.as_u64() {
-        return None;
+        return RebalanceDecision::NoAction {
+            reason: DecisionBlockReason::NoDrift,
+        };
     }
 
     let shortfall_raw = AmountRaw::new(
@@ -302,21 +333,19 @@ fn maybe_native_sol_top_up(
     let desired_notional = raw_to_units(shortfall_raw, sol_position.decimals)
         * sol_position.price_usd.max(Decimal::ZERO);
 
-    Some(
-        match plan_capped_swap(SwapPlanInput {
-            snapshot,
-            kind: AutomationActionKind::NativeSolTopUp,
-            pair: AssetPair::new(policy.usdc_asset.clone(), policy.sol_asset.clone()),
-            desired_notional_usd: desired_notional,
-            state,
-            limits,
-            now,
-            reason: "native SOL gas top-up".to_owned(),
-        }) {
-            Ok(plan) => RebalanceDecision::Swap(plan),
-            Err(reason) => RebalanceDecision::NoAction { reason },
-        },
-    )
+    match plan_capped_swap(SwapPlanInput {
+        snapshot,
+        kind: AutomationActionKind::NativeSolTopUp,
+        pair: AssetPair::new(policy.usdc_asset.clone(), policy.sol_asset.clone()),
+        desired_notional_usd: desired_notional,
+        state,
+        limits,
+        now,
+        reason: "native SOL gas top-up".to_owned(),
+    }) {
+        Ok(plan) => RebalanceDecision::Swap(plan),
+        Err(reason) => RebalanceDecision::NoAction { reason },
+    }
 }
 
 /// Decide whether the working wallet needs a Gateway USDC refill.

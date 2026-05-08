@@ -101,3 +101,15 @@ emit_event_on_skip = true
 USDC = 10000
 SOL = 100000
 cbBTC = 100
+
+[runtime.automation]
+# Always-on automation workers (rebalance / Gateway refill / native SOL
+# top-up). Default-off in code so test harnesses do not race with
+# explicit trade-driven triggers; production opts in here. Each loop
+# runs one scoped automation decision and is serialized through the
+# automation mutex so the trade-driven path and these workers cannot
+# stack overlapping adapter actions.
+enabled = true
+rebalance_interval_seconds = 60
+gateway_refill_interval_seconds = 30
+native_top_up_interval_seconds = 60

@@ -604,6 +604,8 @@ pub struct RuntimeConfig {
     pub enable_protocol_workers: bool,
     /// Local `SQLite` path used by production ledger and P&L persistence.
     pub database_path: String,
+    /// Always-on automation worker settings (rebalance, refill, top-up).
+    pub automation: AutomationConfig,
 }
 
 impl Default for RuntimeConfig {
@@ -613,6 +615,7 @@ impl Default for RuntimeConfig {
             scaffold_hold_millis: 0,
             enable_protocol_workers: false,
             database_path: "runtime.sqlite".to_owned(),
+            automation: AutomationConfig::default(),
         }
     }
 }
@@ -651,6 +654,37 @@ impl Default for ReconciliationConfig {
             consecutive_ticks_for_adjustment: 3,
             emit_event_on_skip: true,
             dust,
+        }
+    }
+}
+
+/// Always-on automation worker settings.
+///
+/// Three independent loops drive `decide_rebalance`, `decide_gateway_refill`,
+/// and the native SOL top-up flow at configurable cadences. Disabled by
+/// default so test harnesses and dev runs do not race with explicit
+/// trade-driven triggers; production config opts in via `enabled = true`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+#[serde(deny_unknown_fields)]
+pub struct AutomationConfig {
+    /// Whether the automation workers should be spawned at runtime startup.
+    pub enabled: bool,
+    /// Rebalance loop cadence in seconds.
+    pub rebalance_interval_seconds: u64,
+    /// Gateway refill loop cadence in seconds.
+    pub gateway_refill_interval_seconds: u64,
+    /// Native SOL top-up loop cadence in seconds.
+    pub native_top_up_interval_seconds: u64,
+}
+
+impl Default for AutomationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            rebalance_interval_seconds: 60,
+            gateway_refill_interval_seconds: 30,
+            native_top_up_interval_seconds: 60,
         }
     }
 }
