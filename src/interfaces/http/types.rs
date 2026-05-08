@@ -45,6 +45,7 @@ pub struct HtlcAcceptanceTerms {
     /// Mint address expected to be escrowed by the settlement flow.
     pub escrow_mint: MintAddress,
     /// HTLC expiry timestamp.
+    #[serde(with = "time::serde::rfc3339")]
     pub expires_at: OffsetDateTime,
     /// Hashlock commitment once settlement workers are integrated.
     pub hashlock: Option<String>,
@@ -63,6 +64,7 @@ pub enum RfqResponse {
         /// Spread applied by the quote engine.
         spread_bps: u16,
         /// Quote expiry timestamp.
+        #[serde(with = "time::serde::rfc3339")]
         expires_at: OffsetDateTime,
         /// HTLC acceptance terms.
         htlc_terms: HtlcAcceptanceTerms,
@@ -131,6 +133,7 @@ pub struct WalletSettlementResponse {
     /// Unsigned taker lock transaction for browser signing.
     pub taker_lock_transaction: UnsignedWalletTransaction,
     /// HTLC expiry timestamp.
+    #[serde(with = "time::serde::rfc3339")]
     pub expires_at: OffsetDateTime,
     /// Integration status for the route handler.
     pub integration_status: IntegrationStatus,
@@ -267,6 +270,7 @@ pub struct AdminMeResponse {
     /// Authenticated username, when present.
     pub username: Option<String>,
     /// Session expiry, when authenticated.
+    #[serde(default, with = "time::serde::rfc3339::option")]
     pub expires_at: Option<OffsetDateTime>,
 }
 
