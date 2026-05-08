@@ -364,6 +364,178 @@ async fn ledger_endpoint_rejects_unknown_account_type() {
     );
 }
 
+/// Build a router and return its underlying persistence handle so privacy
+/// tests can hand-craft ledger entries directly. Mirrors
+/// `test_orchestrator_router` but exposes the persistence Arc.
+async fn test_orchestrator_with_persistence() -> (axum::Router, Arc<RuntimePersistence>) {
+    let app_state = bootstrap(AppConfig::default())
+        .await
+        .expect("bootstrap state");
+    let persistence = Arc::new(
+        RuntimePersistence::open_in_memory(firmament::assets::AssetRegistry::default())
+            .expect("persistence"),
+    );
+    seed_working_custody(&persistence, AssetId::from("SOL"), 200_000_000);
+    seed_working_custody(&persistence, AssetId::from("USDC"), 10_000_000);
+    let orchestrator = RuntimeOrchestrator::new_with_persistence(
+        app_state,
+        RuntimeAdapters {
+            price_provider: Arc::new(FakePriceProvider::default()),
+            htlc_client: Arc::new(FakeHtlcClient::default()),
+            swap_executor: Arc::new(FakeSwapExecutor),
+            gateway_client: Arc::new(FakeGatewayClient),
+            balance_reader: Arc::new(FakeBalanceReader::new(vec![
+                quote_inventory(),
+                post_settlement_inventory(),
+            ])),
+        },
+        persistence.clone(),
+        RuntimeOrchestratorOptions::default(),
+    );
+    let router = api::router_with_orchestrator(Arc::new(orchestrator));
+    (router, persistence)
+}
+
+#[tokio::test]
+async fn ledger_endpoint_omits_wallet_addresses() {
+    let app = test_orchestrator_router().await;
+    let _ = drive_completed_trade(app.clone()).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/runtime/ledger")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_json(response).await;
+
+    let demo_taker_wallet = "DemoTaker111111111111111111111111111111111111";
+    let demo_maker_wallet = "DemoMaker111111111111111111111111111111111111";
+    let demo_operator_wallet = "DemoOperator11111111111111111111111111111111";
+    let demo_gateway_wallet = "DemoGateway111111111111111111111111111111111";
+    let banned = [
+        demo_taker_wallet,
+        demo_maker_wallet,
+        demo_operator_wallet,
+        demo_gateway_wallet,
+    ];
+
+    walk_json_strings(&body, &mut |value| {
+        for banned in &banned {
+            assert!(
+                !value.contains(banned),
+                "ledger response leaked wallet address {banned}: {value}"
+            );
+        }
+        // Solana base58-encoded 32-byte pubkeys are typically 43 or 44
+        // characters, all base58 alphabet, no dashes. UUIDs (36 chars, with
+        // dashes) and signatures (86-88 chars) are explicitly allowed.
+        // Reject any pubkey-shaped string that does not appear in the
+        // documented allow-list (asset IDs, account-type tags, etc).
+        if (value.len() == 43 || value.len() == 44) && is_base58_alphabet(value) {
+            panic!("ledger response leaked Solana-pubkey-shaped string: {value}");
+        }
+    });
+}
+
+fn is_base58_alphabet(value: &str) -> bool {
+    const BASE58: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| BASE58.iter().any(|allowed| *allowed == byte))
+}
+
+fn walk_json_strings(value: &Value, visitor: &mut impl FnMut(&str)) {
+    match value {
+        Value::String(s) => visitor(s),
+        Value::Array(items) => {
+            for item in items {
+                walk_json_strings(item, visitor);
+            }
+        }
+        Value::Object(map) => {
+            for (key, item) in map {
+                visitor(key);
+                walk_json_strings(item, visitor);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[tokio::test]
+async fn ledger_endpoint_marks_unhealthy_on_negative_protected_account() {
+    let (app, persistence) = test_orchestrator_with_persistence().await;
+
+    // Hand-craft a balanced ledger transaction that drives `working_custody`
+    // negative for an asset it never held: credit the working_custody account
+    // and debit a counter-account so the transaction balances per-asset, but
+    // leaves `working_custody:cbBTC` at -100. cbBTC is a protected account
+    // type (working custody) so the public read endpoint must report
+    // `healthy=false`.
+    let asset = AssetId::from("cbBTC");
+    let amount = AmountRaw::new(100);
+    let transaction = firmament::ledger::LedgerTransactionBuilder::new(
+        "test_negative_protected",
+        uuid::Uuid::now_v7(),
+    )
+    .description("force a protected-account negative balance for healthy-flag test")
+    .idempotency_key(format!(
+        "test:api:negative_protected:{}:{}",
+        asset.as_str(),
+        uuid::Uuid::now_v7(),
+    ))
+    .credit(
+        firmament::ledger::LedgerAccountId::working(asset.clone()),
+        amount,
+    )
+    .debit(
+        firmament::ledger::LedgerAccountId::external(asset.clone(), "drift_fixture"),
+        amount,
+    )
+    .build()
+    .expect("balanced fixture transaction");
+    persistence
+        .save_ledger_transaction(&transaction)
+        .expect("persist fixture transaction");
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/runtime/ledger")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_json(response).await;
+    assert_eq!(
+        body["healthy"], false,
+        "expected healthy=false when working_custody:cbBTC is negative"
+    );
+    let working = body["balances"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["account_type"] == "working_custody" && b["asset"] == "cbBTC")
+        .expect("working_custody:cbBTC entry present");
+    assert_eq!(working["balance_raw"].as_str(), Some("-100"));
+
+    // Rebuild the orchestrator on a fresh persistence so this fixture cannot
+    // pollute other tests in this file. Rust's tokio::test isolation means
+    // each test gets its own `app` and `persistence` already, but be explicit
+    // about cleanup intent: drop the persistence handle.
+    drop(persistence);
+}
+
 async fn drive_completed_trade(app: axum::Router) -> serde_json::Value {
     let response = app
         .clone()
