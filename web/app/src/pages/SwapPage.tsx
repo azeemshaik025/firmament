@@ -71,10 +71,27 @@ const defaultSourceSymbol = 'SOL';
 const quoteExpirySeconds = 45;
 const quoteRetryMs = 5 * 60 * 1_000;
 const quoteInputDebounceMs = 600;
+const swapStateStorageKey = 'firmament.swap.v1';
+const swapStateMaxAgeMs = 12 * 60 * 60 * 1_000;
 const assetLogoUrls: Record<string, string> = {
   sol: 'https://garden.imgix.net/chain_images/solana.png',
   usdc: 'https://garden.imgix.net/token-images/usdc.svg',
   cbbtc: 'https://garden.imgix.net/token-images/cbBTC.svg'
+};
+
+type PersistedSwapState = {
+  version: 1;
+  saved_at: number;
+  wallet_address: string;
+  input_mint: string;
+  output_mint: string;
+  amount: string;
+  quote: RfqResponse | null;
+  quote_expired: boolean;
+  settlement: WalletSettlementResponse | null;
+  lock: TradeStepResponse | null;
+  redeem: TradeStepResponse | null;
+  preimage: string | null;
 };
 
 function assetBySymbol(assets: Asset[], symbol: string) {
@@ -143,6 +160,23 @@ function shortValue(value?: string) {
   return value.length > 14 ? `${value.slice(0, 7)}...${value.slice(-5)}` : value;
 }
 
+async function copyToClipboard(value: string) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.value = value;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand('copy');
+  document.body.removeChild(textarea);
+}
+
 function friendlyQuoteError(error: unknown) {
   const message = error instanceof Error ? error.message : '';
   if (message.includes('Failed to fetch') || message.toLowerCase().includes('unavailable') || message.toLowerCase().includes('not attached')) {
@@ -170,6 +204,62 @@ function formatExpiry(value?: string) {
   }).format(expiry);
 }
 
+function quoteExpiryMs(quote: RfqResponse | null) {
+  if (quote?.status !== 'accepted') return null;
+  const expiresAt = new Date(quote.expires_at).getTime();
+  return Number.isNaN(expiresAt) ? null : expiresAt - Date.now();
+}
+
+function isQuoteExpired(quote: RfqResponse | null) {
+  const expiresInMs = quoteExpiryMs(quote);
+  return expiresInMs !== null && expiresInMs <= 0;
+}
+
+function readPersistedSwapState(): PersistedSwapState | null {
+  if (typeof window === 'undefined') return null;
+
+  try {
+    const stored = window.localStorage.getItem(swapStateStorageKey);
+    if (!stored) return null;
+
+    const parsed = JSON.parse(stored) as Partial<PersistedSwapState>;
+    if (parsed.version !== 1 || typeof parsed.saved_at !== 'number') return null;
+    if (Date.now() - parsed.saved_at > swapStateMaxAgeMs) {
+      window.localStorage.removeItem(swapStateStorageKey);
+      return null;
+    }
+
+    return {
+      version: 1,
+      saved_at: parsed.saved_at,
+      wallet_address: typeof parsed.wallet_address === 'string' ? parsed.wallet_address : '',
+      input_mint: typeof parsed.input_mint === 'string' ? parsed.input_mint : '',
+      output_mint: typeof parsed.output_mint === 'string' ? parsed.output_mint : '',
+      amount: typeof parsed.amount === 'string' ? parsed.amount : '',
+      quote: parsed.quote ?? null,
+      quote_expired: Boolean(parsed.quote_expired) || isQuoteExpired(parsed.quote ?? null),
+      settlement: parsed.settlement ?? null,
+      lock: parsed.lock ?? null,
+      redeem: parsed.redeem ?? null,
+      preimage: typeof parsed.preimage === 'string' ? parsed.preimage : null
+    };
+  } catch {
+    window.localStorage.removeItem(swapStateStorageKey);
+    return null;
+  }
+}
+
+function writePersistedSwapState(snapshot: PersistedSwapState | null) {
+  if (typeof window === 'undefined') return;
+
+  if (!snapshot) {
+    window.localStorage.removeItem(swapStateStorageKey);
+    return;
+  }
+
+  window.localStorage.setItem(swapStateStorageKey, JSON.stringify(snapshot));
+}
+
 function walletFailure(error: unknown, fallback: string) {
   const message = error instanceof Error ? error.message : '';
   if (message.toLowerCase().includes('reject') || message.toLowerCase().includes('cancel')) {
@@ -182,16 +272,20 @@ export function SwapPage() {
   const { connection } = useConnection();
   const { publicKey, signTransaction } = useWallet();
   const { setVisible: setWalletModalVisible } = useWalletModal();
+  const [restoredSwap] = useState(() => readPersistedSwapState());
+  const restoredFlowRef = useRef(Boolean(restoredSwap?.quote || restoredSwap?.settlement || restoredSwap?.lock || restoredSwap?.redeem));
+  const restoredQuoteRefreshRef = useRef(Boolean(restoredSwap?.quote && !restoredSwap?.settlement && !restoredSwap?.lock && !restoredSwap?.redeem));
+  const persistedWalletRef = useRef(restoredSwap?.wallet_address ?? '');
   const [assets, setAssets] = useState<Asset[]>(fallbackAssets);
-  const [inputMint, setInputMint] = useState(assetBySymbol(fallbackAssets, defaultSourceSymbol)?.mint ?? fallbackAssets[0].mint);
-  const [outputMint, setOutputMint] = useState('');
-  const [amount, setAmount] = useState('');
-  const [quote, setQuote] = useState<RfqResponse | null>(null);
-  const [quoteExpired, setQuoteExpired] = useState(false);
-  const [settlement, setSettlement] = useState<WalletSettlementResponse | null>(null);
-  const [lock, setLock] = useState<TradeStepResponse | null>(null);
-  const [redeem, setRedeem] = useState<TradeStepResponse | null>(null);
-  const [preimage, setPreimage] = useState<string | null>(null);
+  const [inputMint, setInputMint] = useState(restoredSwap?.input_mint || assetBySymbol(fallbackAssets, defaultSourceSymbol)?.mint || fallbackAssets[0].mint);
+  const [outputMint, setOutputMint] = useState(restoredSwap?.output_mint ?? '');
+  const [amount, setAmount] = useState(restoredSwap?.amount ?? '');
+  const [quote, setQuote] = useState<RfqResponse | null>(restoredSwap?.quote ?? null);
+  const [quoteExpired, setQuoteExpired] = useState(Boolean(restoredSwap?.quote_expired));
+  const [settlement, setSettlement] = useState<WalletSettlementResponse | null>(restoredSwap?.settlement ?? null);
+  const [lock, setLock] = useState<TradeStepResponse | null>(restoredSwap?.lock ?? null);
+  const [redeem, setRedeem] = useState<TradeStepResponse | null>(restoredSwap?.redeem ?? null);
+  const [preimage, setPreimage] = useState<string | null>(restoredSwap?.preimage ?? null);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const noticeTimeoutRef = useRef<number | null>(null);
@@ -332,6 +426,8 @@ export function SwapPage() {
   function resetFlow() {
     quoteRequestSeqRef.current += 1;
     clearQuoteTimer();
+    restoredFlowRef.current = false;
+    restoredQuoteRefreshRef.current = false;
     setQuote(null);
     setQuoteExpired(false);
     setSettlement(null);
@@ -342,6 +438,98 @@ export function SwapPage() {
   }
 
   useEffect(() => {
+    if (restoredSwap?.quote || restoredSwap?.settlement || restoredSwap?.lock || restoredSwap?.redeem) {
+      showNotice({
+        tone: 'info',
+        title: 'Swap restored',
+        detail: 'Your in-progress swap was restored from this browser.'
+      });
+    }
+  }, [restoredSwap, showNotice]);
+
+  useEffect(() => {
+    if (!walletAddress) return;
+    if (!persistedWalletRef.current) {
+      persistedWalletRef.current = walletAddress;
+      return;
+    }
+    if (walletAddress === persistedWalletRef.current) return;
+
+    if (quote || settlement || lock || redeem || preimage) {
+      writePersistedSwapState(null);
+      resetFlow();
+      showNotice({
+        tone: 'warn',
+        title: 'Restored swap cleared',
+        detail: 'Connect the original wallet to continue an in-progress settlement.'
+      });
+    }
+    persistedWalletRef.current = walletAddress;
+  }, [walletAddress, quote, settlement, lock, redeem, preimage, showNotice]);
+
+  useEffect(() => {
+    const hasStateToRestore = Boolean(
+      amount.trim() ||
+      outputMint ||
+      quote ||
+      settlement ||
+      lock ||
+      redeem ||
+      preimage
+    );
+
+    if (!hasStateToRestore) {
+      writePersistedSwapState(null);
+      return;
+    }
+
+    if (walletAddress) {
+      persistedWalletRef.current = walletAddress;
+    }
+
+    writePersistedSwapState({
+      version: 1,
+      saved_at: Date.now(),
+      wallet_address: persistedWalletRef.current,
+      input_mint: inputMint,
+      output_mint: outputMint,
+      amount,
+      quote,
+      quote_expired: quoteExpired || isQuoteExpired(quote),
+      settlement,
+      lock,
+      redeem,
+      preimage
+    });
+  }, [walletAddress, inputMint, outputMint, amount, quote, quoteExpired, settlement, lock, redeem, preimage]);
+
+  useEffect(() => {
+    if (!restoredQuoteRefreshRef.current || !walletAddress || !outputAsset || flowLocked) {
+      return;
+    }
+
+    restoredQuoteRefreshRef.current = false;
+    if (quote?.status === 'accepted') {
+      scheduleQuoteRefresh(quoteExpiryMs(quote) ?? quoteExpirySeconds * 1_000, 'expiry');
+      return;
+    }
+    if (quote?.status === 'rejected') {
+      scheduleQuoteRefresh(quoteRetryMs, 'retry');
+    }
+  }, [walletAddress, outputAsset, flowLocked]);
+
+  useEffect(() => {
+    if (restoredFlowRef.current) {
+      restoredFlowRef.current = false;
+      if (quote || flowLocked) {
+        return undefined;
+      }
+    }
+
+    if (flowLocked) {
+      return undefined;
+    }
+
     resetFlow();
 
     if (!walletAddress || !outputAsset || amountValidation?.ok !== true) {
@@ -364,7 +552,7 @@ export function SwapPage() {
         clearQuoteTimer();
       }
     };
-  }, [walletAddress, outputMint, amount, sourceAsset.mint, sourceAsset.decimals, notionalValidation?.ok]);
+  }, [walletAddress, outputMint, amount, sourceAsset.mint, sourceAsset.decimals, notionalValidation?.ok, flowLocked]);
 
   function scheduleQuoteRefresh(delayMs: number, reason: 'expiry' | 'retry') {
     clearQuoteTimer();
@@ -946,12 +1134,31 @@ function BehindScenesPanel({
   lock: TradeStepResponse | null;
   redeem: TradeStepResponse | null;
 }) {
+  const [copiedProofId, setCopiedProofId] = useState<string | null>(null);
+  const copiedTimer = useRef<number | null>(null);
   const makerProof = lock?.maker_lock_signature ?? redeem?.maker_redeem_signature;
   const networkProofs = [
     ...(lock?.tx_signatures ?? []),
     ...(redeem?.tx_signatures ?? []),
     ...(makerProof ? [makerProof] : [])
   ].filter(Boolean);
+
+  useEffect(() => {
+    return () => {
+      if (copiedTimer.current !== null) {
+        window.clearTimeout(copiedTimer.current);
+      }
+    };
+  }, []);
+
+  async function copyProof(signature: string, proofId: string) {
+    await copyToClipboard(signature);
+    setCopiedProofId(proofId);
+    if (copiedTimer.current !== null) {
+      window.clearTimeout(copiedTimer.current);
+    }
+    copiedTimer.current = window.setTimeout(() => setCopiedProofId(null), 1_400);
+  }
 
   return (
     <aside className="proof-panel" aria-label="What happened behind the scenes">
@@ -970,11 +1177,27 @@ function BehindScenesPanel({
         {networkProofs.length === 0 ? (
           <p>Proof appears after wallet signatures land on Solana.</p>
         ) : (
-          networkProofs.slice(0, 3).map((signature) => (
-            <a key={signature} href={`https://solscan.io/tx/${signature}`} target="_blank" rel="noreferrer">
-              {shortValue(signature)}
-            </a>
-          ))
+          networkProofs.slice(0, 3).map((signature, index) => {
+            const proofId = `${signature}-${index}`;
+            const copied = copiedProofId === proofId;
+            return (
+              <div className="network-proof-item" key={proofId}>
+                <a href={`https://solscan.io/tx/${signature}`} target="_blank" rel="noreferrer">
+                  {shortValue(signature)}
+                </a>
+                <button
+                  className={copied ? 'copy-proof-button copied' : 'copy-proof-button'}
+                  type="button"
+                  onClick={() => copyProof(signature, proofId)}
+                  aria-label={`Copy transaction signature ${shortValue(signature)}`}
+                  title={copied ? 'Copied' : 'Copy signature'}
+                >
+                  <span className="copy-glyph" aria-hidden="true" />
+                  <span className="copy-proof-label">{copied ? 'Copied' : 'Copy'}</span>
+                </button>
+              </div>
+            );
+          })
         )}
       </div>
     </aside>

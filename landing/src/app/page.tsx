@@ -2,6 +2,7 @@ import { DemoSequence } from "@/components/demo-sequence";
 
 const appHref = "/app";
 const runtimeHref = "/app/runtime";
+const docsHref = "/docs";
 
 const proofPoints = [
   ["Reserve", "One USDC Gateway source"],
@@ -114,6 +115,7 @@ export default function Home() {
           <a href="#runtime">Runtime</a>
           <a href="#proof">Proof</a>
           <a href="#api">API</a>
+          <a href={docsHref}>Docs</a>
         </nav>
         <a
           className="nav-action"
@@ -131,6 +133,7 @@ export default function Home() {
         <a href="#product">Product</a>
         <a href="#runtime">Runtime</a>
         <a href="#api">API</a>
+        <a href={docsHref}>Docs</a>
       </nav>
 
       <section className="hero" aria-labelledby="hero-title">
@@ -296,13 +299,23 @@ export default function Home() {
 
       <section className="section api-section" id="api">
         <div className="api-panel">
-          <div>
+          <div className="api-copy">
             <p className="section-kicker">HTTP API</p>
             <h2>Small API for managed liquidity.</h2>
             <p>
               Request a firm quote, start wallet settlement, and inspect the
               same runtime state the maker uses.
             </p>
+            <a className="docs-callout" href={docsHref}>
+              <span>Developer docs</span>
+              <strong>API routes, runtime model, and demo setup.</strong>
+              <em>
+                Open docs
+                <span className="button-arrow" aria-hidden="true">
+                  {"\u2192"}
+                </span>
+              </em>
+            </a>
           </div>
           <div className="api-list" aria-label="API proof surface">
             {apiProof.map(([label, value]) => (
@@ -345,6 +358,7 @@ export default function Home() {
             <a href={runtimeHref} target="_blank" rel="noreferrer">
               Runtime
             </a>
+            <a href={docsHref}>Docs</a>
           </div>
         </div>
         <div className="footer-signals" aria-label="Runtime capabilities">

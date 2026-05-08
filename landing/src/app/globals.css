@@ -905,6 +905,11 @@ h2 {
   background: var(--paper);
 }
 
+.api-copy {
+  display: grid;
+  align-content: start;
+}
+
 .api-panel h2 {
   font-size: 2.45rem;
 }
@@ -912,6 +917,52 @@ h2 {
 .api-panel p {
   max-width: 470px;
   margin: 12px 0 0;
+}
+
+.docs-callout {
+  display: grid;
+  gap: 8px;
+  max-width: 470px;
+  margin-top: 22px;
+  padding: 16px;
+  border: 3px solid var(--ink);
+  border-radius: var(--radius-sm);
+  background:
+    linear-gradient(135deg, rgba(0, 166, 255, 0.16), transparent 58%),
+    var(--surface);
+  box-shadow: 4px 4px 0 var(--ink);
+  transition:
+    transform 160ms var(--ease),
+    box-shadow 160ms var(--ease);
+}
+
+.docs-callout:hover {
+  transform: translate(2px, 2px);
+  box-shadow: 2px 2px 0 var(--ink);
+}
+
+.docs-callout span,
+.docs-callout em {
+  color: var(--purple);
+  font-family: var(--font-mono);
+  font-size: var(--text-label);
+  font-style: normal;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.docs-callout strong {
+  color: var(--ink);
+  font-size: 1.18rem;
+  font-weight: 900;
+  line-height: 1.18;
+}
+
+.docs-callout em {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  color: var(--ink);
 }
 
 .api-list {
@@ -1133,7 +1184,7 @@ h2 {
     left: 50%;
     z-index: 39;
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(4, 1fr);
     gap: 4px;
     width: min(560px, calc(100% - 28px));
     padding: 4px;

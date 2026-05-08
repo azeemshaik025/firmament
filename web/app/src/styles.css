@@ -903,9 +903,99 @@ nav a:focus-visible {
   color: var(--surface);
 }
 
+.network-proof-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
 .network-proof a {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  padding: 0 10px;
+  border: 2px solid rgba(248, 251, 255, 0.38);
+  border-radius: var(--radius-sm);
+  background: rgba(248, 251, 255, 0.08);
   color: #9dffb0;
   overflow-wrap: anywhere;
+}
+
+.copy-proof-button {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  justify-content: center;
+  min-width: 86px;
+  min-height: 34px;
+  padding: 0 9px;
+  border: 2px solid rgba(248, 251, 255, 0.48);
+  border-radius: var(--radius-sm);
+  background: rgba(248, 251, 255, 0.12);
+  color: var(--surface);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-weight: 900;
+  text-transform: uppercase;
+  transition:
+    transform 160ms var(--ease),
+    background 160ms var(--ease),
+    color 160ms var(--ease),
+    border-color 160ms var(--ease);
+}
+
+.copy-proof-button:hover {
+  transform: translateY(-1px);
+  border-color: var(--surface);
+  background: rgba(248, 251, 255, 0.22);
+}
+
+.copy-proof-button:focus-visible {
+  outline: 3px solid var(--amber);
+  outline-offset: 3px;
+}
+
+.copy-proof-button.copied {
+  border-color: #ffffff;
+  background: var(--lime);
+  color: #ffffff;
+}
+
+.copy-proof-button .copy-glyph,
+.copy-proof-button .copy-proof-label {
+  color: inherit;
+}
+
+.copy-glyph {
+  position: relative;
+  display: block;
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+
+.copy-glyph::before,
+.copy-glyph::after {
+  position: absolute;
+  width: 9px;
+  height: 10px;
+  border: 2px solid currentColor;
+  border-radius: 2px;
+  content: "";
+}
+
+.copy-glyph::before {
+  top: 0;
+  right: 0;
+  opacity: 0.62;
+}
+
+.copy-glyph::after {
+  bottom: 0;
+  left: 0;
+  background: currentColor;
+  box-shadow: inset 0 0 0 999px var(--ink);
 }
 
 .console-footer {
@@ -1323,6 +1413,10 @@ nav a:focus-visible {
   background: #fff7e7;
 }
 
+.trade-card-selected {
+  box-shadow: 0 0 0 3px var(--purple) inset, var(--shadow-soft);
+}
+
 .trade-card-main,
 .trade-card-meta {
   display: flex;
@@ -1356,6 +1450,169 @@ nav a:focus-visible {
 
 .trade-card-meta {
   color: var(--text);
+}
+
+.trade-proof-button {
+  justify-self: start;
+  min-height: 32px;
+  padding: 0 10px;
+  border: 2px solid var(--ink);
+  border-radius: var(--radius-sm);
+  background: var(--ink);
+  color: #ffffff;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  font-weight: 900;
+  text-transform: uppercase;
+  transition:
+    transform 160ms var(--ease),
+    box-shadow 160ms var(--ease),
+    background 160ms var(--ease);
+}
+
+.trade-proof-button:hover {
+  transform: translate(1px, 1px);
+  box-shadow: 2px 2px 0 rgba(28, 32, 43, 0.18);
+  background: var(--purple);
+}
+
+.trade-proof-button:focus-visible {
+  outline: 3px solid var(--amber);
+  outline-offset: 3px;
+}
+
+.network-proof-drawer {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+  border: 3px solid var(--ink);
+  border-radius: var(--radius-sm);
+  background:
+    linear-gradient(90deg, rgba(248, 251, 255, 0.08) 1px, transparent 1px),
+    linear-gradient(135deg, rgba(0, 166, 255, 0.18), transparent 42%),
+    var(--ink);
+  background-size: 18px 100%, auto, auto;
+  box-shadow: var(--shadow-hard);
+  color: var(--surface);
+}
+
+.network-proof-drawer-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: start;
+}
+
+.network-proof-drawer h3 {
+  margin: 6px 0 0;
+  color: #ffffff;
+  font-size: 1.22rem;
+  line-height: 1.15;
+  overflow-wrap: anywhere;
+}
+
+.network-proof-drawer p {
+  max-width: 650px;
+  margin: 8px 0 0;
+  color: var(--surface);
+  font-size: 0.92rem;
+  font-weight: 650;
+  line-height: 1.4;
+}
+
+.network-proof-close {
+  min-height: 34px;
+  padding: 0 10px;
+  border: 2px solid rgba(248, 251, 255, 0.62);
+  border-radius: var(--radius-sm);
+  background: rgba(248, 251, 255, 0.12);
+  color: #ffffff;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.network-proof-close:hover {
+  background: rgba(248, 251, 255, 0.22);
+}
+
+.network-proof-close:focus-visible {
+  outline: 3px solid var(--amber);
+  outline-offset: 3px;
+}
+
+.network-proof-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.network-proof-summary div,
+.network-proof-row {
+  border: 2px solid rgba(248, 251, 255, 0.34);
+  border-radius: var(--radius-sm);
+  background: rgba(248, 251, 255, 0.08);
+}
+
+.network-proof-summary div {
+  display: grid;
+  gap: 4px;
+  min-height: 62px;
+  padding: 10px;
+}
+
+.network-proof-summary span,
+.network-proof-row span {
+  color: var(--cyan);
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.network-proof-summary strong {
+  min-width: 0;
+  color: #ffffff;
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  font-weight: 900;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.network-proof-list {
+  display: grid;
+  gap: 8px;
+}
+
+.network-proof-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 10px;
+}
+
+.network-proof-row > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.network-proof-row a {
+  color: #9dffb0;
+  font-family: var(--font-mono);
+  font-size: 0.86rem;
+  font-weight: 900;
+  overflow-wrap: anywhere;
+}
+
+.network-proof-empty {
+  padding: 12px;
+  border: 2px dashed rgba(248, 251, 255, 0.44);
+  border-radius: var(--radius-sm);
 }
 
 .runtime-link-button {
@@ -1546,6 +1803,17 @@ nav a:focus-visible {
 
   .proof-row {
     grid-template-columns: 1fr;
+  }
+
+  .network-proof-drawer-head,
+  .network-proof-summary,
+  .network-proof-row {
+    grid-template-columns: 1fr;
+  }
+
+  .network-proof-close,
+  .network-proof-row .copy-proof-button {
+    width: 100%;
   }
 }
 

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   api,
   Asset,
@@ -44,6 +44,7 @@ export function RuntimePage() {
   const [ledger, setLedger] = useState<LoadState<RuntimeLedgerResponse>>(emptyState);
   const [trades, setTrades] = useState<LoadState<RuntimeTradesResponse>>(emptyState);
   const [showAllTrades, setShowAllTrades] = useState(false);
+  const [selectedProofTradeId, setSelectedProofTradeId] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -101,6 +102,10 @@ export function RuntimePage() {
   const recentTrades = trades.data?.trades ?? [];
   const visibleTrades = showAllTrades ? recentTrades : recentTrades.slice(0, 4);
   const canShowMore = recentTrades.length > visibleTrades.length;
+  const selectedProofTrade = useMemo(
+    () => recentTrades.find((trade) => trade.trade_id === selectedProofTradeId) ?? null,
+    [recentTrades, selectedProofTradeId]
+  );
   const ledgerLoading = ledger.loading && !ledger.data;
   const tradesLoading = trades.loading && !trades.data;
 
@@ -170,9 +175,22 @@ export function RuntimePage() {
           <>
             <div className="trade-rail" aria-label="Recent user-facing trades">
               {visibleTrades.map((trade) => (
-                <TradeCard key={trade.trade_id} trade={trade} assets={sortedAssets} />
+                <TradeCard
+                  key={trade.trade_id}
+                  trade={trade}
+                  assets={sortedAssets}
+                  selected={trade.trade_id === selectedProofTradeId}
+                  onOpenProof={() => setSelectedProofTradeId(trade.trade_id)}
+                />
               ))}
             </div>
+            {selectedProofTrade && (
+              <NetworkProofDrawer
+                trade={selectedProofTrade}
+                assets={sortedAssets}
+                onClose={() => setSelectedProofTradeId(null)}
+              />
+            )}
             {canShowMore && (
               <button className="runtime-link-button" onClick={() => setShowAllTrades(true)}>
                 Show more
@@ -315,14 +333,24 @@ function LedgerSkeleton({ assets }: { assets: Asset[] }) {
   );
 }
 
-function TradeCard({ trade, assets }: { trade: RuntimeTrade; assets: Asset[] }) {
+function TradeCard({
+  trade,
+  assets,
+  selected,
+  onOpenProof
+}: {
+  trade: RuntimeTrade;
+  assets: Asset[];
+  selected: boolean;
+  onOpenProof: () => void;
+}) {
   const input = formatTradeAmount(trade.input, assets);
   const output = formatTradeAmount(trade.output, assets);
   const status = tradeStatus(trade.settlement_status);
   const txCount = trade.tx_signatures?.length ?? 0;
 
   return (
-    <article className={`trade-card trade-card-${status.tone}`}>
+    <article className={selected ? `trade-card trade-card-${status.tone} trade-card-selected` : `trade-card trade-card-${status.tone}`}>
       <div className="trade-card-main">
         <strong>{input} {'->'} {output}</strong>
         <span>{status.label}</span>
@@ -331,7 +359,105 @@ function TradeCard({ trade, assets }: { trade: RuntimeTrade; assets: Asset[] }) 
         <span>{shortValue(trade.trade_id)}</span>
         <span>{txCount ? `${txCount} txs` : 'No tx yet'}</span>
       </div>
+      <button className="trade-proof-button" type="button" onClick={onOpenProof}>
+        Network proof
+      </button>
     </article>
+  );
+}
+
+function NetworkProofDrawer({
+  trade,
+  assets,
+  onClose
+}: {
+  trade: RuntimeTrade;
+  assets: Asset[];
+  onClose: () => void;
+}) {
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const copiedTimer = useRef<number | null>(null);
+  const input = formatTradeAmount(trade.input, assets);
+  const output = formatTradeAmount(trade.output, assets);
+  const status = tradeStatus(trade.settlement_status);
+  const signatures = trade.tx_signatures ?? [];
+
+  useEffect(() => {
+    return () => {
+      if (copiedTimer.current !== null) {
+        window.clearTimeout(copiedTimer.current);
+      }
+    };
+  }, []);
+
+  async function copySignature(signature: string, signatureId: string) {
+    await copyToClipboard(signature);
+    setCopiedId(signatureId);
+    if (copiedTimer.current !== null) {
+      window.clearTimeout(copiedTimer.current);
+    }
+    copiedTimer.current = window.setTimeout(() => setCopiedId(null), 1_400);
+  }
+
+  return (
+    <section className="network-proof-drawer" aria-label="Network proof drawer">
+      <div className="network-proof-drawer-head">
+        <div>
+          <p className="eyebrow">Network proof</p>
+          <h3>{input} {'->'} {output}</h3>
+          <p>Match the amounts, trade id, quote id, and transaction roles in Solscan to verify this swap.</p>
+        </div>
+        <button className="network-proof-close" type="button" onClick={onClose} aria-label="Close network proof">
+          Close
+        </button>
+      </div>
+
+      <div className="network-proof-summary" aria-label="Trade verification details">
+        <div>
+          <span>Status</span>
+          <strong>{status.label}</strong>
+        </div>
+        <div>
+          <span>Trade id</span>
+          <strong title={trade.trade_id}>{shortValue(trade.trade_id)}</strong>
+        </div>
+        <div>
+          <span>Quote id</span>
+          <strong title={trade.quote_id}>{shortValue(trade.quote_id)}</strong>
+        </div>
+      </div>
+
+      {signatures.length > 0 ? (
+        <div className="network-proof-list">
+          {signatures.map((proof, index) => {
+            const signatureId = `${proof.kind}-${proof.signature}-${index}`;
+            const copied = copiedId === signatureId;
+            return (
+              <div className="network-proof-row" key={signatureId}>
+                <div>
+                  <span>{tradeSignatureLabel(proof.kind)}</span>
+                  <a href={`https://solscan.io/tx/${proof.signature}`} target="_blank" rel="noreferrer">
+                    {shortValue(proof.signature)}
+                  </a>
+                </div>
+                <button
+                  className={copied ? 'copy-proof-button copied' : 'copy-proof-button'}
+                  type="button"
+                  onClick={() => copySignature(proof.signature, signatureId)}
+                  aria-label={`Copy ${tradeSignatureLabel(proof.kind)} transaction signature ${shortValue(proof.signature)}`}
+                  title={copied ? 'Copied' : 'Copy signature'}
+                >
+                  <span className="copy-glyph" aria-hidden="true" />
+                  <span className="copy-proof-label">{copied ? 'Copied' : 'Copy'}</span>
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <p className="network-proof-empty">No Solana transaction signatures have landed for this trade yet.</p>
+      )}
+    </section>
   );
 }
 
@@ -538,6 +664,48 @@ function runtimeDate(value: RuntimeTimestamp) {
 function shortValue(value?: string) {
   if (!value) return '';
   return value.length > 14 ? `${value.slice(0, 7)}...${value.slice(-5)}` : value;
+}
+
+async function copyToClipboard(value: string) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.value = value;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand('copy');
+  document.body.removeChild(textarea);
+}
+
+function tradeSignatureLabel(kind: RuntimeTrade['tx_signatures'][number]['kind']) {
+  switch (kind) {
+    case 'taker_lock':
+      return 'Taker lock';
+    case 'taker_redeem':
+      return 'Taker redeem';
+    case 'taker_refund':
+      return 'Taker refund';
+    case 'maker_lock':
+      return 'Maker lock';
+    case 'maker_redeem':
+      return 'Maker redeem';
+    case 'maker_refund':
+      return 'Maker refund';
+    case 'gateway_burn':
+      return 'Gateway burn';
+    case 'gateway_mint':
+      return 'Gateway mint';
+    case 'jupiter_swap':
+      return 'Jupiter swap';
+    default:
+      return humanize(kind);
+  }
 }
 
 function humanize(value: string) {
