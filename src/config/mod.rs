@@ -1,5 +1,6 @@
 //! Configuration loading and safe startup defaults.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use rust_decimal::Decimal;
@@ -61,6 +62,8 @@ pub struct AppConfig {
     pub admin: AdminConfig,
     /// Runtime startup and worker settings.
     pub runtime: RuntimeConfig,
+    /// Always-on reconciliation worker settings.
+    pub reconciliation: ReconciliationConfig,
 }
 
 impl AppConfig {
@@ -578,6 +581,39 @@ impl Default for RuntimeConfig {
             scaffold_hold_millis: 0,
             enable_protocol_workers: false,
             database_path: "runtime.sqlite".to_owned(),
+        }
+    }
+}
+
+/// Always-on reconciliation worker settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+#[serde(deny_unknown_fields)]
+pub struct ReconciliationConfig {
+    /// Tick cadence in seconds. Defaults to 10.
+    pub interval_seconds: u64,
+    /// Number of consecutive in-window observations required to trigger an
+    /// adjustment. Defaults to 3.
+    pub consecutive_ticks_for_adjustment: u8,
+    /// Whether to emit a `Skipped` ReconciliationEvent on guard-blocked
+    /// adjustments. Defaults to true.
+    pub emit_event_on_skip: bool,
+    /// Per-asset dust threshold (raw native units). Drifts at or below the
+    /// dust threshold are ignored.
+    pub dust: HashMap<String, u128>,
+}
+
+impl Default for ReconciliationConfig {
+    fn default() -> Self {
+        let mut dust = HashMap::new();
+        dust.insert("USDC".to_owned(), 10_000);
+        dust.insert("SOL".to_owned(), 100_000);
+        dust.insert("cbBTC".to_owned(), 100);
+        Self {
+            interval_seconds: 10,
+            consecutive_ticks_for_adjustment: 3,
+            emit_event_on_skip: true,
+            dust,
         }
     }
 }

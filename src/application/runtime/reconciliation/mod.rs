@@ -12,5 +12,91 @@
 //! for operator visibility.
 
 pub mod drift;
+pub mod wallet_monitor;
 
 pub use drift::{DriftOutcome, DriftWindow};
+pub use wallet_monitor::{ObservationOutcome, WalletMonitor, WalletObservation};
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use time::OffsetDateTime;
+
+use crate::application::runtime::orchestrator::RuntimeOrchestrator;
+use crate::config::ReconciliationConfig;
+use crate::domain::types::AssetId;
+use crate::error::AppResult;
+
+/// Daily idempotency-sequence counter, keyed by `(scope, asset, utc_date)`.
+pub(crate) type SequenceMap = HashMap<(&'static str, AssetId, String), u64>;
+
+/// Always-on reconciliation worker handle.
+///
+/// Owns the per-asset `WalletMonitor` plus the daily idempotency-sequence
+/// map seeded from the ledger at startup. The Gateway monitor lands in a
+/// follow-up commit (Task A5).
+pub struct ReconciliationWorker {
+    orchestrator: Arc<RuntimeOrchestrator>,
+    config: ReconciliationConfig,
+    wallet: WalletMonitor,
+}
+
+impl ReconciliationWorker {
+    /// Build a new worker. Reseeds the daily idempotency-sequence counters
+    /// from any persisted reconciliation transactions for today's UTC date.
+    ///
+    /// # Errors
+    ///
+    /// Returns persistence errors when the ledger reseed query fails.
+    pub fn new(
+        orchestrator: Arc<RuntimeOrchestrator>,
+        config: ReconciliationConfig,
+    ) -> AppResult<Self> {
+        let today = today_utc_date();
+        let mut sequences: SequenceMap = HashMap::new();
+        if let Some(persistence) = orchestrator.persistence_handle() {
+            persistence.seed_recon_sequences(&today, &mut sequences)?;
+        }
+
+        let wallet = WalletMonitor::new(&config, sequences);
+
+        Ok(Self {
+            orchestrator,
+            config,
+            wallet,
+        })
+    }
+
+    /// Run one wallet observation for a specific asset. Used by integration
+    /// tests that drive the worker deterministically.
+    ///
+    /// # Errors
+    ///
+    /// Returns adapter, ledger, or event-publish errors.
+    pub async fn tick_wallet(&mut self, asset: &AssetId) -> AppResult<WalletObservation> {
+        self.wallet.tick(self.orchestrator.as_ref(), asset).await
+    }
+
+    /// Borrow the active reconciliation config.
+    #[must_use]
+    pub const fn config(&self) -> &ReconciliationConfig {
+        &self.config
+    }
+}
+
+/// UTC date in `YYYY-MM-DD` form, used in idempotency keys.
+#[must_use]
+pub fn today_utc_date() -> String {
+    format_utc_date(OffsetDateTime::now_utc())
+}
+
+#[must_use]
+pub(super) fn format_utc_date(now: OffsetDateTime) -> String {
+    let date = now.date();
+    format!(
+        "{:04}-{:02}-{:02}",
+        date.year(),
+        u8::from(date.month()),
+        date.day()
+    )
+}
