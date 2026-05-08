@@ -5,11 +5,15 @@
   "rewrites": [
     {
       "source": "/docs",
-      "destination": "/docs.html"
+      "destination": "https://shaikazeem.mintlify.dev/docs"
     },
     {
       "source": "/docs/",
-      "destination": "/docs.html"
+      "destination": "https://shaikazeem.mintlify.dev/docs"
+    },
+    {
+      "source": "/docs/:match*",
+      "destination": "https://shaikazeem.mintlify.dev/docs/:match*"
     },
     {
       "source": "/app",
