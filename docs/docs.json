@@ -3,6 +3,7 @@
   "theme": "mint",
   "name": "Firmament",
   "description": "Solana RFQ maker backend for managed liquidity demos.",
+  "favicon": "/favicon.svg",
   "colors": {
     "primary": "#3DD6C6",
     "light": "#3DD6C6",
