@@ -37,6 +37,14 @@ async fn live_cbbtc_rfq_accept_skips_without_explicit_opt_in() {
     config.assets.policy.max_action_notional_usd = Decimal::ZERO;
     config.assets.policy.max_cumulative_automation_notional_usd = Decimal::ZERO;
     config.assets.policy.non_stable_asset_exception_notional_usd = Decimal::ZERO;
+    // The live cbBTC RFQ test sends well under $1, which would otherwise trip
+    // the per-asset minimum-notional gate. Lower USDC and cbBTC minimums for
+    // this test specifically; production config still enforces the $1 floor.
+    for asset in &mut config.assets.supported {
+        if matches!(asset.id.as_str(), "USDC" | "cbBTC") {
+            asset.min_trade_notional_usd = Decimal::new(1, 6); // $0.000001
+        }
+    }
 
     let maker = LoadedWallet::from_maker_env().expect("load maker wallet");
     let taker = LoadedWallet::from_taker_env().expect("load taker wallet");

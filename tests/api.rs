@@ -20,15 +20,32 @@ use std::sync::{Arc, Mutex};
 use time::OffsetDateTime;
 use tower::ServiceExt;
 
+/// Relax per-asset notional limits to a wide test range so legacy API tests
+/// that send arbitrary mocked amounts continue to reach the gate they
+/// exercise. The default config caps each asset's trades at $1-$2 (or $1-$5
+/// for cbBTC), which the per-asset gate (correctly) enforces.
+fn relax_asset_notional_limits(config: &mut AppConfig) {
+    for asset in &mut config.assets.supported {
+        asset.min_trade_notional_usd = Decimal::new(1, 6); // $0.000001
+        asset.max_trade_notional_usd = Decimal::from(1_000);
+    }
+}
+
+fn relaxed_default_config() -> AppConfig {
+    let mut config = AppConfig::default();
+    relax_asset_notional_limits(&mut config);
+    config
+}
+
 async fn test_router() -> axum::Router {
-    let app_state = bootstrap(AppConfig::default())
+    let app_state = bootstrap(relaxed_default_config())
         .await
         .expect("bootstrap state");
     api::router(&app_state)
 }
 
 async fn test_orchestrator_router() -> axum::Router {
-    let app_state = bootstrap(AppConfig::default())
+    let app_state = bootstrap(relaxed_default_config())
         .await
         .expect("bootstrap state");
     let persistence = Arc::new(
@@ -284,6 +301,44 @@ async fn health_endpoint_returns_ok() {
     assert_eq!(body["service"], "firmament");
     assert!(body["version"].is_string());
     assert!(!body["version"].as_str().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn assets_endpoint_exposes_per_asset_notional_limits() {
+    // GET /v1/assets must include min_trade_notional_usd and
+    // max_trade_notional_usd for every supported, enabled asset so the swap
+    // UI can validate input amounts before sending an RFQ.
+    let app_state = bootstrap(AppConfig::default())
+        .await
+        .expect("bootstrap state");
+    let app = api::router(&app_state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/assets")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_json(response).await;
+    let assets = body.as_array().expect("assets array");
+    assert!(!assets.is_empty(), "at least one asset expected");
+
+    for asset in assets {
+        let id = asset["id"].as_str().expect("asset id");
+        assert!(
+            asset.get("min_trade_notional_usd").is_some(),
+            "asset {id} missing min_trade_notional_usd",
+        );
+        assert!(
+            asset.get("max_trade_notional_usd").is_some(),
+            "asset {id} missing max_trade_notional_usd",
+        );
+    }
 }
 
 #[tokio::test]

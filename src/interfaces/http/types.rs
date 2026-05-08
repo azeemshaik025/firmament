@@ -112,6 +112,10 @@ pub struct AssetResponse {
     pub mint: MintAddress,
     /// Native token decimals.
     pub decimals: u8,
+    /// Per-asset minimum trade notional in estimated USD.
+    pub min_trade_notional_usd: Decimal,
+    /// Per-asset maximum trade notional in estimated USD.
+    pub max_trade_notional_usd: Decimal,
 }
 
 /// Request body for `POST /v1/quotes/{quote_id}/wallet-settlement`.

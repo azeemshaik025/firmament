@@ -329,7 +329,16 @@ pub struct AssetConfig {
     pub target_weight: Decimal,
     /// Minimum raw working inventory required before quoting this asset.
     pub quoteable_threshold_raw: AmountRaw,
+    /// Per-asset minimum trade notional in estimated USD. Both legs of a trade
+    /// must clear their own asset's minimum.
+    pub min_trade_notional_usd: Decimal,
+    /// Per-asset maximum trade notional in estimated USD. Both legs of a trade
+    /// must stay below their own asset's maximum.
+    pub max_trade_notional_usd: Decimal,
 }
+
+/// Sane ceiling for per-asset notional caps; guards against u64 overflow.
+const ASSET_NOTIONAL_USD_CEILING: u64 = 1_000_000;
 
 impl AssetConfig {
     /// Validate local asset metadata.
@@ -371,6 +380,27 @@ impl AssetConfig {
             )));
         }
 
+        if self.min_trade_notional_usd <= Decimal::ZERO {
+            return Err(AppError::validation(format!(
+                "asset {} min_trade_notional_usd must be greater than zero",
+                self.id
+            )));
+        }
+
+        if self.max_trade_notional_usd < self.min_trade_notional_usd {
+            return Err(AppError::validation(format!(
+                "asset {} max_trade_notional_usd must be at least min_trade_notional_usd",
+                self.id
+            )));
+        }
+
+        if self.max_trade_notional_usd > Decimal::from(ASSET_NOTIONAL_USD_CEILING) {
+            return Err(AppError::validation(format!(
+                "asset {} max_trade_notional_usd exceeds ceiling {ASSET_NOTIONAL_USD_CEILING}",
+                self.id
+            )));
+        }
+
         Ok(())
     }
 }
@@ -385,6 +415,8 @@ impl Default for AssetConfig {
             enabled: true,
             target_weight: Decimal::new(60, 2),
             quoteable_threshold_raw: AmountRaw::new(2_000_000),
+            min_trade_notional_usd: Decimal::ONE,
+            max_trade_notional_usd: Decimal::new(2, 0),
         }
     }
 }
@@ -678,6 +710,8 @@ fn default_assets() -> Vec<AssetConfig> {
             enabled: true,
             target_weight: Decimal::new(35, 2),
             quoteable_threshold_raw: AmountRaw::new(10_000_000),
+            min_trade_notional_usd: Decimal::ONE,
+            max_trade_notional_usd: Decimal::new(2, 0),
         },
         AssetConfig {
             id: AssetId::from("cbBTC"),
@@ -687,6 +721,8 @@ fn default_assets() -> Vec<AssetConfig> {
             enabled: true,
             target_weight: Decimal::new(5, 2),
             quoteable_threshold_raw: AmountRaw::new(1_000),
+            min_trade_notional_usd: Decimal::ONE,
+            max_trade_notional_usd: Decimal::new(5, 0),
         },
     ]
 }

@@ -20,10 +20,52 @@ const noticeTimeoutMs: Record<NoticeTone, number> = {
 };
 
 const fallbackAssets: Asset[] = [
-  { id: 'USDC', symbol: 'USDC', name: 'USD Coin', mint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', decimals: 6 },
-  { id: 'SOL', symbol: 'SOL', name: 'Solana', mint: 'So11111111111111111111111111111111111111112', decimals: 9 },
-  { id: 'cbBTC', symbol: 'cbBTC', name: 'Coinbase Wrapped BTC', mint: 'cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij', decimals: 8 }
+  { id: 'USDC', symbol: 'USDC', name: 'USD Coin', mint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', decimals: 6, min_trade_notional_usd: '1', max_trade_notional_usd: '2' },
+  { id: 'SOL', symbol: 'SOL', name: 'Solana', mint: 'So11111111111111111111111111111111111111112', decimals: 9, min_trade_notional_usd: '1', max_trade_notional_usd: '2' },
+  { id: 'cbBTC', symbol: 'cbBTC', name: 'Coinbase Wrapped BTC', mint: 'cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij', decimals: 8, min_trade_notional_usd: '1', max_trade_notional_usd: '5' }
 ];
+
+// Conservative fallback USD prices used when the runtime hasn't surfaced a
+// fresh oracle quote yet. The backend is the source of truth — these are only
+// used for client-side range hints to avoid sending an obviously-out-of-range
+// RFQ to the runtime.
+const fallbackUsdPriceBySymbol: Record<string, number> = {
+  USDC: 1,
+  SOL: 150,
+  cbBTC: 60_000
+};
+
+function parseDecimal(value: string | number | undefined): number | null {
+  if (value === undefined) return null;
+  const numeric = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+function assetUsdPrice(asset: Asset): number | null {
+  const fallback = fallbackUsdPriceBySymbol[asset.symbol] ?? fallbackUsdPriceBySymbol[asset.id];
+  return fallback ?? null;
+}
+
+function inputUsdValue(asset: Asset, amount: string): number | null {
+  const price = assetUsdPrice(asset);
+  const numeric = Number(amount);
+  if (!Number.isFinite(numeric) || price === null) return null;
+  return numeric * price;
+}
+
+function formatUsd(value: number) {
+  if (value < 1) {
+    return `$${value.toFixed(2)}`;
+  }
+  return `$${value.toFixed(value < 100 ? 2 : 0)}`;
+}
+
+function formatRangeLabel(asset: Asset): string | null {
+  const min = parseDecimal(asset.min_trade_notional_usd);
+  const max = parseDecimal(asset.max_trade_notional_usd);
+  if (min === null || max === null) return null;
+  return `Min ${formatUsd(min)}, Max ${formatUsd(max)}`;
+}
 
 const defaultSourceSymbol = 'SOL';
 const quoteExpirySeconds = 45;
@@ -154,14 +196,32 @@ export function SwapPage() {
     () => (amount.trim() ? parseAmountRaw(amount, sourceAsset.decimals) : null),
     [amount, sourceAsset.decimals]
   );
+  const sourceRangeLabel = useMemo(() => formatRangeLabel(sourceAsset), [sourceAsset]);
+  const notionalValidation = useMemo(() => {
+    if (amountValidation?.ok !== true) return null;
+    const min = parseDecimal(sourceAsset.min_trade_notional_usd);
+    const max = parseDecimal(sourceAsset.max_trade_notional_usd);
+    if (min === null && max === null) return null;
+    const usd = inputUsdValue(sourceAsset, amount);
+    if (usd === null) return null;
+    if (min !== null && usd < min) {
+      return { ok: false, message: `Below ${formatUsd(min)} minimum for ${sourceAsset.symbol}.` } as const;
+    }
+    if (max !== null && usd > max) {
+      return { ok: false, message: `Above ${formatUsd(max)} maximum for ${sourceAsset.symbol}.` } as const;
+    }
+    return { ok: true } as const;
+  }, [amount, amountValidation, sourceAsset]);
   const quoteAccepted = quote?.status === 'accepted';
   const receiveAmount = quoteAccepted && outputAsset ? formatRawAmount(quote.quoted_output_amount_raw, outputAsset.decimals) : null;
   const flowLocked = Boolean(settlement || lock || redeem);
+  const notionalOk = notionalValidation?.ok !== false;
   const primaryLabel = primaryActionLabel({
     hasWallet: Boolean(walletAddress),
     hasDestination: Boolean(outputAsset),
     amount,
     amountValidation,
+    notionalOk,
     quote,
     quoteExpired,
     settlement,
@@ -173,6 +233,7 @@ export function SwapPage() {
     hasWallet: Boolean(walletAddress),
     hasDestination: Boolean(outputAsset),
     amountValidation,
+    notionalOk,
     quote,
     quoteExpired,
     settlement,
@@ -259,6 +320,12 @@ export function SwapPage() {
       return undefined;
     }
 
+    // Backend is the source of truth, but skip the round-trip when the input
+    // is obviously outside the per-asset min/max range.
+    if (notionalValidation?.ok === false) {
+      return undefined;
+    }
+
     const timer = window.setTimeout(() => {
       void requestQuote('auto');
     }, quoteInputDebounceMs);
@@ -269,7 +336,7 @@ export function SwapPage() {
         clearQuoteTimer();
       }
     };
-  }, [walletAddress, outputMint, amount, sourceAsset.mint, sourceAsset.decimals]);
+  }, [walletAddress, outputMint, amount, sourceAsset.mint, sourceAsset.decimals, notionalValidation?.ok]);
 
   function scheduleQuoteRefresh(delayMs: number, reason: 'expiry' | 'retry') {
     clearQuoteTimer();
@@ -452,6 +519,10 @@ export function SwapPage() {
     }
     if (amountValidation?.ok === false) {
       showNotice({ tone: 'error', title: amountValidation.message });
+      return undefined;
+    }
+    if (notionalValidation?.ok === false) {
+      showNotice({ tone: 'error', title: notionalValidation.message });
     }
     return undefined;
   }
@@ -497,6 +568,12 @@ export function SwapPage() {
             onAssetChange={selectInput}
           />
 
+          {sourceRangeLabel && (
+            <p className="field-hint">
+              {sourceAsset.symbol} trade range: {sourceRangeLabel}
+            </p>
+          )}
+
           <div className="flip-row">
             <button
               type="button"
@@ -527,6 +604,9 @@ export function SwapPage() {
 
           {!outputAsset && <p className="locked-note">Choose a receive asset.</p>}
           {outputAsset && amountValidation?.ok === false && <p className="field-error">{amountValidation.message}</p>}
+          {outputAsset && amountValidation?.ok === true && notionalValidation?.ok === false && (
+            <p className="field-error">{notionalValidation.message}</p>
+          )}
           {quote?.status === 'rejected' && <p className="field-error">No liquidity sources found</p>}
 
           <button className="primary-swap-button" disabled={primaryDisabled}>
@@ -560,6 +640,7 @@ function primaryActionLabel({
   hasDestination,
   amount,
   amountValidation,
+  notionalOk,
   quote,
   quoteExpired,
   settlement,
@@ -571,6 +652,7 @@ function primaryActionLabel({
   hasDestination: boolean;
   amount: string;
   amountValidation: { ok: true; raw: number } | { ok: false; message: string } | null;
+  notionalOk: boolean;
   quote: RfqResponse | null;
   quoteExpired: boolean;
   settlement: WalletSettlementResponse | null;
@@ -589,6 +671,7 @@ function primaryActionLabel({
   if (!hasDestination) return 'Choose receive asset';
   if (!amount.trim()) return 'Enter amount';
   if (amountValidation?.ok === false) return 'Fix amount';
+  if (!notionalOk) return 'Adjust amount';
   if (quote?.status === 'accepted' && quoteExpired) return 'Refreshing quote...';
   if (quote?.status === 'accepted') return 'Continue';
   if (quote?.status === 'rejected') return 'Retrying quote...';
@@ -599,6 +682,7 @@ function primaryActionDisabled({
   hasWallet,
   hasDestination,
   amountValidation,
+  notionalOk,
   quote,
   quoteExpired,
   settlement,
@@ -609,6 +693,7 @@ function primaryActionDisabled({
   hasWallet: boolean;
   hasDestination: boolean;
   amountValidation: { ok: true; raw: number } | { ok: false; message: string } | null;
+  notionalOk: boolean;
   quote: RfqResponse | null;
   quoteExpired: boolean;
   settlement: WalletSettlementResponse | null;
@@ -621,7 +706,7 @@ function primaryActionDisabled({
   if (redeem?.settlement_status) return true;
   if (lock?.settlement_status || settlement?.trade_id) return false;
   if (quote?.status === 'accepted' && !quoteExpired) return false;
-  if (!hasDestination || amountValidation?.ok !== true) return true;
+  if (!hasDestination || amountValidation?.ok !== true || !notionalOk) return true;
   return true;
 }
 

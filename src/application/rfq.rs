@@ -13,8 +13,8 @@ use crate::domain::quote_engine::{
 };
 use crate::domain::risk::{RiskEvaluationInput, RiskPolicy, evaluate_pre_quote};
 use crate::domain::types::{
-    AmountRaw, AssetPair, ExecutionPath, MintAddress, QuoteId, ReferencePrice, RejectionReason,
-    RiskDecision, RuntimeRunId, TokenAmount, TradeId, WalletAddress,
+    AmountRaw, AssetId, AssetPair, ExecutionPath, MintAddress, QuoteId, ReferencePrice,
+    RejectionReason, RiskDecision, RuntimeRunId, TokenAmount, TradeId, WalletAddress,
 };
 use crate::ports::PriceProvider;
 
@@ -295,6 +295,19 @@ pub async fn request_quote<P: PriceProvider + ?Sized>(
         );
     };
 
+    // Per-asset min/max gate. Each side must clear its own asset's range.
+    // The more restrictive bound wins. Runs after price resolution but before
+    // any quote acceptance so a rejection here is final.
+    if let Some(rejection) = check_per_asset_notional(
+        &quote.input_amount,
+        input_asset,
+        &quote.output_amount,
+        output_asset,
+        &context.risk_policy,
+    ) {
+        return rejected_outcome(quote_id, run_id, now, rejection.0, rejection.1, events);
+    }
+
     let risk_input = RiskEvaluationInput {
         pair: pair.clone(),
         taker_wallet: request.taker_wallet.clone(),
@@ -518,6 +531,107 @@ fn estimate_notional_usd(
     Some(input_ui * usd_price)
 }
 
+/// Compute the USD value of a single asset-tagged amount, using the
+/// USDC=1 peg and the policy's `asset_usd_prices` table for non-USDC assets.
+///
+/// For non-USDC assets where neither side of the pair offers a peg, callers
+/// must pass the counter-asset USD value to derive a synthetic price. This
+/// helper covers the common case where the policy carries a direct USD
+/// reference for the asset.
+fn side_notional_usd(
+    amount: &TokenAmount,
+    decimals: u8,
+    policy: &RiskPolicy,
+    counter_amount: &TokenAmount,
+    counter_decimals: u8,
+) -> Option<Decimal> {
+    if amount.asset.as_str() == "USDC" {
+        return raw_to_decimal(amount.amount_raw, decimals);
+    }
+
+    if let Some(price) = policy
+        .asset_usd_prices
+        .iter()
+        .find(|(asset, _)| asset == &amount.asset)
+        .map(|(_, price)| *price)
+    {
+        let ui = raw_to_decimal(amount.amount_raw, decimals)?;
+        return Some(ui * price);
+    }
+
+    // Fall back to the counter amount when the counter is USDC. This keeps the
+    // gate functioning for USDC<->X pairs without requiring a populated USD
+    // price table for X.
+    if counter_amount.asset.as_str() == "USDC" {
+        return raw_to_decimal(counter_amount.amount_raw, counter_decimals);
+    }
+
+    None
+}
+
+fn check_per_asset_notional(
+    input: &TokenAmount,
+    input_asset: &AssetConfig,
+    output: &TokenAmount,
+    output_asset: &AssetConfig,
+    policy: &RiskPolicy,
+) -> Option<(RejectionReason, String)> {
+    let input_usd = side_notional_usd(
+        input,
+        input_asset.decimals,
+        policy,
+        output,
+        output_asset.decimals,
+    );
+    let output_usd = side_notional_usd(
+        output,
+        output_asset.decimals,
+        policy,
+        input,
+        input_asset.decimals,
+    );
+
+    if let Some(rejection) = check_side(&input.asset, input_asset, input_usd) {
+        return Some(rejection);
+    }
+    check_side(&output.asset, output_asset, output_usd)
+}
+
+fn check_side(
+    asset: &AssetId,
+    asset_config: &AssetConfig,
+    notional_usd: Option<Decimal>,
+) -> Option<(RejectionReason, String)> {
+    let Some(notional_usd) = notional_usd else {
+        return Some((
+            RejectionReason::ValidationFailed,
+            format!("missing USD valuation for asset {asset}"),
+        ));
+    };
+
+    if notional_usd < asset_config.min_trade_notional_usd {
+        return Some((
+            RejectionReason::BelowAssetMinNotional,
+            format!(
+                "{asset} notional ${notional_usd} is below the per-asset minimum ${}",
+                asset_config.min_trade_notional_usd
+            ),
+        ));
+    }
+
+    if notional_usd > asset_config.max_trade_notional_usd {
+        return Some((
+            RejectionReason::AboveAssetMaxNotional,
+            format!(
+                "{asset} notional ${notional_usd} exceeds the per-asset maximum ${}",
+                asset_config.max_trade_notional_usd
+            ),
+        ));
+    }
+
+    None
+}
+
 fn raw_to_decimal(amount: AmountRaw, decimals: u8) -> Option<Decimal> {
     let mut factor = 1_u64;
     for _ in 0..decimals {
@@ -572,6 +686,8 @@ mod tests {
             enabled: true,
             target_weight: Decimal::ZERO,
             quoteable_threshold_raw: AmountRaw::new(threshold),
+            min_trade_notional_usd: Decimal::ONE,
+            max_trade_notional_usd: Decimal::new(2, 0),
         }
     }
 
@@ -693,6 +809,8 @@ mod tests {
 
     #[tokio::test]
     async fn rfq_rejects_oversized_request() {
+        // Per-asset USDC max ($2) trips before the global cap when the
+        // request notional is $3.
         let outcome = request_quote(
             rfq(3_000_000),
             &context(1_000_000_000),
@@ -704,7 +822,7 @@ mod tests {
 
         assert_eq!(
             rejection_reason(&outcome),
-            Some(&RejectionReason::MaxNotionalExceeded)
+            Some(&RejectionReason::AboveAssetMaxNotional)
         );
     }
 

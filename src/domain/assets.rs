@@ -45,22 +45,33 @@ pub struct AssetMetadata {
     pub symbol: String,
     /// Number of raw subunits per display unit, expressed as base-10 decimals.
     pub decimals: u8,
+    /// Per-asset minimum trade notional in estimated USD. The runtime enforces
+    /// this on each side of a trade independently.
+    pub min_trade_notional_usd: Decimal,
+    /// Per-asset maximum trade notional in estimated USD. The runtime enforces
+    /// this on each side of a trade independently.
+    pub max_trade_notional_usd: Decimal,
     kind: AssetKind,
 }
 
 impl AssetMetadata {
-    /// Construct metadata for native SOL.
+    /// Construct metadata for native SOL with default per-asset notional
+    /// limits. Tests and registry helpers can override the limits before
+    /// constructing the registry.
     #[must_use]
     pub fn native_sol() -> Self {
         Self {
             id: AssetId::from(SOL_ID),
             symbol: SOL_ID.to_owned(),
             decimals: 9,
+            min_trade_notional_usd: Decimal::ONE,
+            max_trade_notional_usd: Decimal::new(2, 0),
             kind: AssetKind::NativeSol,
         }
     }
 
-    /// Construct metadata for an SPL token.
+    /// Construct metadata for an SPL token with default per-asset notional
+    /// limits.
     #[must_use]
     pub fn spl_token(
         id: impl Into<AssetId>,
@@ -72,10 +83,24 @@ impl AssetMetadata {
             id: id.into(),
             symbol: symbol.into(),
             decimals,
+            min_trade_notional_usd: Decimal::ONE,
+            max_trade_notional_usd: Decimal::new(2, 0),
             kind: AssetKind::SplToken {
                 mint: MintAddress::new(mint.into()),
             },
         }
+    }
+
+    /// Override the per-asset notional limits on this metadata.
+    #[must_use]
+    pub const fn with_notional_limits(
+        mut self,
+        min_trade_notional_usd: Decimal,
+        max_trade_notional_usd: Decimal,
+    ) -> Self {
+        self.min_trade_notional_usd = min_trade_notional_usd;
+        self.max_trade_notional_usd = max_trade_notional_usd;
+        self
     }
 
     /// True when this metadata represents native SOL.
@@ -232,7 +257,7 @@ impl AssetRegistry {
             .iter()
             .filter(|asset| asset.enabled)
             .map(|asset| {
-                if asset.id.as_str() == SOL_ID {
+                let base = if asset.id.as_str() == SOL_ID {
                     AssetMetadata::native_sol()
                 } else {
                     AssetMetadata::spl_token(
@@ -241,7 +266,11 @@ impl AssetRegistry {
                         asset.mint.as_str(),
                         asset.decimals,
                     )
-                }
+                };
+                base.with_notional_limits(
+                    asset.min_trade_notional_usd,
+                    asset.max_trade_notional_usd,
+                )
             })
             .collect();
         let pairs = config.assets.enabled_pairs();
@@ -398,12 +427,13 @@ impl Default for AssetRegistry {
         let sol = AssetId::from(SOL_ID);
         let cbbtc = AssetId::from(CBBTC_ID);
 
+        let usdc_metadata = AssetMetadata::spl_token(USDC_ID, USDC_ID, USDC_MINT, 6);
+        let sol_metadata = AssetMetadata::native_sol();
+        let cbbtc_metadata = AssetMetadata::spl_token(CBBTC_ID, CBBTC_ID, CBBTC_MINT, 8)
+            .with_notional_limits(Decimal::ONE, Decimal::new(5, 0));
+
         Self::new(
-            vec![
-                AssetMetadata::native_sol(),
-                AssetMetadata::spl_token(USDC_ID, USDC_ID, USDC_MINT, 6),
-                AssetMetadata::spl_token(CBBTC_ID, CBBTC_ID, CBBTC_MINT, 8),
-            ],
+            vec![sol_metadata, usdc_metadata, cbbtc_metadata],
             vec![
                 AssetPair::new(usdc.clone(), sol.clone()),
                 AssetPair::new(sol.clone(), usdc.clone()),

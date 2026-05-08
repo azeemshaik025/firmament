@@ -4,6 +4,10 @@ export type Asset = {
   mint: string;
   decimals: number;
   name?: string;
+  // serde rust_decimal::Decimal serializes as a JSON string (e.g. "1.50").
+  // Marked optional so older runtimes without the field still type-check.
+  min_trade_notional_usd?: string;
+  max_trade_notional_usd?: string;
 };
 
 export type RfqRequest = {

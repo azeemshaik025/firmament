@@ -297,6 +297,10 @@ pub enum RejectionReason {
     AmountTooSmall,
     /// The requested notional exceeds a per-action cap.
     MaxNotionalExceeded,
+    /// Trade notional is below the per-asset minimum.
+    BelowAssetMinNotional,
+    /// Trade notional exceeds the per-asset maximum.
+    AboveAssetMaxNotional,
     /// The cumulative automation cap would be exceeded.
     CumulativeCapExceeded,
     /// Inventory is below the configured quoteable threshold.

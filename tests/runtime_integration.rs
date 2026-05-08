@@ -91,6 +91,23 @@ fn funded_demo_inventory() -> BalanceSnapshot {
     ])
 }
 
+/// Relax per-asset min/max notional caps on every supported asset to a wide
+/// test range so legacy tests that send arbitrary mocked amounts continue to
+/// reach the gate they are exercising. The default config caps trades at $1-$2
+/// (or $1-$5 for cbBTC), which the per-asset gate (correctly) enforces.
+fn relax_asset_notional_limits(config: &mut AppConfig) {
+    for asset in &mut config.assets.supported {
+        asset.min_trade_notional_usd = Decimal::new(1, 6); // $0.000001
+        asset.max_trade_notional_usd = Decimal::from(1_000);
+    }
+}
+
+fn relaxed_default_config() -> AppConfig {
+    let mut config = AppConfig::default();
+    relax_asset_notional_limits(&mut config);
+    config
+}
+
 async fn harness(
     price_provider: FakePriceProvider,
     htlc_client: FakeHtlcClient,
@@ -99,7 +116,7 @@ async fn harness(
     balance_reader: FakeBalanceReader,
     options: RuntimeOrchestratorOptions,
 ) -> RuntimeOrchestrator {
-    let app_state = bootstrap(AppConfig::default())
+    let app_state = bootstrap(relaxed_default_config())
         .await
         .expect("bootstrap runtime state");
     RuntimeOrchestrator::new(
@@ -125,7 +142,7 @@ async fn persistent_harness_with_persistence(
     persistence: Arc<RuntimePersistence>,
 ) -> RuntimeOrchestrator {
     persistent_harness_with_config(
-        AppConfig::default(),
+        relaxed_default_config(),
         price_provider,
         htlc_client,
         swap_executor,
@@ -832,12 +849,14 @@ async fn rfq_gateway_quoteability_uses_ledger_minus_reserved() {
     // RFQ for 700 USDC input (3.5 SOL output) → Rejected (free Gateway short).
     //
     // The default risk limits cap notional at $2/quote so this test bumps
-    // them to $1000 to make the gate the load-bearing assertion.
+    // them to $1000 to make the gate the load-bearing assertion. The
+    // per-asset gate is also relaxed for the same reason.
     let mut config = AppConfig::default();
     config.risk.max_quote_notional_usd = Decimal::from(1_000);
     config.risk.max_trade_notional_usd = Decimal::from(1_000);
     config.risk.max_daily_notional_usd = Decimal::from(10_000);
     config.risk.max_non_stable_asset_notional_usd = Decimal::from(1_000);
+    relax_asset_notional_limits(&mut config);
 
     // SOL = $200 reference: 1 USDC = 0.005 SOL, 1 SOL = 200 USDC.
     let price_provider = FakePriceProvider {
@@ -951,12 +970,14 @@ async fn quote_records_inventory_to_inventory_path_when_custody_covers() {
 async fn quote_records_gateway_to_dex_path_when_only_gateway_covers() {
     // working_custody:SOL = 0; gateway:USDC seeded with enough free supply to
     // cover the requested SOL output. Quote should resolve to
-    // ExecutionPath::GatewayToDex.
+    // ExecutionPath::GatewayToDex. Per-asset notional caps are relaxed so the
+    // Gateway-path resolution is the load-bearing assertion.
     let mut config = AppConfig::default();
     config.risk.max_quote_notional_usd = Decimal::from(1_000);
     config.risk.max_trade_notional_usd = Decimal::from(1_000);
     config.risk.max_daily_notional_usd = Decimal::from(10_000);
     config.risk.max_non_stable_asset_notional_usd = Decimal::from(1_000);
+    relax_asset_notional_limits(&mut config);
 
     // SOL = $200 reference: 1 USDC = 0.005 SOL.
     let price_provider = FakePriceProvider {
@@ -1010,6 +1031,208 @@ async fn quote_records_gateway_to_dex_path_when_only_gateway_covers() {
         "expected GatewayToDex when only gateway covers, got {:?}",
         quote.execution_path,
     );
+}
+
+/// USDC mint id used by the per-asset gate tests.
+const PER_ASSET_USDC_MINT: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+/// cbBTC placeholder mint matching the default `AppConfig` fixture, where
+/// the real mainnet cbBTC mint is left as a `VERIFY_*` placeholder until the
+/// operator has confirmed it.
+const PER_ASSET_CBBTC_MINT: &str = "VERIFY_CBBTC_SOLANA_MINT_BEFORE_LIVE_USE";
+
+fn rfq_with(input_mint: MintAddress, output_mint: MintAddress, amount_raw: u64) -> RfqRequest {
+    RfqRequest {
+        input_mint,
+        output_mint,
+        input_amount_raw: AmountRaw::new(amount_raw),
+        taker_wallet: taker_wallet(),
+        expiry_seconds: Some(30),
+    }
+}
+
+#[tokio::test]
+async fn rfq_rejects_input_below_asset_min_notional() {
+    // Default per-asset USDC min is $1. $0.50 USDC must reject with the
+    // per-asset reason — not the global cap.
+    let persistence = Arc::new(
+        RuntimePersistence::open_in_memory(AssetRegistry::default()).expect("persistence"),
+    );
+    seed_working_custody(&persistence, &sol(), 200_000_000);
+    seed_working_custody(&persistence, &usdc(), 10_000_000);
+
+    let orchestrator = persistent_harness_with_config(
+        AppConfig::default(),
+        FakePriceProvider::default(),
+        FakeHtlcClient::default(),
+        FakeSwapExecutor::default(),
+        FakeGatewayClient::default(),
+        FakeBalanceReader::new(vec![quote_inventory()]),
+        RuntimeOrchestratorOptions::default(),
+        Arc::clone(&persistence),
+    )
+    .await;
+
+    let response = orchestrator
+        .request_rfq(rfq(500_000)) // $0.50 USDC
+        .await
+        .expect("request rfq");
+    match response {
+        RfqResponse::Rejected(rejection) => {
+            assert_eq!(rejection.reason, RejectionReason::BelowAssetMinNotional);
+        }
+        RfqResponse::Accepted(quote) => {
+            panic!("expected BelowAssetMinNotional rejection, got {quote:?}")
+        }
+    }
+}
+
+#[tokio::test]
+async fn rfq_rejects_input_above_asset_max_notional() {
+    // Default per-asset USDC max is $2. $3 USDC must reject with the
+    // per-asset reason; the global $2 cap is also breached but the per-asset
+    // gate runs first.
+    let persistence = Arc::new(
+        RuntimePersistence::open_in_memory(AssetRegistry::default()).expect("persistence"),
+    );
+    seed_working_custody(&persistence, &sol(), 200_000_000);
+    seed_working_custody(&persistence, &usdc(), 10_000_000);
+
+    let orchestrator = persistent_harness_with_config(
+        AppConfig::default(),
+        FakePriceProvider::default(),
+        FakeHtlcClient::default(),
+        FakeSwapExecutor::default(),
+        FakeGatewayClient::default(),
+        FakeBalanceReader::new(vec![quote_inventory()]),
+        RuntimeOrchestratorOptions::default(),
+        Arc::clone(&persistence),
+    )
+    .await;
+
+    let response = orchestrator
+        .request_rfq(rfq(3_000_000)) // $3 USDC
+        .await
+        .expect("request rfq");
+    match response {
+        RfqResponse::Rejected(rejection) => {
+            assert_eq!(rejection.reason, RejectionReason::AboveAssetMaxNotional);
+        }
+        RfqResponse::Accepted(quote) => {
+            panic!("expected AboveAssetMaxNotional rejection, got {quote:?}")
+        }
+    }
+}
+
+#[tokio::test]
+async fn rfq_rejects_output_above_asset_max_notional_when_input_passes() {
+    // Bump USDC max to $10 so the input passes, but cbBTC max stays at $5.
+    // Send $7 USDC -> cbBTC: input ($7) < USDC max ($10), output (~$7 cbBTC
+    // worth) > cbBTC max ($5), so the gate must reject on the output side
+    // with AboveAssetMaxNotional.
+    let mut config = AppConfig::default();
+    config.risk.max_quote_notional_usd = Decimal::from(20);
+    config.risk.max_trade_notional_usd = Decimal::from(20);
+    config.risk.max_daily_notional_usd = Decimal::from(100);
+    config.risk.max_non_stable_asset_notional_usd = Decimal::from(20);
+    for asset in &mut config.assets.supported {
+        if asset.id.as_str() == "USDC" {
+            asset.min_trade_notional_usd = Decimal::ONE;
+            asset.max_trade_notional_usd = Decimal::from(10);
+        }
+    }
+
+    // 1 USDC = 0.00002 cbBTC (i.e. cbBTC ~ $50_000) so $7 USDC -> ~0.00014
+    // cbBTC, which is still ~$7 in USD value (well above the $5 cbBTC max).
+    let price_provider = FakePriceProvider {
+        prices: Arc::new(HashMap::from([
+            (
+                AssetPair::new(usdc(), cbbtc()),
+                Decimal::new(2, 5), // 0.00002 cbBTC per USDC
+            ),
+            (AssetPair::new(cbbtc(), usdc()), Decimal::from(50_000)),
+        ])),
+    };
+
+    let inventory = balance_snapshot(vec![
+        TokenAmount::new(usdc(), AmountRaw::new(20_000_000)),
+        TokenAmount::new(sol(), AmountRaw::new(200_000_000)),
+        TokenAmount::new(cbbtc(), AmountRaw::new(1_000_000)),
+    ]);
+
+    let persistence = Arc::new(
+        RuntimePersistence::open_in_memory(AssetRegistry::default()).expect("persistence"),
+    );
+    seed_working_custody(&persistence, &usdc(), 20_000_000);
+    seed_working_custody(&persistence, &sol(), 200_000_000);
+    seed_working_custody(&persistence, &cbbtc(), 1_000_000);
+
+    let orchestrator = persistent_harness_with_config(
+        config,
+        price_provider,
+        FakeHtlcClient::default(),
+        FakeSwapExecutor::default(),
+        FakeGatewayClient::default(),
+        FakeBalanceReader::new(vec![inventory.clone(), inventory]),
+        RuntimeOrchestratorOptions::default(),
+        Arc::clone(&persistence),
+    )
+    .await;
+
+    let response = orchestrator
+        .request_rfq(rfq_with(
+            MintAddress::new(PER_ASSET_USDC_MINT),
+            MintAddress::new(PER_ASSET_CBBTC_MINT),
+            7_000_000, // $7 USDC
+        ))
+        .await
+        .expect("request rfq");
+    match response {
+        RfqResponse::Rejected(rejection) => {
+            assert_eq!(
+                rejection.reason,
+                RejectionReason::AboveAssetMaxNotional,
+                "expected output-side AboveAssetMaxNotional, got {:?}",
+                rejection.reason,
+            );
+        }
+        RfqResponse::Accepted(quote) => {
+            panic!("expected output-side AboveAssetMaxNotional, got {quote:?}")
+        }
+    }
+}
+
+#[tokio::test]
+async fn rfq_accepts_when_both_sides_within_per_asset_range() {
+    // Bootstrap with defaults. $1.50 USDC -> SOL: input ∈ [$1, $2] and the
+    // SOL output value (~$1.50) ∈ [$1, $2]. Accept.
+    let persistence = Arc::new(
+        RuntimePersistence::open_in_memory(AssetRegistry::default()).expect("persistence"),
+    );
+    seed_working_custody(&persistence, &sol(), 200_000_000);
+    seed_working_custody(&persistence, &usdc(), 10_000_000);
+
+    let orchestrator = persistent_harness_with_config(
+        AppConfig::default(),
+        FakePriceProvider::default(),
+        FakeHtlcClient::default(),
+        FakeSwapExecutor::default(),
+        FakeGatewayClient::default(),
+        FakeBalanceReader::new(vec![quote_inventory(), quote_inventory()]),
+        RuntimeOrchestratorOptions::default(),
+        Arc::clone(&persistence),
+    )
+    .await;
+
+    let response = orchestrator
+        .request_rfq(rfq(1_500_000)) // $1.50 USDC
+        .await
+        .expect("request rfq");
+    match response {
+        RfqResponse::Accepted(_) => {}
+        RfqResponse::Rejected(rejection) => {
+            panic!("expected Accepted within per-asset range, got {rejection:?}")
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

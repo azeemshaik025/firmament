@@ -553,6 +553,8 @@ async fn get_assets(
                 symbol: asset.symbol.clone(),
                 mint: asset.mint.clone(),
                 decimals: asset.decimals,
+                min_trade_notional_usd: asset.min_trade_notional_usd,
+                max_trade_notional_usd: asset.max_trade_notional_usd,
             })
             .collect(),
     ))
