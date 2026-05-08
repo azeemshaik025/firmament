@@ -1136,10 +1136,7 @@ async fn api_assets_endpoint_includes_aliases_kind_and_supported_outputs() {
     assert!(usdc["quoteable_threshold_raw"].as_str().is_some());
     assert!(usdc["quoteable_threshold"].as_str().is_some());
 
-    let sol = assets
-        .iter()
-        .find(|a| a["id"] == "SOL")
-        .expect("sol asset");
+    let sol = assets.iter().find(|a| a["id"] == "SOL").expect("sol asset");
     assert_eq!(sol["kind"], "native");
 }
 

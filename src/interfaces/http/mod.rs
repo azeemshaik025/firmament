@@ -25,8 +25,7 @@ use crate::application::runtime::{
     AppState, RuntimeHandle, RuntimeOrchestrator, RuntimePersistence, RuntimeTrade,
 };
 use crate::config::{
-    AppConfig, AssetConfig, FIRMAMENT_ADMIN_PASSWORD_HASHES_ENV,
-    FIRMAMENT_ADMIN_SESSION_SECRET_ENV,
+    AppConfig, AssetConfig, FIRMAMENT_ADMIN_PASSWORD_HASHES_ENV, FIRMAMENT_ADMIN_SESSION_SECRET_ENV,
 };
 use crate::domain::assets::{AssetError, AssetRegistry, SOL_ID};
 use crate::domain::types::{
@@ -39,10 +38,10 @@ use crate::interfaces::http::auth::{
 };
 use crate::interfaces::http::types::{
     AdminLoginRequest, AdminMeResponse, AdminSummaryResponse, AmountView, AssetResponse, ErrorBody,
-    ErrorResponse, HtlcAcceptanceTerms, IntegrationStatus, LedgerSummary, NextAction,
-    PairResponse, PairsResponse, QuoteAcceptResponse, RfqPair, RfqRequest, RfqResponse,
-    RuntimeEventsResponse, RuntimeStateResponse, TakerLockRequest, TakerLockResponse,
-    TakerRedeemRequest, TakerRedeemResponse, TradeAmounts, TradeResponse, WalletSettlementRequest,
+    ErrorResponse, HtlcAcceptanceTerms, IntegrationStatus, LedgerSummary, NextAction, PairResponse,
+    PairsResponse, QuoteAcceptResponse, RfqPair, RfqRequest, RfqResponse, RuntimeEventsResponse,
+    RuntimeStateResponse, TakerLockRequest, TakerLockResponse, TakerRedeemRequest,
+    TakerRedeemResponse, TradeAmounts, TradeResponse, WalletSettlementRequest,
     WalletSettlementResponse,
 };
 use rust_decimal::Decimal;
@@ -640,10 +639,12 @@ fn build_pairs_response(config: &AppConfig) -> PairsResponse {
         .filter_map(|pair| {
             let input = by_id.get(&pair.input)?;
             let output = by_id.get(&pair.output)?;
-            let max_quote_notional_usd =
-                input.max_trade_notional_usd.min(output.max_trade_notional_usd);
-            let min_quote_notional_usd =
-                input.min_trade_notional_usd.max(output.min_trade_notional_usd);
+            let max_quote_notional_usd = input
+                .max_trade_notional_usd
+                .min(output.max_trade_notional_usd);
+            let min_quote_notional_usd = input
+                .min_trade_notional_usd
+                .max(output.min_trade_notional_usd);
             Some(PairResponse {
                 input_asset: input.id.to_string(),
                 output_asset: output.id.to_string(),
@@ -1050,8 +1051,7 @@ fn parse_rfq_request(request: RfqRequest, config: &AppConfig) -> Result<rfq::Rfq
     } = request;
 
     let used_friendly = input_asset.is_some() || output_asset.is_some() || amount.is_some();
-    let used_legacy =
-        input_mint.is_some() || output_mint.is_some() || input_amount_raw.is_some();
+    let used_legacy = input_mint.is_some() || output_mint.is_some() || input_amount_raw.is_some();
 
     if used_friendly && used_legacy {
         return Err(ApiError::bad_request(
@@ -1061,12 +1061,12 @@ fn parse_rfq_request(request: RfqRequest, config: &AppConfig) -> Result<rfq::Rfq
     }
 
     if used_friendly {
-        let input_id = input_asset.as_deref().ok_or_else(|| {
-            ApiError::bad_request("invalid_rfq", "input_asset is required")
-        })?;
-        let output_id = output_asset.as_deref().ok_or_else(|| {
-            ApiError::bad_request("invalid_rfq", "output_asset is required")
-        })?;
+        let input_id = input_asset
+            .as_deref()
+            .ok_or_else(|| ApiError::bad_request("invalid_rfq", "input_asset is required"))?;
+        let output_id = output_asset
+            .as_deref()
+            .ok_or_else(|| ApiError::bad_request("invalid_rfq", "output_asset is required"))?;
         let raw_amount = amount.as_deref().ok_or_else(|| {
             ApiError::new(
                 StatusCode::BAD_REQUEST,
@@ -1149,10 +1149,7 @@ fn parse_rfq_request(request: RfqRequest, config: &AppConfig) -> Result<rfq::Rfq
             ApiError::bad_request("invalid_rfq", "output_mint or output_asset is required")
         })?;
         let input_amount_raw = input_amount_raw.ok_or_else(|| {
-            ApiError::bad_request(
-                "invalid_rfq",
-                "input_amount_raw or amount is required",
-            )
+            ApiError::bad_request("invalid_rfq", "input_amount_raw or amount is required")
         })?;
 
         Ok(rfq::RfqRequest {
@@ -1165,7 +1162,10 @@ fn parse_rfq_request(request: RfqRequest, config: &AppConfig) -> Result<rfq::Rfq
     }
 }
 
-fn resolve_asset_alias<'a>(config: &'a AppConfig, identifier: &str) -> Result<&'a AssetConfig, ApiError> {
+fn resolve_asset_alias<'a>(
+    config: &'a AppConfig,
+    identifier: &str,
+) -> Result<&'a AssetConfig, ApiError> {
     let needle = identifier.trim().to_ascii_lowercase();
     if needle.is_empty() {
         return Err(ApiError::new(
@@ -1194,11 +1194,7 @@ fn resolve_asset_alias<'a>(config: &'a AppConfig, identifier: &str) -> Result<&'
         })
 }
 
-fn build_amount_view(
-    asset_id: &AssetId,
-    amount_raw: AmountRaw,
-    config: &AppConfig,
-) -> AmountView {
+fn build_amount_view(asset_id: &AssetId, amount_raw: AmountRaw, config: &AppConfig) -> AmountView {
     let asset_cfg = config
         .assets
         .supported
@@ -1252,8 +1248,7 @@ fn rejection_message(reason: &RejectionReason) -> (&'static str, &'static str) {
             "Wallet is not currently allowed.",
             "Contact the operator if you expected access.",
         ),
-        RejectionReason::GatewayUnavailable
-        | RejectionReason::ExternalServiceUnavailable => (
+        RejectionReason::GatewayUnavailable | RejectionReason::ExternalServiceUnavailable => (
             "A required service is temporarily unavailable.",
             "Try again in a few seconds.",
         ),
@@ -1336,8 +1331,11 @@ fn trade_to_api_response(
     ledger_summary: LedgerSummary,
     config: &AppConfig,
 ) -> TradeResponse {
-    let input_view =
-        build_amount_view(&trade.input_amount.asset, trade.input_amount.amount_raw, config);
+    let input_view = build_amount_view(
+        &trade.input_amount.asset,
+        trade.input_amount.amount_raw,
+        config,
+    );
     let output_view = build_amount_view(
         &trade.output_amount.asset,
         trade.output_amount.amount_raw,

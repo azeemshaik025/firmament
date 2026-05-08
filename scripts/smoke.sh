@@ -23,6 +23,7 @@ Groups:
   gateway-deposit   Run explicit opt-in 1 USDC Gateway deposit smoke test.
   gateway-refill    Run explicit opt-in 1 USDC Gateway refill smoke test.
   live-cbbtc-rfq    Run explicit opt-in tiny live USDC->cbBTC RFQ/HTLC smoke test.
+  live-gateway-cbbtc-rfq Run explicit opt-in tiny Gateway-backed USDC->cbBTC RFQ smoke test (drains working_custody:USDC to force GatewayToDex path).
   live-e2e-gated    Run explicit opt-in live end-to-end gate tests.
   all-non-mutating  Run unit, fake-e2e, api, Solana, Jupiter quote/cbBTC quote, HTLC, and Gateway balance groups.
 
@@ -235,6 +236,20 @@ case "$group" in
     require_any_env "taker wallet" TAKER_PRIVATE_KEY TAKER_KEYPAIR_JSON TAKER_KEYPAIR_PATH
     require_tiny_cbbtc_rfq_cap
     run cargo test --test live_mainnet live_cbbtc_rfq_accept_skips_without_explicit_opt_in -- --nocapture
+    ;;
+  live-gateway-cbbtc-rfq)
+    # Gateway-backed cbBTC RFQ smoke: drains working_custody:USDC at startup
+    # so the path resolver must select GatewayToDex. Exercises the real
+    # Circle Gateway request_refill + Jupiter execute_swap inside an RFQ.
+    require_env_value RUN_LIVE_GATEWAY_TESTS 1
+    require_env_value RUN_LIVE_CBBTC_RFQ_TESTS 1
+    require_nonempty_env SOLANA_RPC_URL
+    require_nonempty_env JUPITER_API_KEY
+    require_nonempty_env CIRCLE_GATEWAY_SOLANA_ADDRESS
+    require_any_env "maker wallet" MAKER_PRIVATE_KEY MAKER_KEYPAIR_JSON MAKER_KEYPAIR_PATH
+    require_any_env "taker wallet" TAKER_PRIVATE_KEY TAKER_KEYPAIR_JSON TAKER_KEYPAIR_PATH
+    require_tiny_cbbtc_rfq_cap
+    run cargo test --test live_mainnet live_gateway_backed_cbbtc_rfq_skips_without_explicit_opt_in -- --nocapture
     ;;
   live-e2e-gated)
     require_env_value RUN_LIVE_SOLANA_TESTS 1

@@ -1487,6 +1487,36 @@ impl RuntimeOrchestrator {
         };
 
         // Step A: Gateway burn → mint.
+        self.run_gateway_burn_mint_slice(trade_id, &usdc_amount, tx_signatures, tx_signature_kinds)
+            .await?;
+
+        // Step B: Jupiter swap (non-USDC outputs only).
+        if quote.output_amount.asset != usdc {
+            self.run_trade_jupiter_swap_slice(
+                trade_id,
+                &usdc,
+                &usdc_amount,
+                &quote.output_amount.asset,
+                tx_signatures,
+                tx_signature_kinds,
+            )
+            .await?;
+        }
+
+        Ok(())
+    }
+
+    /// Drive `GatewayClient::request_refill` and emit
+    /// `BurnIntentSubmitted` + `MintConfirmed` lifecycle events. On adapter
+    /// failure (atomic — neither burn nor mint landed), surface
+    /// `Gateway::Failed` for observers without moving the ledger.
+    async fn run_gateway_burn_mint_slice(
+        &self,
+        trade_id: TradeId,
+        usdc_amount: &TokenAmount,
+        tx_signatures: &mut Vec<TxSignature>,
+        tx_signature_kinds: &mut Vec<TradeSignature>,
+    ) -> AppResult<()> {
         let refill_request = crate::domain::types::GatewayRefillRequest {
             amount: usdc_amount.clone(),
             destination: WalletRole::Maker,
@@ -1500,35 +1530,31 @@ impl RuntimeOrchestrator {
             Ok(receipt) => receipt,
             Err(error) => {
                 let reason = format!("gateway refill failed: {error}");
-                self.publish(RuntimeEvent::Gateway(GatewayEvent::BurnFailed {
+                self.publish(RuntimeEvent::Gateway(GatewayEvent::Failed {
                     metadata: EventMetadata::new(self.app_state.run_id()),
-                    trade_id,
-                    amount: usdc_amount,
                     reason: reason.clone(),
                 }))
                 .await?;
                 return Err(AppError::external_service("circle_gateway", reason));
             }
         };
-        // Same-domain Solana Gateway transfer returns one composite signature
-        // for the gatewayMint instruction (the burn is a Circle API attestation
-        // request without a dedicated user-visible signature). Surface the same
-        // signature on both lifecycle events so downstream consumers can
-        // correlate the trade to the on-chain effect either way.
-        let burn_signature = gateway_receipt.signature.clone();
-        let mint_signature = gateway_receipt.signature.clone();
+        // Same-domain Solana Gateway transfer returns one composite
+        // signature for the gatewayMint instruction. Surface it on both
+        // lifecycle events so downstream consumers can correlate the trade
+        // to the on-chain effect either way.
+        let signature = gateway_receipt.signature;
 
         self.publish(RuntimeEvent::Gateway(GatewayEvent::BurnIntentSubmitted {
             metadata: EventMetadata::new(self.app_state.run_id()),
             trade_id,
             amount: usdc_amount.clone(),
-            signature: burn_signature.clone(),
+            signature: signature.clone(),
         }))
         .await?;
         push_kinded_signature(
             tx_signatures,
             tx_signature_kinds,
-            burn_signature.as_ref(),
+            signature.as_ref(),
             TradeSignatureKind::GatewayBurn,
         );
 
@@ -1536,97 +1562,102 @@ impl RuntimeOrchestrator {
             metadata: EventMetadata::new(self.app_state.run_id()),
             trade_id,
             amount: usdc_amount.clone(),
-            signature: mint_signature.clone(),
+            signature: signature.clone(),
         }))
         .await?;
         push_kinded_signature(
             tx_signatures,
             tx_signature_kinds,
-            mint_signature.as_ref(),
+            signature.as_ref(),
             TradeSignatureKind::GatewayMint,
         );
+        Ok(())
+    }
 
-        // Step B: Jupiter swap (non-USDC outputs only).
-        if quote.output_amount.asset != usdc {
-            let pair =
-                crate::domain::types::AssetPair::new(usdc.clone(), quote.output_amount.asset.clone());
-            let swap_request = crate::domain::types::SwapRequest {
-                pair,
-                input_amount: usdc_amount.clone(),
-                source_wallet: WalletRole::Maker,
-                destination_wallet: WalletRole::Maker,
-                max_slippage_bps: self.app_state.config().jupiter.max_slippage_bps,
-            };
-            let swap_quote = match self
-                .adapters
-                .swap_executor
-                .quote_swap(swap_request.clone())
-                .await
-            {
-                Ok(quote) => quote,
-                Err(error) => {
-                    // Swap quote failure happens before any pending_dex_spend
-                    // reservation lands, so no unwind event is needed.
-                    return Err(AppError::solana(format!(
-                        "jupiter quote failed for trade {trade_id}: {error}"
-                    )));
-                }
-            };
+    /// Drive `SwapExecutor::execute_swap` for the trade-bound USDC → output
+    /// swap and emit `TradeSwapSubmitted`/`TradeSwapConfirmed` lifecycle
+    /// events. On execute failure, emit `TradeSwapFailed` so the consumer
+    /// reverses `pending_dex_spend → working_custody`.
+    async fn run_trade_jupiter_swap_slice(
+        &self,
+        trade_id: TradeId,
+        usdc: &AssetId,
+        usdc_amount: &TokenAmount,
+        output_asset: &AssetId,
+        tx_signatures: &mut Vec<TxSignature>,
+        tx_signature_kinds: &mut Vec<TradeSignature>,
+    ) -> AppResult<()> {
+        let pair = crate::domain::types::AssetPair::new(usdc.clone(), output_asset.clone());
+        let swap_request = crate::domain::types::SwapRequest {
+            pair,
+            input_amount: usdc_amount.clone(),
+            source_wallet: WalletRole::Maker,
+            destination_wallet: WalletRole::Maker,
+            max_slippage_bps: self.app_state.config().jupiter.max_slippage_bps,
+        };
+        let swap_quote = self
+            .adapters
+            .swap_executor
+            .quote_swap(swap_request)
+            .await
+            .map_err(|error| {
+                AppError::solana(format!(
+                    "jupiter quote failed for trade {trade_id}: {error}"
+                ))
+            })?;
 
-            // The swap submit event must land before execute_swap so that any
-            // execute failure has a `pending_dex_spend` reservation to unwind.
-            // Use a placeholder None signature on submit; the real on-chain
-            // signature is reported by the receipt and surfaced on the
-            // confirmed event.
-            self.publish(RuntimeEvent::Swap(SwapEvent::TradeSwapSubmitted {
-                metadata: EventMetadata::new(self.app_state.run_id()),
-                trade_id,
-                input_amount: usdc_amount.clone(),
-                signature: None,
-            }))
-            .await?;
+        // Submit event must land before execute_swap so that any execute
+        // failure has a `pending_dex_spend` reservation to unwind. The
+        // submit event uses signature: None because the real on-chain
+        // signature is reported by the adapter receipt and surfaced on the
+        // confirmed event.
+        self.publish(RuntimeEvent::Swap(SwapEvent::TradeSwapSubmitted {
+            metadata: EventMetadata::new(self.app_state.run_id()),
+            trade_id,
+            input_amount: usdc_amount.clone(),
+            signature: None,
+        }))
+        .await?;
 
-            let swap_receipt = match self
-                .adapters
-                .swap_executor
-                .execute_swap(swap_quote.clone())
-                .await
-            {
-                Ok(receipt) => receipt,
-                Err(error) => {
-                    let reason = format!("jupiter swap failed: {error}");
-                    self.publish(RuntimeEvent::Swap(SwapEvent::TradeSwapFailed {
-                        metadata: EventMetadata::new(self.app_state.run_id()),
-                        trade_id,
-                        input_amount: usdc_amount,
-                        reason: reason.clone(),
-                    }))
-                    .await?;
-                    return Err(AppError::solana(reason));
-                }
-            };
+        let swap_receipt = match self
+            .adapters
+            .swap_executor
+            .execute_swap(swap_quote.clone())
+            .await
+        {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                let reason = format!("jupiter swap failed: {error}");
+                self.publish(RuntimeEvent::Swap(SwapEvent::TradeSwapFailed {
+                    metadata: EventMetadata::new(self.app_state.run_id()),
+                    trade_id,
+                    input_amount: usdc_amount.clone(),
+                    reason: reason.clone(),
+                }))
+                .await?;
+                return Err(AppError::solana(reason));
+            }
+        };
 
-            let confirmed_output = swap_receipt
-                .output_amount
-                .clone()
-                .unwrap_or_else(|| swap_quote.expected_output.clone());
+        let confirmed_output = swap_receipt
+            .output_amount
+            .clone()
+            .unwrap_or_else(|| swap_quote.expected_output.clone());
 
-            self.publish(RuntimeEvent::Swap(SwapEvent::TradeSwapConfirmed {
-                metadata: EventMetadata::new(self.app_state.run_id()),
-                trade_id,
-                input_amount: usdc_amount,
-                output_amount: confirmed_output,
-                signature: Some(swap_receipt.signature.clone()),
-            }))
-            .await?;
-            push_kinded_signature(
-                tx_signatures,
-                tx_signature_kinds,
-                Some(&swap_receipt.signature),
-                TradeSignatureKind::JupiterSwap,
-            );
-        }
-
+        self.publish(RuntimeEvent::Swap(SwapEvent::TradeSwapConfirmed {
+            metadata: EventMetadata::new(self.app_state.run_id()),
+            trade_id,
+            input_amount: usdc_amount.clone(),
+            output_amount: confirmed_output,
+            signature: Some(swap_receipt.signature.clone()),
+        }))
+        .await?;
+        push_kinded_signature(
+            tx_signatures,
+            tx_signature_kinds,
+            Some(&swap_receipt.signature),
+            TradeSignatureKind::JupiterSwap,
+        );
         Ok(())
     }
 

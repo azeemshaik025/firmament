@@ -13,6 +13,7 @@ use firmament::ports::{BalanceReader, GatewayClient, HtlcClient, PriceProvider, 
 use firmament::rfq::{RfqRequest, RfqResponse};
 use firmament::runtime::{
     RuntimeAdapters, RuntimeOrchestrator, RuntimeOrchestratorOptions, RuntimePersistence,
+    TradeSignatureKind,
 };
 use firmament::settlement::SettlementLeg;
 use firmament::types::{
@@ -1407,6 +1408,8 @@ impl HtlcClient for FakeHtlcClient {
 struct FakeSwapExecutor {
     quoted: Arc<Mutex<Vec<SwapRequest>>>,
     executed: Arc<Mutex<Vec<SwapQuote>>>,
+    fail_execute: Arc<Mutex<bool>>,
+    output_override: Arc<Mutex<Option<TokenAmount>>>,
 }
 
 impl FakeSwapExecutor {
@@ -1421,6 +1424,24 @@ impl FakeSwapExecutor {
     fn quoted_requests(&self) -> Vec<SwapRequest> {
         self.quoted.lock().expect("swap quote lock").clone()
     }
+
+    fn executed_quotes(&self) -> Vec<SwapQuote> {
+        self.executed.lock().expect("swap execute lock").clone()
+    }
+
+    fn with_execute_failure() -> Self {
+        Self {
+            fail_execute: Arc::new(Mutex::new(true)),
+            ..Self::default()
+        }
+    }
+
+    fn with_output_override(amount: TokenAmount) -> Self {
+        Self {
+            output_override: Arc::new(Mutex::new(Some(amount))),
+            ..Self::default()
+        }
+    }
 }
 
 #[async_trait]
@@ -1430,8 +1451,14 @@ impl SwapExecutor for FakeSwapExecutor {
             .lock()
             .expect("swap quote lock")
             .push(request.clone());
+        let expected_output = self
+            .output_override
+            .lock()
+            .expect("output override lock")
+            .clone()
+            .unwrap_or_else(|| TokenAmount::new(request.pair.output.clone(), AmountRaw::new(10)));
         Ok(SwapQuote {
-            expected_output: TokenAmount::new(request.pair.output.clone(), AmountRaw::new(10)),
+            expected_output,
             estimated_fee: Some(TokenAmount::new(usdc(), AmountRaw::new(10_000))),
             expires_at: None,
             request,
@@ -1439,6 +1466,9 @@ impl SwapExecutor for FakeSwapExecutor {
     }
 
     async fn execute_swap(&self, quote: SwapQuote) -> Result<SwapReceipt, AppError> {
+        if *self.fail_execute.lock().expect("swap fail lock") {
+            return Err(AppError::solana("fake swap execute failed"));
+        }
         self.executed
             .lock()
             .expect("swap execute lock")
@@ -1457,11 +1487,23 @@ impl SwapExecutor for FakeSwapExecutor {
 #[derive(Debug, Clone, Default)]
 struct FakeGatewayClient {
     refills: Arc<Mutex<Vec<GatewayRefillRequest>>>,
+    fail_refill: Arc<Mutex<bool>>,
 }
 
 impl FakeGatewayClient {
     fn refill_count(&self) -> usize {
         self.refills.lock().expect("gateway lock").len()
+    }
+
+    fn refill_requests(&self) -> Vec<GatewayRefillRequest> {
+        self.refills.lock().expect("gateway lock").clone()
+    }
+
+    fn with_refill_failure() -> Self {
+        Self {
+            fail_refill: Arc::new(Mutex::new(true)),
+            ..Self::default()
+        }
     }
 }
 
@@ -1483,6 +1525,12 @@ impl GatewayClient for FakeGatewayClient {
             .lock()
             .expect("gateway lock")
             .push(request.clone());
+        if *self.fail_refill.lock().expect("gateway fail lock") {
+            return Err(AppError::external_service(
+                "circle_gateway",
+                "fake gateway refill failed",
+            ));
+        }
         Ok(GatewayReceipt {
             amount: request.amount,
             provider_transfer_id: Some("gateway-transfer".to_owned()),
@@ -2564,5 +2612,425 @@ async fn settlement_repricing_failure_skips_reservation() {
             )
         }),
         "no Submitted settlement events should fire on repricing failure"
+    );
+}
+
+// ---------- Phase 4 Gap 1: Gateway-backed adapter wiring tests ----------
+
+/// Build a config and price book that lets a USDC-output RFQ accept on the
+/// Gateway path: SOL input → USDC output, working_custody:USDC = 0, gateway
+/// USDC seeded.
+fn sol_to_usdc_rfq(amount_raw: u64) -> RfqRequest {
+    RfqRequest {
+        input_mint: sol_mint(),
+        output_mint: usdc_mint(),
+        input_amount_raw: AmountRaw::new(amount_raw),
+        taker_wallet: taker_wallet(),
+        expiry_seconds: Some(30),
+    }
+}
+
+fn relaxed_gateway_path_config() -> AppConfig {
+    let mut config = AppConfig::default();
+    config.risk.max_quote_notional_usd = Decimal::from(1_000);
+    config.risk.max_trade_notional_usd = Decimal::from(1_000);
+    config.risk.max_daily_notional_usd = Decimal::from(10_000);
+    config.risk.max_non_stable_asset_notional_usd = Decimal::from(1_000);
+    relax_asset_notional_limits(&mut config);
+    config
+}
+
+fn gateway_path_price_provider() -> FakePriceProvider {
+    // SOL = $200 reference: 1 SOL = 200 USDC, 1 USDC = 0.005 SOL.
+    FakePriceProvider {
+        prices: Arc::new(HashMap::from([
+            (AssetPair::new(usdc(), sol()), Decimal::new(5, 3)),
+            (AssetPair::new(sol(), usdc()), Decimal::from(200)),
+        ])),
+    }
+}
+
+#[tokio::test]
+async fn settlement_gateway_usdc_path_invokes_real_gateway_adapter() {
+    // Gateway-backed USDC-output path: SOL input → USDC output. Working custody
+    // for USDC is zero so the path resolves to GatewayToDex. The orchestrator
+    // must call FakeGatewayClient::request_refill but skip the swap executor
+    // entirely (output is USDC).
+    let persistence = Arc::new(
+        RuntimePersistence::open_in_memory(AssetRegistry::default()).expect("persistence"),
+    );
+    seed_working_custody(&persistence, &sol(), 200_000_000); // input present
+    seed_gateway_balance(&persistence, &usdc(), 2_000_000_000);
+
+    let zero_usdc_inventory = balance_snapshot(vec![
+        TokenAmount::new(usdc(), AmountRaw::new(0)),
+        TokenAmount::new(sol(), AmountRaw::new(200_000_000)),
+        TokenAmount::new(cbbtc(), AmountRaw::new(0)),
+    ]);
+
+    let gateway = FakeGatewayClient::default();
+    let swap = FakeSwapExecutor::default();
+    let orchestrator = persistent_harness_with_config(
+        relaxed_gateway_path_config(),
+        gateway_path_price_provider(),
+        FakeHtlcClient::default(),
+        swap.clone(),
+        gateway.clone(),
+        FakeBalanceReader::new(vec![zero_usdc_inventory.clone(), zero_usdc_inventory]),
+        RuntimeOrchestratorOptions::default(),
+        Arc::clone(&persistence),
+    )
+    .await;
+
+    // 0.005 SOL input → 1.0 USDC output @ $200/SOL.
+    let response = orchestrator
+        .request_rfq(sol_to_usdc_rfq(5_000_000))
+        .await
+        .expect("request rfq");
+    let quote = match response {
+        RfqResponse::Accepted(quote) => quote,
+        RfqResponse::Rejected(rejection) => panic!("expected accepted: {rejection:?}"),
+    };
+    assert_eq!(quote.execution_path, ExecutionPath::GatewayToDex);
+    let trade = orchestrator
+        .accept_quote(quote.quote_id)
+        .await
+        .expect("settlement succeeds");
+
+    // Adapter contract: gateway.request_refill invoked at least once for USDC
+    // (the in-trade burn). Post-settlement rebalance automation may also
+    // invoke a refill on top of the trade-bound one.
+    assert!(
+        gateway.refill_count() >= 1,
+        "expected at least one trade-bound gateway refill, got {}",
+        gateway.refill_count()
+    );
+    let trade_refill = gateway
+        .refill_requests()
+        .into_iter()
+        .next()
+        .expect("trade-bound refill must be the first call");
+    assert_eq!(trade_refill.amount.asset, usdc());
+    assert_eq!(trade_refill.destination, WalletRole::Maker);
+
+    // No trade-correlated Jupiter swap event for the USDC-output path
+    // (post-settlement automation rebalance swaps may fire but those are
+    // SwapEvent::Quoted/Executed, not the TradeSwap variants).
+    let events = orchestrator.runtime().recent_events(None).await;
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            RuntimeEvent::Swap(SwapEvent::TradeSwapSubmitted { .. })
+                | RuntimeEvent::Swap(SwapEvent::TradeSwapConfirmed { .. })
+        )),
+        "USDC-output gateway path must not emit trade-correlated swap events"
+    );
+
+    // Trade signature kinds must include GatewayBurn + GatewayMint.
+    let kinds: Vec<TradeSignatureKind> = trade.tx_signature_kinds.iter().map(|s| s.kind).collect();
+    assert!(
+        kinds.contains(&TradeSignatureKind::GatewayBurn),
+        "expected GatewayBurn in {kinds:?}",
+    );
+    assert!(
+        kinds.contains(&TradeSignatureKind::GatewayMint),
+        "expected GatewayMint in {kinds:?}",
+    );
+    assert!(
+        !kinds.contains(&TradeSignatureKind::JupiterSwap),
+        "JupiterSwap should not appear for USDC-output gateway path: {kinds:?}",
+    );
+    let summary = orchestrator
+        .ledger_summary()
+        .expect("balanced ledger summary");
+    assert!(summary.balanced, "ledger should be balanced after trade");
+}
+
+#[tokio::test]
+async fn settlement_gateway_sol_path_invokes_real_gateway_and_jupiter() {
+    // Gateway-backed SOL-output path: USDC input → SOL output. Working custody
+    // for SOL is zero so the path resolves to GatewayToDex. The orchestrator
+    // must call FakeGatewayClient::request_refill AND FakeSwapExecutor with a
+    // USDC -> SOL pair.
+    let persistence = Arc::new(
+        RuntimePersistence::open_in_memory(AssetRegistry::default()).expect("persistence"),
+    );
+    seed_working_custody(&persistence, &usdc(), 1_000_000_000); // input present
+    seed_gateway_balance(&persistence, &usdc(), 2_000_000_000);
+
+    let zero_sol_inventory = balance_snapshot(vec![
+        TokenAmount::new(usdc(), AmountRaw::new(1_000_000_000)),
+        TokenAmount::new(sol(), AmountRaw::new(0)),
+        TokenAmount::new(cbbtc(), AmountRaw::new(0)),
+    ]);
+
+    let gateway = FakeGatewayClient::default();
+    // Override swap output so the confirmed amount lands non-zero on SOL —
+    // the orchestrator drives a swap for `input_amount` (USDC), and the fake
+    // would otherwise return SwapQuote.expected_output of 10 lamports.
+    let swap =
+        FakeSwapExecutor::with_output_override(TokenAmount::new(sol(), AmountRaw::new(1_000_000)));
+    let orchestrator = persistent_harness_with_config(
+        relaxed_gateway_path_config(),
+        gateway_path_price_provider(),
+        FakeHtlcClient::default(),
+        swap.clone(),
+        gateway.clone(),
+        FakeBalanceReader::new(vec![zero_sol_inventory.clone(), zero_sol_inventory]),
+        RuntimeOrchestratorOptions::default(),
+        Arc::clone(&persistence),
+    )
+    .await;
+
+    // 200 USDC input → 1.0 SOL output.
+    let response = orchestrator
+        .request_rfq(rfq(200_000_000))
+        .await
+        .expect("request rfq");
+    let quote = match response {
+        RfqResponse::Accepted(quote) => quote,
+        RfqResponse::Rejected(rejection) => panic!("expected accepted: {rejection:?}"),
+    };
+    assert_eq!(quote.execution_path, ExecutionPath::GatewayToDex);
+    let trade = orchestrator
+        .accept_quote(quote.quote_id)
+        .await
+        .expect("settlement succeeds");
+
+    // Gateway invoked at least once for the trade-bound burn (post-settlement
+    // automation may add another refill, which is fine).
+    assert!(gateway.refill_count() >= 1);
+    // Jupiter swap invoked at least once for the trade-bound USDC -> SOL
+    // swap (post-settlement automation may add additional rebalance swaps).
+    assert!(
+        swap.quoted_count() >= 1,
+        "jupiter quote must be requested at least once"
+    );
+    assert!(
+        swap.executed_count() >= 1,
+        "jupiter execute must be invoked at least once"
+    );
+    let trade_swap = swap
+        .executed_quotes()
+        .into_iter()
+        .find(|q| q.request.pair.input == usdc() && q.request.pair.output == sol())
+        .expect("trade-bound USDC -> SOL swap must be executed");
+    assert_eq!(trade_swap.request.source_wallet, WalletRole::Maker);
+    assert_eq!(trade_swap.request.destination_wallet, WalletRole::Maker);
+
+    // Trade signature kinds must include GatewayBurn + GatewayMint + JupiterSwap.
+    let kinds: Vec<TradeSignatureKind> = trade.tx_signature_kinds.iter().map(|s| s.kind).collect();
+    assert!(
+        kinds.contains(&TradeSignatureKind::GatewayBurn),
+        "expected GatewayBurn in {kinds:?}",
+    );
+    assert!(
+        kinds.contains(&TradeSignatureKind::GatewayMint),
+        "expected GatewayMint in {kinds:?}",
+    );
+    assert!(
+        kinds.contains(&TradeSignatureKind::JupiterSwap),
+        "expected JupiterSwap in {kinds:?}",
+    );
+}
+
+#[tokio::test]
+async fn settlement_gateway_failure_releases_reservation_and_does_not_attempt_jupiter() {
+    // FakeGatewayClient configured to fail on request_refill. The orchestrator
+    // must:
+    //   1. Emit Gateway::Failed (the adapter is atomic — neither burn nor
+    //      mint landed, so no compensating BurnFailed move is needed).
+    //   2. NOT invoke the swap executor (failure short-circuits).
+    //   3. NOT submit the maker HTLC leg.
+    //   4. Bubble up an external_service error from accept_quote.
+    let persistence = Arc::new(
+        RuntimePersistence::open_in_memory(AssetRegistry::default()).expect("persistence"),
+    );
+    seed_working_custody(&persistence, &usdc(), 1_000_000_000);
+    seed_gateway_balance(&persistence, &usdc(), 2_000_000_000);
+
+    let zero_sol_inventory = balance_snapshot(vec![
+        TokenAmount::new(usdc(), AmountRaw::new(1_000_000_000)),
+        TokenAmount::new(sol(), AmountRaw::new(0)),
+        TokenAmount::new(cbbtc(), AmountRaw::new(0)),
+    ]);
+
+    let gateway = FakeGatewayClient::with_refill_failure();
+    let swap = FakeSwapExecutor::default();
+    let htlc = FakeHtlcClient::default();
+    let orchestrator = persistent_harness_with_config(
+        relaxed_gateway_path_config(),
+        gateway_path_price_provider(),
+        htlc.clone(),
+        swap.clone(),
+        gateway.clone(),
+        FakeBalanceReader::new(vec![zero_sol_inventory.clone(), zero_sol_inventory]),
+        RuntimeOrchestratorOptions::default(),
+        Arc::clone(&persistence),
+    )
+    .await;
+
+    let response = orchestrator
+        .request_rfq(rfq(200_000_000))
+        .await
+        .expect("request rfq");
+    let quote = match response {
+        RfqResponse::Accepted(quote) => quote,
+        RfqResponse::Rejected(rejection) => panic!("expected accepted: {rejection:?}"),
+    };
+    assert_eq!(quote.execution_path, ExecutionPath::GatewayToDex);
+    let error = orchestrator
+        .accept_quote(quote.quote_id)
+        .await
+        .expect_err("gateway failure must abort settlement");
+    assert!(
+        error.to_string().contains("gateway"),
+        "error should mention gateway: {error}"
+    );
+
+    // Gateway was attempted; jupiter never was; only taker HTLC initiated (no maker).
+    assert_eq!(gateway.refill_count(), 1);
+    assert_eq!(swap.quoted_count(), 0);
+    assert_eq!(swap.executed_count(), 0);
+    assert_eq!(
+        htlc.initiated_count(),
+        1,
+        "taker HTLC initiates before the gateway slice; maker leg must NOT initiate"
+    );
+
+    // Gateway::Failed event fired (atomic adapter failure: no
+    // BurnIntentSubmitted ever published, so no BurnFailed compensation
+    // either; surface the failure for observers via Gateway::Failed).
+    let events = orchestrator.runtime().recent_events(None).await;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, RuntimeEvent::Gateway(GatewayEvent::Failed { .. }))),
+        "expected Gateway::Failed event"
+    );
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            RuntimeEvent::Gateway(GatewayEvent::BurnIntentSubmitted { .. })
+        )),
+        "BurnIntentSubmitted must not fire when request_refill aborts before any on-chain effect"
+    );
+
+    // Ledger reverses the reservation: gateway:USDC restored to its full
+    // seeded value (2 B raw) after burn failure.
+    let gateway_balance = persistence
+        .account_balance(&LedgerAccountId::gateway(usdc()))
+        .expect("gateway balance");
+    assert_eq!(
+        gateway_balance, 2_000_000_000,
+        "gateway:USDC must be fully released back after burn failure"
+    );
+}
+
+#[tokio::test]
+async fn settlement_jupiter_failure_after_gateway_unwinds_pending_dex_spend() {
+    // Gateway succeeds, jupiter fails on execute_swap. The orchestrator must:
+    //   1. Have produced BurnIntentSubmitted + MintConfirmed events
+    //      (working_custody:USDC populated for the trade).
+    //   2. Emit TradeSwapFailed.
+    //   3. NOT submit the maker HTLC leg.
+    //   4. Bubble up the swap error from accept_quote.
+    //   5. Leave the ledger with pending_dex_spend reverted to working_custody.
+    let persistence = Arc::new(
+        RuntimePersistence::open_in_memory(AssetRegistry::default()).expect("persistence"),
+    );
+    seed_working_custody(&persistence, &usdc(), 1_000_000_000);
+    seed_gateway_balance(&persistence, &usdc(), 2_000_000_000);
+
+    let zero_sol_inventory = balance_snapshot(vec![
+        TokenAmount::new(usdc(), AmountRaw::new(1_000_000_000)),
+        TokenAmount::new(sol(), AmountRaw::new(0)),
+        TokenAmount::new(cbbtc(), AmountRaw::new(0)),
+    ]);
+
+    let gateway = FakeGatewayClient::default();
+    let swap = FakeSwapExecutor::with_execute_failure();
+    let htlc = FakeHtlcClient::default();
+    let orchestrator = persistent_harness_with_config(
+        relaxed_gateway_path_config(),
+        gateway_path_price_provider(),
+        htlc.clone(),
+        swap.clone(),
+        gateway.clone(),
+        FakeBalanceReader::new(vec![zero_sol_inventory.clone(), zero_sol_inventory]),
+        RuntimeOrchestratorOptions::default(),
+        Arc::clone(&persistence),
+    )
+    .await;
+
+    let response = orchestrator
+        .request_rfq(rfq(200_000_000))
+        .await
+        .expect("request rfq");
+    let quote = match response {
+        RfqResponse::Accepted(quote) => quote,
+        RfqResponse::Rejected(rejection) => panic!("expected accepted: {rejection:?}"),
+    };
+    assert_eq!(quote.execution_path, ExecutionPath::GatewayToDex);
+    let error = orchestrator
+        .accept_quote(quote.quote_id)
+        .await
+        .expect_err("jupiter failure must abort settlement");
+    assert!(
+        error.to_string().to_lowercase().contains("jupiter")
+            || error.to_string().to_lowercase().contains("swap"),
+        "error should mention swap/jupiter: {error}"
+    );
+
+    // Gateway succeeded (refill called once), Jupiter quoted + execute attempted.
+    assert_eq!(gateway.refill_count(), 1);
+    assert_eq!(swap.quoted_count(), 1);
+    assert_eq!(
+        swap.executed_count(),
+        0,
+        "execute_swap returned Err so the recorded list stays empty"
+    );
+    assert_eq!(
+        htlc.initiated_count(),
+        1,
+        "only the taker HTLC initiates; maker leg must NOT initiate after swap failure"
+    );
+
+    // Both Gateway success events landed; TradeSwapFailed event landed.
+    let events = orchestrator.runtime().recent_events(None).await;
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            RuntimeEvent::Gateway(GatewayEvent::BurnIntentSubmitted { .. })
+        )),
+        "expected Gateway::BurnIntentSubmitted",
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            RuntimeEvent::Gateway(GatewayEvent::MintConfirmed { .. })
+        )),
+        "expected Gateway::MintConfirmed",
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, RuntimeEvent::Swap(SwapEvent::TradeSwapFailed { .. }))),
+        "expected Swap::TradeSwapFailed",
+    );
+
+    // Ledger should reverse pending_dex_spend → working_custody for USDC.
+    // The trade-qualified pending_dex_spend account nets to zero after the
+    // unwind. (Aggregate by account type so the test does not need to know
+    // the trade_id qualifier string.)
+    let pending_dex_spend = persistence
+        .aggregate_balance_by_type(
+            firmament::ledger::LedgerAccountType::PendingDexSpend,
+            &usdc(),
+        )
+        .expect("pending_dex_spend aggregate");
+    assert_eq!(
+        pending_dex_spend, 0,
+        "pending_dex_spend should be unwound after swap failure"
     );
 }
