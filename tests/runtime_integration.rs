@@ -3152,6 +3152,14 @@ fn native_top_up_low_sol_inventory() -> BalanceSnapshot {
     ])
 }
 
+fn native_top_up_low_sol_zero_usdc_inventory() -> BalanceSnapshot {
+    balance_snapshot(vec![
+        TokenAmount::new(usdc(), AmountRaw::new(0)),
+        TokenAmount::new(sol(), AmountRaw::new(10_000_000)),
+        TokenAmount::new(cbbtc(), AmountRaw::new(0)),
+    ])
+}
+
 fn excess_deposit_config() -> AppConfig {
     let mut config = relaxed_default_config();
     config.gateway.usdc_excess_deposit_threshold_raw = AmountRaw::new(12_000_000);
@@ -3506,6 +3514,109 @@ async fn native_top_up_worker_fires_when_native_sol_low() {
         usdc_to_sol_swap || swap.executed_count() >= 1,
         "expected the native top-up flow to invoke the swap executor"
     );
+}
+
+#[tokio::test]
+async fn native_top_up_chains_gateway_refill_when_working_usdc_short() {
+    let gateway = FakeGatewayClient::default();
+    let swap = FakeSwapExecutor::default();
+    let orchestrator = harness(
+        FakePriceProvider::default(),
+        FakeHtlcClient::default(),
+        swap.clone(),
+        gateway.clone(),
+        FakeBalanceReader::new(vec![
+            quote_inventory(),
+            native_top_up_low_sol_zero_usdc_inventory(),
+        ]),
+        RuntimeOrchestratorOptions::default(),
+    )
+    .await;
+
+    let response = orchestrator
+        .request_rfq(rfq(1_000_000))
+        .await
+        .expect("seed price book via RFQ");
+    assert!(matches!(response, RfqResponse::Accepted(_)));
+
+    orchestrator
+        .run_native_top_up_check()
+        .await
+        .expect("native top-up check");
+
+    assert_eq!(gateway.refill_count(), 1);
+    assert_eq!(
+        gateway.refill_requests()[0].amount.amount_raw,
+        AmountRaw::new(1_000_000)
+    );
+    assert_eq!(swap.executed_count(), 1);
+}
+
+#[tokio::test]
+async fn native_top_up_skips_gateway_when_working_usdc_sufficient() {
+    let gateway = FakeGatewayClient::default();
+    let swap = FakeSwapExecutor::default();
+    let orchestrator = harness(
+        FakePriceProvider::default(),
+        FakeHtlcClient::default(),
+        swap.clone(),
+        gateway.clone(),
+        FakeBalanceReader::new(vec![quote_inventory(), native_top_up_low_sol_inventory()]),
+        RuntimeOrchestratorOptions::default(),
+    )
+    .await;
+
+    let response = orchestrator
+        .request_rfq(rfq(1_000_000))
+        .await
+        .expect("seed price book via RFQ");
+    assert!(matches!(response, RfqResponse::Accepted(_)));
+
+    orchestrator
+        .run_native_top_up_check()
+        .await
+        .expect("native top-up check");
+
+    assert_eq!(gateway.refill_count(), 0);
+    assert_eq!(swap.executed_count(), 1);
+}
+
+#[tokio::test]
+async fn native_top_up_failure_in_gateway_skips_swap() {
+    let gateway = FakeGatewayClient::with_refill_failure();
+    let swap = FakeSwapExecutor::default();
+    let orchestrator = harness(
+        FakePriceProvider::default(),
+        FakeHtlcClient::default(),
+        swap.clone(),
+        gateway.clone(),
+        FakeBalanceReader::new(vec![
+            quote_inventory(),
+            native_top_up_low_sol_zero_usdc_inventory(),
+        ]),
+        RuntimeOrchestratorOptions::default(),
+    )
+    .await;
+
+    let response = orchestrator
+        .request_rfq(rfq(1_000_000))
+        .await
+        .expect("seed price book via RFQ");
+    assert!(matches!(response, RfqResponse::Accepted(_)));
+
+    orchestrator
+        .run_native_top_up_check()
+        .await
+        .expect("native top-up check records gateway failure");
+
+    assert_eq!(gateway.refill_count(), 1);
+    assert_eq!(swap.executed_count(), 0);
+    let events = orchestrator.runtime().recent_events(None).await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        RuntimeEvent::Gateway(GatewayEvent::Failed { reason, .. })
+            if reason.contains("fake gateway refill failed")
+    )));
 }
 
 #[tokio::test]

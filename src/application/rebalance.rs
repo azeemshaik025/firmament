@@ -342,19 +342,78 @@ pub fn decide_native_sol_top_up(
     let desired_notional = raw_to_units(shortfall_raw, sol_position.decimals)
         * sol_position.price_usd.max(Decimal::ZERO);
 
-    match plan_capped_swap(SwapPlanInput {
-        snapshot,
-        kind: AutomationActionKind::NativeSolTopUp,
-        pair: AssetPair::new(policy.usdc_asset.clone(), policy.sol_asset.clone()),
-        desired_notional_usd: desired_notional,
-        state,
-        limits,
-        now,
-        reason: "native SOL gas top-up".to_owned(),
-    }) {
-        Ok(plan) => RebalanceDecision::Swap(plan),
-        Err(reason) => RebalanceDecision::NoAction { reason },
+    if desired_notional <= Decimal::ZERO {
+        return RebalanceDecision::NoAction {
+            reason: DecisionBlockReason::ZeroAmount,
+        };
     }
+
+    let pair = AssetPair::new(policy.usdc_asset.clone(), policy.sol_asset.clone());
+    let key = ActionKey {
+        kind: AutomationActionKind::NativeSolTopUp,
+        source_asset: pair.input.clone(),
+        dest_asset: pair.output.clone(),
+    };
+    if let Err(reason) = guard_action(state, limits, &key, now) {
+        return RebalanceDecision::NoAction { reason };
+    }
+
+    let inventory_policy = inventory_policy_from_limits(limits);
+    if !snapshot.has_native_sol_gas_buffer(&inventory_policy) {
+        return RebalanceDecision::NoAction {
+            reason: DecisionBlockReason::NativeGasBufferInsufficient,
+        };
+    }
+
+    let Some(source) = snapshot.position(&pair.input) else {
+        return RebalanceDecision::NoAction {
+            reason: DecisionBlockReason::UnsupportedAsset,
+        };
+    };
+    if source.price_usd <= Decimal::ZERO {
+        return RebalanceDecision::NoAction {
+            reason: DecisionBlockReason::UnsupportedAsset,
+        };
+    }
+
+    let (capped_notional, uses_non_stable_asset_exception) =
+        cap_notional_for_pair(&pair, desired_notional, state, limits);
+    if state.cumulative_spend_usd + capped_notional > limits.max_cumulative_automation_notional_usd
+    {
+        return RebalanceDecision::NoAction {
+            reason: DecisionBlockReason::CumulativeCapExceeded,
+        };
+    }
+
+    let requested_raw = units_to_raw_floor(capped_notional / source.price_usd, source.decimals);
+    if requested_raw.is_zero() {
+        return RebalanceDecision::NoAction {
+            reason: DecisionBlockReason::ZeroAmount,
+        };
+    }
+
+    let estimated_notional_usd = raw_to_units(requested_raw, source.decimals) * source.price_usd;
+    if estimated_notional_usd <= Decimal::ZERO {
+        return RebalanceDecision::NoAction {
+            reason: DecisionBlockReason::ZeroAmount,
+        };
+    }
+    if state.cumulative_spend_usd + estimated_notional_usd
+        > limits.max_cumulative_automation_notional_usd
+    {
+        return RebalanceDecision::NoAction {
+            reason: DecisionBlockReason::CumulativeCapExceeded,
+        };
+    }
+
+    RebalanceDecision::Swap(PlannedSwap {
+        kind: AutomationActionKind::NativeSolTopUp,
+        pair: pair.clone(),
+        input_amount: TokenAmount::new(pair.input, requested_raw),
+        estimated_notional_usd,
+        uses_non_stable_asset_exception,
+        reason: "native SOL gas top-up".to_owned(),
+    })
 }
 
 /// Decide whether the working wallet needs a Gateway USDC refill.

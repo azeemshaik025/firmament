@@ -31,13 +31,15 @@ use crate::domain::events::{
     EventMetadata, GatewayEvent, InventoryEvent, QuoteEvent, RuntimeEvent, SettlementEvent,
     SwapEvent, SystemEvent,
 };
-use crate::domain::inventory::{InventoryPolicy, InventorySnapshot as ValuedInventorySnapshot};
+use crate::domain::inventory::{
+    InventoryPolicy, InventorySnapshot as ValuedInventorySnapshot, raw_to_units,
+};
 use crate::domain::quote_engine::InventorySnapshot as QuoteInventorySnapshot;
 use crate::domain::settlement::{SettlementTerms, TwoSidedSettlement};
 use crate::domain::types::{
-    AmountRaw, AssetId, BalanceSnapshot, ExecutionPath, ExternalHtlcInitiation, QuoteId,
-    SettlementStatus, TokenAmount, TradeId, TxSignature, UnsignedWalletTransaction, WalletAddress,
-    WalletRole,
+    AmountRaw, AssetId, BalanceSnapshot, ExecutionPath, ExternalHtlcInitiation,
+    GatewayRefillRequest, QuoteId, SettlementStatus, TokenAmount, TradeId, TxSignature,
+    UnsignedWalletTransaction, WalletAddress, WalletRole,
 };
 use crate::error::{AppError, AppResult};
 use crate::ports::{BalanceReader, GatewayClient, HtlcClient, PriceProvider, SwapExecutor};
@@ -2052,6 +2054,12 @@ impl RuntimeOrchestrator {
             OffsetDateTime::now_utc(),
         ) {
             RebalanceDecision::Swap(plan) => {
+                if !self
+                    .ensure_native_top_up_usdc(&plan, inventory, &limits, summary)
+                    .await?
+                {
+                    return Ok(());
+                }
                 if self.submit_swap_plan(plan, &limits).await? {
                     summary.completed_swaps += 1;
                 }
@@ -2064,6 +2072,48 @@ impl RuntimeOrchestrator {
         }
 
         Ok(())
+    }
+
+    async fn ensure_native_top_up_usdc(
+        &self,
+        plan: &PlannedSwap,
+        inventory: &ValuedInventorySnapshot,
+        limits: &AutomationLimits,
+        summary: &mut AutomationRunSummary,
+    ) -> AppResult<bool> {
+        if plan.kind != AutomationActionKind::NativeSolTopUp || plan.pair.input.as_str() != "USDC" {
+            return Ok(true);
+        }
+
+        let working_usdc = inventory.raw_balance(&plan.pair.input);
+        if working_usdc.as_u64() >= plan.input_amount.amount_raw.as_u64() {
+            return Ok(true);
+        }
+
+        let shortfall = AmountRaw::new(
+            plan.input_amount
+                .amount_raw
+                .as_u64()
+                .saturating_sub(working_usdc.as_u64()),
+        );
+        if shortfall.is_zero() {
+            return Ok(true);
+        }
+
+        let refill_plan = GatewayRefillPlan {
+            request: GatewayRefillRequest {
+                amount: TokenAmount::new(plan.pair.input.clone(), shortfall),
+                destination: WalletRole::Maker,
+            },
+            estimated_notional_usd: raw_to_units(shortfall, 6),
+        };
+
+        if self.submit_gateway_plan(refill_plan, limits).await? {
+            summary.completed_gateway_refills += 1;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     async fn run_gateway_refill(
