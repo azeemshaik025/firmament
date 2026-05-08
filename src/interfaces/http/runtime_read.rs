@@ -196,12 +196,7 @@ fn settlement_status_str(status: SettlementStatus) -> &'static str {
 /// display reflects ledger drift directly.
 pub(crate) fn format_signed_decimal(amount_raw: i128, decimals: u8) -> String {
     let negative = amount_raw < 0;
-    let absolute_i128 = if negative {
-        amount_raw.unsigned_abs()
-    } else {
-        amount_raw as u128
-    };
-    let mut absolute = absolute_i128;
+    let mut absolute = amount_raw.unsigned_abs();
 
     if decimals == 0 {
         let mut display = absolute.to_string();

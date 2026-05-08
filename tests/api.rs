@@ -356,12 +356,7 @@ async fn ledger_endpoint_rejects_unknown_account_type() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = response_json(response).await;
     assert_eq!(body["error"]["code"], "invalid_account_type");
-    assert!(
-        body["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("foo")
-    );
+    assert!(body["error"]["message"].as_str().unwrap().contains("foo"));
 }
 
 /// Build a router and return its underlying persistence handle so privacy
@@ -414,19 +409,15 @@ async fn ledger_endpoint_omits_wallet_addresses() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
 
-    let demo_taker_wallet = "DemoTaker111111111111111111111111111111111111";
-    let demo_maker_wallet = "DemoMaker111111111111111111111111111111111111";
-    let demo_operator_wallet = "DemoOperator11111111111111111111111111111111";
-    let demo_gateway_wallet = "DemoGateway111111111111111111111111111111111";
-    let banned = [
-        demo_taker_wallet,
-        demo_maker_wallet,
-        demo_operator_wallet,
-        demo_gateway_wallet,
+    let banned_wallets = [
+        "DemoTaker111111111111111111111111111111111111",
+        "DemoMaker111111111111111111111111111111111111",
+        "DemoOperator11111111111111111111111111111111",
+        "DemoGateway111111111111111111111111111111111",
     ];
 
     walk_json_strings(&body, &mut |value| {
-        for banned in &banned {
+        for banned in &banned_wallets {
             assert!(
                 !value.contains(banned),
                 "ledger response leaked wallet address {banned}: {value}"
@@ -437,18 +428,16 @@ async fn ledger_endpoint_omits_wallet_addresses() {
         // dashes) and signatures (86-88 chars) are explicitly allowed.
         // Reject any pubkey-shaped string that does not appear in the
         // documented allow-list (asset IDs, account-type tags, etc).
-        if (value.len() == 43 || value.len() == 44) && is_base58_alphabet(value) {
-            panic!("ledger response leaked Solana-pubkey-shaped string: {value}");
-        }
+        assert!(
+            !((value.len() == 43 || value.len() == 44) && is_base58_alphabet(value)),
+            "ledger response leaked Solana-pubkey-shaped string: {value}"
+        );
     });
 }
 
 fn is_base58_alphabet(value: &str) -> bool {
     const BASE58: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-    !value.is_empty()
-        && value
-            .bytes()
-            .all(|byte| BASE58.iter().any(|allowed| *allowed == byte))
+    !value.is_empty() && value.bytes().all(|byte| BASE58.contains(&byte))
 }
 
 fn walk_json_strings(value: &Value, visitor: &mut impl FnMut(&str)) {
@@ -550,7 +539,10 @@ async fn drive_completed_trade(app: axum::Router) -> serde_json::Value {
         .await
         .expect("response");
     let quote_body = response_json(response).await;
-    let quote_id = quote_body["quote_id"].as_str().expect("quote id").to_owned();
+    let quote_id = quote_body["quote_id"]
+        .as_str()
+        .expect("quote id")
+        .to_owned();
 
     let response = app
         .clone()
@@ -742,20 +734,14 @@ async fn trades_endpoint_includes_tx_signatures_with_kinds() {
             "unexpected tx_signatures.kind '{kind}'"
         );
     }
+    assert!(kinds.contains(&"taker_lock"), "expected taker_lock kind");
+    assert!(kinds.contains(&"maker_lock"), "expected maker_lock kind");
     assert!(
-        kinds.iter().any(|k| *k == "taker_lock"),
-        "expected taker_lock kind"
-    );
-    assert!(
-        kinds.iter().any(|k| *k == "maker_lock"),
-        "expected maker_lock kind"
-    );
-    assert!(
-        kinds.iter().any(|k| *k == "taker_redeem"),
+        kinds.contains(&"taker_redeem"),
         "expected taker_redeem kind"
     );
     assert!(
-        kinds.iter().any(|k| *k == "maker_redeem"),
+        kinds.contains(&"maker_redeem"),
         "expected maker_redeem kind"
     );
     for sig in signatures {
@@ -896,9 +882,7 @@ struct FakeHtlcClient {
 fn fake_leg_for_funder(funder: WalletRole) -> SettlementLeg {
     match funder {
         WalletRole::Maker => SettlementLeg::MakerOutput,
-        WalletRole::Taker | WalletRole::Operator | WalletRole::Gateway => {
-            SettlementLeg::TakerInput
-        }
+        WalletRole::Taker | WalletRole::Operator | WalletRole::Gateway => SettlementLeg::TakerInput,
     }
 }
 

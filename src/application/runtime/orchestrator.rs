@@ -170,9 +170,10 @@ impl TradeSignatureKind {
     ) -> Option<Self> {
         use crate::domain::settlement::SettlementLeg;
         match (leg, status) {
-            (SettlementLeg::TakerInput, SettlementStatus::Initiated | SettlementStatus::Pending) => {
-                Some(Self::TakerLock)
-            }
+            (
+                SettlementLeg::TakerInput,
+                SettlementStatus::Initiated | SettlementStatus::Pending,
+            ) => Some(Self::TakerLock),
             (
                 SettlementLeg::MakerOutput,
                 SettlementStatus::Initiated | SettlementStatus::Pending,
@@ -896,7 +897,9 @@ impl RuntimeOrchestrator {
         // The browser-driven path posts the signed taker tx via
         // `record_external_initiate`, which already confirms the signature
         // before returning, so for v1 we treat the submission as confirmed.
-        let confirmation = state.settlement.confirm_taker_lock(self.app_state.run_id())?;
+        let confirmation = state
+            .settlement
+            .confirm_taker_lock(self.app_state.run_id())?;
         self.publish(RuntimeEvent::Settlement(confirmation.event))
             .await?;
 
@@ -922,7 +925,9 @@ impl RuntimeOrchestrator {
         // TODO(v0.2): wire real confirmation polling for the wallet flow.
         // The maker leg uses `initiate_with_external_redeemer` which submits
         // and signs locally; for v1 we treat the submission as confirmed.
-        let confirmation = state.settlement.confirm_maker_lock(self.app_state.run_id())?;
+        let confirmation = state
+            .settlement
+            .confirm_maker_lock(self.app_state.run_id())?;
         self.publish(RuntimeEvent::Settlement(confirmation.event))
             .await?;
 
@@ -1203,8 +1208,7 @@ impl RuntimeOrchestrator {
     /// Return up to `limit` of the most recently created in-memory trades,
     /// sorted newest-first by `created_at`.
     pub async fn recent_trades(&self, limit: usize) -> Vec<RuntimeTrade> {
-        let mut trades: Vec<RuntimeTrade> =
-            self.trades.read().await.values().cloned().collect();
+        let mut trades: Vec<RuntimeTrade> = self.trades.read().await.values().cloned().collect();
         trades.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         trades.truncate(limit);
         trades
@@ -1737,11 +1741,7 @@ impl RuntimeOrchestrator {
                 .find(|asset| asset.enabled && asset.id == usdc)
                 .map_or(6, |asset| asset.decimals);
             let pair = crate::domain::types::AssetPair::new(usdc.clone(), output_asset.id.clone());
-            let Ok(reference_price) = self
-                .adapters
-                .price_provider
-                .reference_price(pair)
-                .await
+            let Ok(reference_price) = self.adapters.price_provider.reference_price(pair).await
             else {
                 // No price route from USDC to the output asset. The Gateway
                 // path requires a feasible Jupiter route in the live runtime;
@@ -1768,7 +1768,10 @@ impl RuntimeOrchestrator {
             .iter_mut()
             .find(|amount| amount.asset == output_asset.id)
         {
-            let combined = entry.amount_raw.as_u64().saturating_add(synthetic_output_raw);
+            let combined = entry
+                .amount_raw
+                .as_u64()
+                .saturating_add(synthetic_output_raw);
             entry.amount_raw = AmountRaw::new(combined);
         } else {
             inventory.balances.push(TokenAmount::new(
