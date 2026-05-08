@@ -1,10 +1,11 @@
 import './polyfills';
+import { lazy, Suspense } from 'react';
 import ReactDOM from 'react-dom/client';
 import { BrowserRouter, NavLink, Route, Routes } from 'react-router-dom';
 import './styles.css';
-import { RuntimePage } from './pages/RuntimePage';
-import { SolanaWalletProvider } from './SolanaWalletProvider';
-import { SwapPage } from './pages/SwapPage';
+
+const SwapRoute = lazy(() => import('./pages/SwapRoute'));
+const RuntimePage = lazy(() => import('./pages/RuntimePage').then((module) => ({ default: module.RuntimePage })));
 
 function Shell() {
   return (
@@ -27,10 +28,12 @@ function Shell() {
         </nav>
       </header>
       <div className="app-main">
-        <Routes>
-          <Route path="/" element={<SwapPage />} />
-          <Route path="/runtime" element={<RuntimePage />} />
-        </Routes>
+        <Suspense fallback={<div className="route-loading" role="status">Loading console</div>}>
+          <Routes>
+            <Route path="/" element={<SwapRoute />} />
+            <Route path="/runtime" element={<RuntimePage />} />
+          </Routes>
+        </Suspense>
       </div>
       <ConsoleFooter />
     </div>
@@ -76,8 +79,16 @@ function ConsoleFooter() {
   );
 }
 
-ReactDOM.createRoot(document.getElementById('root')!).render(
-  <SolanaWalletProvider>
+async function loadRuntimeEnv() {
+  try {
+    await import(/* @vite-ignore */ `${import.meta.env.BASE_URL}runtime-env.js`);
+  } catch {
+    // VITE_SOLANA_RPC_URL and the public mainnet endpoint remain fallback paths.
+  }
+}
+
+function renderApp() {
+  ReactDOM.createRoot(document.getElementById('root')!).render(
     <BrowserRouter
       basename="/app"
       future={{
@@ -87,5 +98,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     >
       <Shell />
     </BrowserRouter>
-  </SolanaWalletProvider>
-);
+  );
+}
+
+void loadRuntimeEnv().finally(renderApp);

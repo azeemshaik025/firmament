@@ -11,13 +11,18 @@
   "api": {
     "openapi": "openapi.yaml",
     "playground": {
-      "display": "none"
+      "display": "interactive",
+      "proxy": true
     },
     "params": {
       "expanded": "closed"
     },
+    "url": "full",
     "examples": {
-      "autogenerate": false
+      "languages": ["curl", "javascript"],
+      "defaults": "required",
+      "prefill": true,
+      "autogenerate": true
     }
   },
   "navigation": {
@@ -28,7 +33,7 @@
       },
       {
         "group": "Get Started",
-        "pages": ["quickstart", "swap-flow"]
+        "pages": ["quickstart", "maker-setup", "swap-flow"]
       },
       {
         "group": "Runtime Proof",

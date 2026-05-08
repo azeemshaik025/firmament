@@ -24,6 +24,9 @@ Store these in `.env`:
 - `JUPITER_API_KEY` when Jupiter is enabled
 - `CIRCLE_GATEWAY_SOLANA_ADDRESS` when Gateway is enabled
 
+The maker wallet and `CIRCLE_GATEWAY_SOLANA_ADDRESS` must refer to the same
+approved Solana depositor for Gateway deposit/refill smoke tests.
+
 Admin auth secrets are separate and are not part of the public API docs.
 
 ## Required policy
@@ -38,7 +41,13 @@ Store these in `config.toml`:
 - Gateway refill thresholds
 - reconciliation dust thresholds
 
-The sample config uses `VERIFY_CBBTC_SOLANA_MINT_BEFORE_LIVE_USE` for cbBTC. Replace it with the verified Solana cbBTC mint before enabling live workers.
+The sample config uses `VERIFY_CBBTC_SOLANA_MINT_BEFORE_LIVE_USE` for cbBTC. Replace it before enabling live workers. Coinbase currently lists the Solana cbBTC mint as:
+
+```text
+cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij
+```
+
+Do not raise caps just to make a route pass. Check Jupiter route minimums first.
 
 ## Operating checks
 
@@ -52,3 +61,13 @@ Before and after a live run, inspect:
 - `/v1/runtime/trades`
 
 Keep live demo caps small. Do not raise caps to force a route through.
+
+Run non-mutating checks first:
+
+```bash
+scripts/smoke.sh all-non-mutating
+```
+
+Mutating groups such as `gateway-deposit`, `gateway-refill`, `jupiter-swap`,
+`jupiter-cbbtc-swap`, `live-cbbtc-rfq`, and `live-gateway-cbbtc-rfq` spend real
+mainnet funds. They require explicit `RUN_LIVE_*` opt-ins.

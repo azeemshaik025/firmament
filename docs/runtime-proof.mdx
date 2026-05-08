@@ -23,7 +23,7 @@ curl 'http://127.0.0.1:5050/v1/runtime/ledger?account_type=working_custody'
 
 ## Trades
 
-`GET /v1/runtime/trades` returns recent in-memory trade summaries, newest first. It includes total count, successful count, input/output amounts, settlement status, and trade-bound signatures.
+`GET /v1/runtime/trades` returns recent in-memory trade summaries, newest first. It includes total count, successful count, input/output amounts, settlement status, and trade-bound signatures. Background rebalance signatures are excluded from trade rows.
 
 Trade summaries are in-memory. A restart clears them.
 

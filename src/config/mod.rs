@@ -540,7 +540,7 @@ impl Default for JupiterConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            base_url: "https://lite-api.jup.ag".to_owned(),
+            base_url: "https://api.jup.ag/swap/v2".to_owned(),
             max_slippage_bps: 50,
             quote_timeout_millis: 2_000,
         }

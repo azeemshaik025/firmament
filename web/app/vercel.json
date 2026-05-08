@@ -1,0 +1,58 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "redirects": [
+    {
+      "source": "/",
+      "destination": "/app",
+      "permanent": false
+    }
+  ],
+  "rewrites": [
+    {
+      "source": "/v1/:path*",
+      "destination": "https://api.firmament.shaikazeem.com/v1/:path*"
+    },
+    {
+      "source": "/health",
+      "destination": "https://api.firmament.shaikazeem.com/health"
+    },
+    {
+      "source": "/app/assets/:path*",
+      "destination": "/assets/:path*"
+    },
+    {
+      "source": "/app/fonts/:path*",
+      "destination": "/fonts/:path*"
+    },
+    {
+      "source": "/app/runtime-env.js",
+      "destination": "/runtime-env.js"
+    },
+    {
+      "source": "/app/favicon.svg",
+      "destination": "/favicon.svg"
+    },
+    {
+      "source": "/app/social-card.svg",
+      "destination": "/social-card.svg"
+    },
+    {
+      "source": "/app/firmament-submission-logo.png",
+      "destination": "/firmament-submission-logo.png"
+    },
+    {
+      "source": "/app/firmament-submission-logo.svg",
+      "destination": "/firmament-submission-logo.svg"
+    },
+    {
+      "source": "/app/:path*",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/app",
+      "destination": "/index.html"
+    }
+  ]
+}

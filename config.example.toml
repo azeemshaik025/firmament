@@ -63,7 +63,7 @@ require_taker_allowlist = false
 
 [jupiter]
 enabled = true
-base_url = "https://lite-api.jup.ag"
+base_url = "https://api.jup.ag/swap/v2"
 max_slippage_bps = 50
 quote_timeout_millis = 2_000
 

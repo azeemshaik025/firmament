@@ -28,6 +28,24 @@ Confirm before live mode:
 - maker wallet is funded only for the planned tiny run
 - caps match the demo policy
 
+## Production surface polish
+
+Run the static and production-build checks before recording or submitting:
+
+```bash
+npm run web:polish
+npm run app:build
+npm run landing:build
+npm run docs:check
+```
+
+Manually hard refresh the deployed landing page, `/app`, `/app/runtime`, and
+`/docs` with cache disabled. Confirm the Firmament wordmark does not visibly
+swap from a fallback font, the `/app` and `/docs` links resolve from the landing
+domain, the browser tab shows the custom Firmament favicon instead of the
+deployment default, and mobile screenshots have no clipped buttons, counters, or
+headings.
+
 ## Logs
 
 ```bash

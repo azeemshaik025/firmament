@@ -5,7 +5,8 @@ description: "Run the local API, web app, and runtime reads."
 
 # Quickstart
 
-Use this flow to start the local API and web app.
+Use this flow to start the local API and web app. This is the safe path for a
+new checkout.
 
 ## 1. Prepare config
 
@@ -15,6 +16,8 @@ cp config.example.toml config.toml
 ```
 
 Secrets stay in `.env`. Non-secret policy stays in `config.toml`.
+The copied `.env` contains empty placeholders. They are harmless while protocol
+workers are disabled, but live mode requires real values.
 
 Default config uses:
 
@@ -32,7 +35,9 @@ With protocol workers disabled, the backend serves health and runtime projection
 cargo run
 ```
 
-The backend starts the Axum API and in-memory runtime projection.
+The backend starts the Axum API and runtime projection. With the default
+`runtime.enable_protocol_workers = false`, it does not sign transactions or call
+Jupiter/Circle.
 
 ## 3. Start the web app
 
@@ -52,7 +57,19 @@ Runtime view:
 http://127.0.0.1:3000/app/runtime
 ```
 
-## 4. Inspect public runtime routes
+## 4. Start the API docs
+
+```bash
+npm run docs:dev
+```
+
+Open the local docs URL printed by Mintlify. The Backend Reference pages include
+an interactive Try it panel. It defaults to the deployed API at
+`https://api.firmament.shaikazeem.com`. Choose the local `127.0.0.1:5050`
+server in a local docs preview when testing against your own `cargo run`
+backend.
+
+## 5. Inspect public runtime routes
 
 ```bash
 curl http://127.0.0.1:5050/health
@@ -64,10 +81,14 @@ curl http://127.0.0.1:5050/v1/runtime/ledger
 curl 'http://127.0.0.1:5050/v1/runtime/trades?limit=10'
 ```
 
-## 5. Request a friendly RFQ
+## 6. Request a friendly RFQ
 
 The friendly request shape uses asset symbols and a decimal `amount`.
 Asset identifiers are case-insensitive.
+
+In default local mode this route returns `503 service_unavailable` because the
+live orchestrator is not attached. That is expected. Use it to verify request
+shape and error handling before enabling live maker mode.
 
 ```bash
 curl -X POST http://127.0.0.1:5050/v1/rfq \
@@ -75,8 +96,8 @@ curl -X POST http://127.0.0.1:5050/v1/rfq \
   -d '{
     "input_asset": "USDC",
     "output_asset": "SOL",
-    "amount": "0.001",
-    "taker_wallet": "DemoTaker111111111111111111111111111111111111",
+    "amount": "1.00",
+    "taker_wallet": "11111111111111111111111111111111",
     "expiry_seconds": 30
   }'
 ```
@@ -90,7 +111,8 @@ The legacy mint/raw-amount request shape (`input_mint`, `output_mint`,
 
 ## Live RFQ mode
 
-To run live RFQ and settlement, configure:
+To run live RFQ and settlement, follow [Maker setup](/maker-setup). At minimum,
+configure:
 
 - `SOLANA_RPC_URL`
 - exactly one maker keypair source

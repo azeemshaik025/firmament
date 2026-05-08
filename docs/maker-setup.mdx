@@ -1,0 +1,272 @@
+---
+title: "Maker setup"
+description: "Configure a live Firmament maker safely."
+---
+
+# Maker setup
+
+This page is for operators who want to run their own Firmament maker. It covers
+the live setup path. Start with tiny caps, prove the runtime, then adjust policy.
+
+## Prerequisites
+
+- Rust 1.85 or newer.
+- Node.js and npm.
+- A Solana mainnet RPC URL.
+- One maker Solana wallet. This wallet owns working inventory and pays gas.
+- A browser Solana wallet for taker testing.
+- A Jupiter API key if `jupiter.enabled = true`.
+- A Circle Gateway Solana depositor address if `gateway.enabled = true`.
+- USDC and enough SOL for gas in the maker wallet.
+
+## 1. Create local files
+
+```bash
+cp .env.example .env
+cp config.example.toml config.toml
+```
+
+Do not commit `.env`, `config.toml`, `runtime.sqlite`, or demo evidence with
+secrets.
+
+## 2. Fill `.env`
+
+Set the RPC URL:
+
+```bash
+SOLANA_RPC_URL=https://your-mainnet-rpc.example
+```
+
+Set exactly one maker keypair source:
+
+```bash
+MAKER_PRIVATE_KEY=<base58-solana-private-key>
+```
+
+or:
+
+```bash
+MAKER_KEYPAIR_PATH=/absolute/path/to/maker-keypair.json
+```
+
+or:
+
+```bash
+MAKER_KEYPAIR_JSON=[1,2,3,...]
+```
+
+Add adapter credentials when the adapters are enabled:
+
+```bash
+JUPITER_API_KEY=<jupiter-api-key>
+CIRCLE_GATEWAY_SOLANA_ADDRESS=<approved-solana-gateway-depositor>
+```
+
+The web app uses the browser wallet for taker settlement. `TAKER_PRIVATE_KEY`,
+`TAKER_KEYPAIR_PATH`, and `TAKER_KEYPAIR_JSON` are only for legacy local-signing
+tests.
+
+## 3. Set asset policy
+
+Open `config.toml`.
+
+Keep these caps small for first runs:
+
+```toml
+[assets.policy]
+max_action_notional_usd = "2"
+max_cumulative_automation_notional_usd = "15"
+non_stable_asset_exception_notional_usd = "5"
+
+[risk]
+max_quote_notional_usd = "2"
+max_trade_notional_usd = "2"
+max_daily_notional_usd = "15"
+max_non_stable_asset_notional_usd = "5"
+```
+
+USDC and SOL are already configured for Solana mainnet. cbBTC ships with a
+placeholder so nobody accidentally enables live mode against an unverified mint.
+Replace it before live mode:
+
+```toml
+[[assets.supported]]
+id = "cbBTC"
+symbol = "cbBTC"
+mint = "cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij"
+decimals = 8
+enabled = true
+```
+
+Coinbase currently lists that address for cbBTC on Solana. Check Jupiter
+liquidity and route minimums before a cbBTC demo.
+
+## 4. Choose pairs
+
+Every enabled asset can quote against every other enabled asset by default:
+
+- USDC to SOL and SOL to USDC
+- USDC to cbBTC and cbBTC to USDC
+- SOL to cbBTC and cbBTC to SOL
+
+Disable a direction with a blacklist row:
+
+```toml
+[[assets.blacklisted_pairs]]
+input = "SOL"
+output = "cbBTC"
+```
+
+The blacklist is directional. It does not block `cbBTC -> SOL`.
+
+## 5. Configure Jupiter
+
+Use Swap API V2:
+
+```toml
+[jupiter]
+enabled = true
+base_url = "https://api.jup.ag/swap/v2"
+max_slippage_bps = 50
+quote_timeout_millis = 2000
+```
+
+Firmament uses `/order` plus `/execute` for live swaps. `/build` support is kept
+for adapter parsing and raw-instruction coverage.
+
+## 6. Configure Circle Gateway
+
+Gateway refill is USDC-only:
+
+```toml
+[gateway]
+enabled = true
+usdc_refill_threshold_raw = 3_000_000
+usdc_refill_target_raw = 10_000_000
+usdc_excess_deposit_threshold_raw = 12_000_000
+usdc_excess_deposit_target_raw = 10_000_000
+max_refill_notional_usd = "2"
+max_refill_fee_raw = 250_000
+```
+
+The maker wallet must hold USDC before a Gateway deposit. The Gateway unified
+balance must hold enough USDC before a refill. Keep `max_refill_fee_raw` lower
+than the amount you are willing to lose to a provider fee.
+
+## 7. Fund the maker
+
+Fund only what the demo needs:
+
+- SOL for gas and native inventory.
+- USDC for the default SOL/USDC path and Gateway deposits.
+- cbBTC only if you want inventory-backed cbBTC quotes.
+
+Use a fresh maker wallet for demos. Do not reuse a high-value wallet.
+
+## 8. Prove read-only startup
+
+Keep workers disabled first:
+
+```toml
+[runtime]
+enable_protocol_workers = false
+database_path = "runtime.sqlite"
+```
+
+Start the backend:
+
+```bash
+cargo run
+```
+
+Check:
+
+```bash
+curl http://127.0.0.1:5050/health
+curl http://127.0.0.1:5050/v1/assets
+curl http://127.0.0.1:5050/v1/pairs
+curl http://127.0.0.1:5050/v1/runtime/state
+```
+
+Mutating RFQ routes should be unavailable in this mode.
+
+## 9. Enable live maker mode
+
+Set:
+
+```toml
+[runtime]
+enable_protocol_workers = true
+database_path = "runtime.sqlite"
+
+[runtime.automation]
+enabled = true
+```
+
+Start the backend:
+
+```bash
+cargo run
+```
+
+Startup will fail if required env vars are missing, if more than one maker
+keypair source is set, or if any enabled asset still uses a `VERIFY_*`
+placeholder mint.
+
+## 10. Start the web app
+
+```bash
+npm run dev
+```
+
+Open:
+
+```text
+http://127.0.0.1:3000/app
+```
+
+The browser wallet is the taker. The maker wallet stays server-side.
+
+## 11. Run smoke tests
+
+Safe default:
+
+```bash
+cargo test
+scripts/smoke.sh all-non-mutating
+```
+
+Mutating smoke tests are mainnet actions. They require explicit opt-ins and caps:
+
+```bash
+export RUN_LIVE_SOLANA_TESTS=1
+export RUN_LIVE_GATEWAY_TESTS=1
+export RUN_LIVE_GATEWAY_DEPOSIT_TESTS=1
+scripts/smoke.sh gateway-deposit
+```
+
+Read `scripts/smoke.sh` before running any mutating group.
+
+## 12. Capture evidence
+
+Use `docs/demo-evidence-checklist.md` for demo runs. Capture:
+
+- config and cap snapshots
+- backend logs
+- `/health`, `/v1/assets`, `/v1/runtime/state`, `/v1/runtime/events`,
+  `/v1/runtime/ledger`, and `/v1/runtime/trades`
+- trade lookup JSON for accepted trades
+- screenshots of `/app` and `/app/runtime`
+- Solscan links for signatures
+- SQLite ledger checks
+
+Redact keys, credentialed RPC URLs, API keys, and Gateway identifiers before
+sharing evidence.
+
+## References
+
+- [Jupiter Swap API V2 Order & Execute](https://developers.jup.ag/docs/swap/order-and-execute)
+- [Jupiter Swap API V2 Build](https://developers.jup.ag/docs/swap/build)
+- [Circle Gateway Solana Quickstart](https://developers.circle.com/gateway/quickstarts/unified-balance-solana)
+- [Circle Gateway Technical Guide](https://developers.circle.com/gateway/references/technical-guide)
+- [Coinbase cbBTC network addresses](https://www.coinbase.com/cbbtc)

@@ -1,11 +1,16 @@
 openapi: 3.1.0
 info:
   title: Firmament Backend API
-  version: 0.1.0
+  version: 0.1.1
   summary: Public backend routes for Firmament swaps and runtime proof.
   description: |
     Firmament is a Solana RFQ maker backend for managed liquidity demos.
     This specification documents the public routes used by the swap app and runtime view.
+servers:
+  - url: https://api.firmament.shaikazeem.com
+    description: Deployed Firmament API.
+  - url: http://127.0.0.1:5050
+    description: Local backend started with `cargo run`.
 tags:
   - name: Health
     description: Runtime liveness.
@@ -40,7 +45,7 @@ paths:
                   value:
                     status: ok
                     service: firmament
-                    version: 0.1.0
+                    version: 0.1.1
   /v1/assets:
     get:
       tags: [Assets]
@@ -146,16 +151,16 @@ paths:
                 value:
                   input_asset: USDC
                   output_asset: SOL
-                  amount: "0.001"
-                  taker_wallet: DemoTaker111111111111111111111111111111111111
+                  amount: "1.00"
+                  taker_wallet: "11111111111111111111111111111111"
                   expiry_seconds: 30
               legacyUsdcToSol:
                 summary: Legacy request (still supported)
                 value:
                   input_mint: EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
                   output_mint: So11111111111111111111111111111111111111112
-                  input_amount_raw: 1000
-                  taker_wallet: DemoTaker111111111111111111111111111111111111
+                  input_amount_raw: 1000000
+                  taker_wallet: "11111111111111111111111111111111"
                   expiry_seconds: 30
       responses:
         "200":
@@ -169,7 +174,7 @@ paths:
                   value:
                     status: accepted
                     quote_id: 018f5a45-822c-7f42-9d18-9df9f88c5c7a
-                    quoted_output_amount_raw: 7200
+                    quoted_output_amount_raw: 7200000
                     spread_bps: 35
                     expires_at: "2026-05-08T12:00:30Z"
                     htlc_terms:
@@ -186,14 +191,14 @@ paths:
                       output_asset: SOL
                     input:
                       asset: USDC
-                      amount: "0.001000"
-                      amount_raw: "1000"
+                      amount: "1.000000"
+                      amount_raw: "1000000"
                       decimals: 6
                       mint: EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
                     output:
                       asset: SOL
-                      amount: "0.000007200"
-                      amount_raw: "7200"
+                      amount: "0.007200000"
+                      amount_raw: "7200000"
                       decimals: 9
                       mint: So11111111111111111111111111111111111111112
                     next_action:
@@ -230,7 +235,7 @@ paths:
             examples:
               start:
                 value:
-                  taker_wallet: DemoTaker111111111111111111111111111111111111
+                  taker_wallet: "11111111111111111111111111111111"
                   secret_hash: "0000000000000000000000000000000000000000000000000000000000000000"
       responses:
         "202":
@@ -596,7 +601,7 @@ components:
         amount:
           type: string
           description: Decimal amount in the input asset's display units, sent as a string.
-          example: "0.001"
+          example: "1.00"
         taker_wallet:
           $ref: "#/components/schemas/WalletAddress"
         expiry_seconds:
@@ -628,10 +633,10 @@ components:
           example: USDC
         amount:
           type: string
-          example: "0.001000"
+          example: "1.000000"
         amount_raw:
           type: string
-          example: "1000"
+          example: "1000000"
         decimals:
           type: integer
           minimum: 0
@@ -1305,7 +1310,7 @@ components:
     WalletAddress:
       type: string
       description: Solana wallet address.
-      example: DemoTaker111111111111111111111111111111111111
+      example: "11111111111111111111111111111111"
     TxSignature:
       type: string
       description: Solana transaction signature.

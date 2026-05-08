@@ -15,6 +15,7 @@
     "landing:build": "npm --prefix landing run build",
     "docs:dev": "cd docs && npx mint@latest dev --no-open --port ${FIRMAMENT_DOCS_PORT:-3002}",
     "docs:check": "cd docs && npx mint@latest validate",
+    "web:polish": "node scripts/check-web-polish.mjs",
     "build": "npm run app:build && npm run landing:build"
   }
 }

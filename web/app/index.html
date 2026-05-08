@@ -20,8 +20,27 @@
     <meta name="twitter:title" content="Firmament" />
     <meta name="twitter:description" content="Risk-gated RFQs. Jupiter + Gateway repair. Ledger proof." />
     <meta name="twitter:image" content="%BASE_URL%social-card.svg" />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="preload"
+      href="/fonts/bangers-latin.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
+    <link
+      rel="preload"
+      href="/fonts/ibm-plex-sans-latin.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
+    <link
+      rel="preload"
+      href="/fonts/jetbrains-mono-latin.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
     <link rel="preconnect" href="https://garden.imgix.net" />
     <link rel="dns-prefetch" href="https://garden.imgix.net" />
     <link rel="preload" as="image" href="https://garden.imgix.net/chain_images/solana.png" />
@@ -30,7 +49,6 @@
   </head>
   <body>
     <div id="root"></div>
-    <script src="%BASE_URL%runtime-env.js"></script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

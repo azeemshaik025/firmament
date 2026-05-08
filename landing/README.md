@@ -22,7 +22,7 @@ http://127.0.0.1:3001
 From this folder directly:
 
 ```bash
-npm install
+npm ci
 npm run dev
 ```
 
@@ -34,6 +34,19 @@ npm run build
 npm run start
 npm run lint
 ```
+
+The landing page uses `next/font` from `src/app/layout.tsx` for the display,
+body, and mono faces. Keep remote CSS font imports out of `globals.css`; the
+root `npm run web:polish` check enforces this so the hero wordmark does not swap
+late after first paint.
+
+The landing favicon is owned by `src/app/favicon.ico` and `src/app/icon.svg`.
+Keep both aligned with the Firmament mark so deployed previews never fall back
+to the platform default icon.
+
+After `npm run build`, `npm run start` stages static assets beside the generated
+standalone Next.js server and serves it. Use `PORT=3001 npm run start` when
+previewing it locally.
 
 ## Positioning
 

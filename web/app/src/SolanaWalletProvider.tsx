@@ -16,8 +16,6 @@ declare global {
   }
 }
 
-const runtimeRpcEndpoint = window.__FIRMAMENT_CONFIG__?.solanaRpcUrl?.trim();
-const rpcEndpoint = runtimeRpcEndpoint || import.meta.env.VITE_SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
 const AppConnectionProvider = ConnectionProvider as unknown as ComponentType<{
   endpoint: string;
   children: ReactNode;
@@ -33,6 +31,7 @@ const AppWalletModalProvider = WalletModalProvider as unknown as ComponentType<{
 
 export function SolanaWalletProvider({ children }: SolanaWalletProviderProps) {
   const wallets = useMemo<Adapter[]>(() => [], []);
+  const rpcEndpoint = window.__FIRMAMENT_CONFIG__?.solanaRpcUrl?.trim() || import.meta.env.VITE_SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
 
   return (
     <AppConnectionProvider endpoint={rpcEndpoint}>

@@ -37,11 +37,15 @@ The quote engine combines reference price, spread, inventory skew, fees, and min
 
 The risk gate checks supported assets, supported pairs, notional caps, stale prices, allowlist policy, and available inventory.
 
-Settlement uses the browser wallet for taker signatures. The backend tracks trade state, observed signatures, and maker-side actions.
+Settlement uses the browser wallet for taker signatures. The backend tracks trade state, observed signatures, and maker-side actions. Legacy local-signing taker keypairs exist for tests; they are not required for the web app.
 
 SQLite stores ledger and P&L data. The public runtime endpoints expose derived ledger balances and recent trade summaries without wallet addresses or secrets.
 
 Jupiter and Circle Gateway are live adapters. They run only when protocol workers and required credentials are configured.
+
+Jupiter config should point at Swap API V2 (`https://api.jup.ag/swap/v2`). The adapter uses `/order` plus `/execute` for managed swaps and keeps `/build` parsing covered for raw instruction tests.
+
+Circle Gateway config uses the maker's approved Solana depositor address. Gateway deposits move Solana USDC into the unified balance; Gateway refill mints/transfers USDC back to the maker's Solana working wallet.
 
 ## Public boundary
 

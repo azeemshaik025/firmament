@@ -1,50 +1,50 @@
 import { DemoSequence } from "@/components/demo-sequence";
 
-const appHref = "http://127.0.0.1:3000/app/";
-const runtimeHref = `${appHref}runtime`;
+const appHref = "/app";
+const runtimeHref = "/app/runtime";
 
 const proofPoints = [
-  ["Assets", "USDC / SOL / cbBTC"],
-  ["RFQ", "Firm quotes or clean refusals"],
-  ["Settle", "Solana HTLC path"],
-  ["Ledger", "One accounting source"],
+  ["Reserve", "One USDC Gateway source"],
+  ["Source", "Jupiter routes configured assets"],
+  ["RFQ", "Firm quote or refusal"],
+  ["Repair", "Rebalance the book"],
 ];
 
 const runtimeBlocks = [
   {
-    label: "Inventory",
-    title: "Ledger balances",
-    copy: "Custody, Gateway, escrow.",
+    label: "Reserve",
+    title: "Gateway USDC",
+    copy: "One source of liquidity.",
     tone: "lime",
   },
   {
-    label: "RFQ",
-    title: "Firm terms",
-    copy: "Price, spread, inventory.",
+    label: "Source",
+    title: "Jupiter routes",
+    copy: "Source configured assets.",
     tone: "cyan",
   },
   {
-    label: "Risk",
-    title: "Quote gate",
-    copy: "Unsafe flow is refused.",
+    label: "Policy",
+    title: "Clean quote gate",
+    copy: "Quote only when safe.",
     tone: "amber",
   },
   {
     label: "Settlement",
-    title: "HTLC status",
+    title: "Solana HTLC",
     copy: "Lock, redeem, refund.",
     tone: "blue",
   },
   {
     label: "Repair",
-    title: "Book repair",
+    title: "Book repair loop",
     copy: "Rebalance and refill.",
     tone: "violet",
   },
   {
     label: "Ledger",
-    title: "Runtime proof",
-    copy: "Events, trades, accounting.",
+    title: "Accounting proof",
+    copy: "Balances, trades, P&L.",
     tone: "red",
   },
 ];
@@ -52,46 +52,47 @@ const runtimeBlocks = [
 const productLanes = [
   {
     label: "Apps",
-    title: "Embed firm liquidity",
-    copy: "Serve governed quotes without routing users away from your product.",
+    title: "Offer controlled swaps",
+    copy: "Serve firm quotes from a maker-run book without routing users away.",
   },
   {
     label: "Treasuries",
-    title: "Control the book",
-    copy: "Keep supported assets moving inside policy, inventory, and risk limits.",
+    title: "Maintain one reserve",
+    copy: "Keep USDC in Gateway while Firmament handles sourcing and repair.",
   },
   {
     label: "Builders",
-    title: "Ship with a small API",
-    copy: "Request RFQs, settle accepted flow, and inspect runtime state.",
+    title: "Integrate the runtime",
+    copy: "Request RFQs, settle wallet flow, and inspect live maker state.",
   },
 ];
 
 const positionReasons = [
-  "Quote from inventory you control",
+  "Maintain one USDC source in Circle Gateway",
+  "Use Jupiter when a quote needs a configured destination asset",
   "Reject unsafe flow before settlement",
-  "Record every movement in the ledger",
+  "Rebalance after fills to repair the book",
 ];
 
 const runtimeSignals = [
   ["Health", "runtime status"],
-  ["Inventory", "custody / gateway / escrow"],
-  ["Trades", "total + successful"],
-  ["Repair", "rebalance + refill"],
-  ["Ledger", "source of truth"],
+  ["Reserve", "Gateway USDC"],
+  ["Flow", "working / escrow"],
+  ["Repair", "Jupiter + Gateway"],
+  ["Ledger", "balances + P&L"],
 ];
 
 const apiProof = [
   ["RFQ", "POST /v1/rfq"],
-  ["Settle", "wallet settlement"],
-  ["Trades", "GET /v1/trades/{id}"],
-  ["Runtime", "state + events"],
+  ["Settle", "wallet HTLC flow"],
+  ["Runtime", "GET state + events"],
+  ["Ledger", "balances + trades"],
 ];
 
 const footerSignals = [
-  { code: "01", label: "Inventory-aware RFQs" },
-  { code: "02", label: "Policy-gated settlement" },
-  { code: "03", label: "Ledger-backed accounting" },
+  { code: "01", label: "Single USDC reserve" },
+  { code: "02", label: "Jupiter-sourced assets" },
+  { code: "03", label: "Policy-gated RFQs" },
   { code: "04", label: "Automated book repair" },
 ];
 
@@ -120,7 +121,10 @@ export default function Home() {
           target="_blank"
           rel="noreferrer"
         >
-          Launch app
+          <span>Launch app</span>
+          <span className="button-arrow" aria-hidden="true">
+            {"\u2192"}
+          </span>
         </a>
       </header>
       <nav className="mobile-nav" aria-label="Mobile sections">
@@ -134,8 +138,9 @@ export default function Home() {
           <p className="eyebrow">Solana RFQ Maker Runtime</p>
           <h1 id="hero-title">Firmament</h1>
           <p className="hero-lede">
-            Managed liquidity for Solana apps and treasuries, with firm RFQs,
-            policy checks, HTLC settlement, and ledger-backed book repair.
+            Keep one USDC reserve. Source configured assets through Jupiter.
+            Gate RFQs with policy, settle on Solana HTLCs, and repair inventory
+            after each fill.
           </p>
           <div className="hero-actions">
             <a
@@ -144,31 +149,34 @@ export default function Home() {
               target="_blank"
               rel="noreferrer"
             >
-              Launch app
+              <span>Launch app</span>
+              <span className="button-arrow" aria-hidden="true">
+                {"\u2192"}
+              </span>
             </a>
             <a className="button button-secondary" href="#runtime">
-              View runtime
+              Inspect runtime
             </a>
           </div>
         </div>
 
         <div className="hero-board" aria-label="Firmament runtime block map">
           <div className="board-top">
-            <span>managed liquidity book</span>
-            <span>USDC / SOL / cbBTC</span>
+            <span>single liquidity reserve</span>
+            <span>Gateway USDC to Jupiter routes</span>
           </div>
           <div className="block-stack" aria-hidden="true">
-            <span className="piece piece-lime wide">Inventory</span>
+            <span className="piece piece-lime wide">Gateway USDC</span>
             <span className="piece piece-amber">Policy</span>
-            <span className="piece piece-cyan">RFQ</span>
+            <span className="piece piece-cyan">Jupiter</span>
             <span className="piece piece-blue wide">HTLC</span>
             <span className="piece piece-red">Ledger</span>
-            <span className="piece piece-violet wide">Book repair</span>
-            <span className="piece piece-lime">Gateway</span>
+            <span className="piece piece-violet wide">Rebalance</span>
+            <span className="piece piece-lime">Refill</span>
             <span className="piece piece-cyan wide">Runtime API</span>
           </div>
           <div className="board-footer">
-            <span>quote from inventory</span>
+            <span>quote when safe</span>
             <span>settle, record, repair</span>
           </div>
         </div>
@@ -186,10 +194,11 @@ export default function Home() {
       <section className="section product-section" id="product">
         <div className="section-heading">
           <p className="section-kicker">Product position</p>
-          <h2>Controlled liquidity, not another swap widget.</h2>
+          <h2>One reserve. Firm quotes. A repaired book.</h2>
           <p>
-            Quote from managed inventory. Reject unsafe flow. Settle and repair
-            the book.
+            Firmament keeps USDC as the maker&apos;s source of liquidity, uses
+            Jupiter when a destination asset is needed, and repairs inventory
+            after fills.
           </p>
         </div>
         <div className="lane-grid" aria-label="Firmament users">
@@ -204,7 +213,10 @@ export default function Home() {
         <div className="position-panel" aria-label="Why Firmament is different">
           <div>
             <span>Why it matters</span>
-            <h3>Most products can route a swap. Few can run a book.</h3>
+            <h3>
+              Swap routers handle one trade. Firmament keeps the maker&apos;s book
+              alive.
+            </h3>
           </div>
           <ul>
             {positionReasons.map((reason) => (
@@ -217,10 +229,10 @@ export default function Home() {
       <section className="section runtime-section" id="runtime">
         <div className="section-heading">
           <p className="section-kicker">Live Runtime</p>
-          <h2>Runtime state, open for inspection.</h2>
+          <h2>See the book the maker is operating.</h2>
           <p>
-            Health, balances, trades, repair state, and ledger-backed
-            accounting are available from the public app surface.
+            The public runtime shows Gateway reserve, working inventory, HTLC
+            settlement, rebalances, refills, and ledger-backed accounting.
           </p>
         </div>
         <div className="runtime-layout">
@@ -241,10 +253,10 @@ export default function Home() {
           <div className="runtime-cta-panel">
             <div>
               <span className="runtime-panel-label">Runtime console</span>
-              <h3>Inspect the live book.</h3>
+              <h3>Inspect the reserve, flow, and repair loop.</h3>
               <p>
-                Open the read-only app view for health, inventory, trades, and
-                ledger-backed balances.
+                Open the read-only app view to see whether the liquidity book is
+                healthy after quotes and fills.
               </p>
             </div>
             <div className="runtime-checks" aria-label="Runtime console properties">
@@ -258,7 +270,7 @@ export default function Home() {
               target="_blank"
               rel="noreferrer"
             >
-              Open runtime
+              Inspect runtime
             </a>
           </div>
         </div>
@@ -266,8 +278,8 @@ export default function Home() {
 
       <section className="section proof-section" id="proof">
         <div className="section-heading">
-          <p className="section-kicker">Runtime proof matrix</p>
-          <h2>The pieces that matter.</h2>
+          <p className="section-kicker">Runtime proof</p>
+          <h2>The operating loop, not just a swap.</h2>
         </div>
         <div className="proof-matrix">
           {runtimeBlocks.map((block) => (
@@ -286,9 +298,10 @@ export default function Home() {
         <div className="api-panel">
           <div>
             <p className="section-kicker">HTTP API</p>
-            <h2>Small API. Real runtime state.</h2>
+            <h2>Small API for managed liquidity.</h2>
             <p>
-              Request quotes, settle accepted flow, and inspect runtime state.
+              Request a firm quote, start wallet settlement, and inspect the
+              same runtime state the maker uses.
             </p>
           </div>
           <div className="api-list" aria-label="API proof surface">
@@ -324,7 +337,10 @@ export default function Home() {
           </div>
           <div className="footer-actions" aria-label="Footer links">
             <a href={appHref} target="_blank" rel="noreferrer">
-              Launch app
+              <span>Launch app</span>
+              <span className="button-arrow" aria-hidden="true">
+                {"\u2192"}
+              </span>
             </a>
             <a href={runtimeHref} target="_blank" rel="noreferrer">
               Runtime

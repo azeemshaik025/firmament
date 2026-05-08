@@ -1,0 +1,35 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "npm run build",
+  "outputDirectory": "out",
+  "rewrites": [
+    {
+      "source": "/app",
+      "destination": "https://firmament-app.vercel.app/app"
+    },
+    {
+      "source": "/app/:path*",
+      "destination": "https://firmament-app.vercel.app/app/:path*"
+    },
+    {
+      "source": "/docs",
+      "destination": "https://firmament.mintlify.dev/docs"
+    },
+    {
+      "source": "/docs/:path*",
+      "destination": "https://firmament.mintlify.dev/docs/:path*"
+    },
+    {
+      "source": "/fonts/:path*",
+      "destination": "https://firmament-app.vercel.app/fonts/:path*"
+    },
+    {
+      "source": "/v1/:path*",
+      "destination": "https://api.firmament.shaikazeem.com/v1/:path*"
+    },
+    {
+      "source": "/health",
+      "destination": "https://api.firmament.shaikazeem.com/health"
+    }
+  ]
+}

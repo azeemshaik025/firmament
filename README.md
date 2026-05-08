@@ -1,11 +1,15 @@
 # Firmament RFQ Maker Runtime
 
-Firmament is a hackathon Solana RFQ maker runtime for managed liquidity demos.
+Firmament is a Solana RFQ maker runtime for managed liquidity demos.
 
 The project is focused on the backend solver/runtime, not on making a full
 consumer DEX product. The web app is a minimal demo surface that proves the
 runtime can request firm quotes, drive wallet settlement, and expose read-only
 operator stats.
+
+Default local mode is safe: it starts the API and runtime projection with live
+protocol workers disabled. Live maker mode requires real credentials, a funded
+maker wallet, verified asset mints, and explicit caps.
 
 ## What Is In This Repo
 
@@ -68,6 +72,8 @@ Common env values:
 - `JUPITER_API_KEY`
 - `CIRCLE_GATEWAY_SOLANA_ADDRESS`
 
+Set exactly one maker keypair source before enabling live workers.
+
 Policy and non-secret settings live in `config.toml`.
 Supported assets are cross-quoteable by default. Use
 `[[assets.blacklisted_pairs]]` rows only for directional pairs you want to
@@ -79,13 +85,21 @@ Default safety caps in the sample config:
 - `$15` cumulative automated notional per run
 - `$5` non-native, non-stable asset exception cap for route minimums
 
-Before any live cbBTC run, replace the sample placeholder mint only after
-verifying the current Solana cbBTC mint and route minimums.
+Before any live cbBTC run, replace the sample placeholder mint with the Solana
+mint listed by Coinbase:
+
+```text
+cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij
+```
+
+Check current Jupiter route minimums before raising caps.
 
 `config.example.toml` currently sets `runtime.enable_protocol_workers = false`.
 With that default, the backend boots the local projection/API without attaching
 live protocol workers. Enable protocol workers only after configuring wallets,
 RPC, API keys, caps, and a verified cbBTC Solana mint.
+
+Full maker setup lives in [docs/maker-setup.mdx](/Users/azeemshaik/work/hackathons/firmament/docs/maker-setup.mdx).
 
 ## HTTP API
 
@@ -126,7 +140,12 @@ Useful commands:
 ```bash
 npm run landing:dev
 npm run landing:build
+npm run web:polish
 ```
+
+`npm run web:polish` catches deploy-facing regressions such as late font imports,
+missing favicon metadata, or missing submission-surface checks across the
+landing page, app, and docs.
 
 ## Tests
 
@@ -138,3 +157,22 @@ cargo test
 
 Live tests skip cleanly unless their `RUN_LIVE_*` variables are set. Mutating
 live tests require explicit opt-in variables and tiny mainnet caps.
+
+Useful smoke groups:
+
+```bash
+scripts/smoke.sh unit
+scripts/smoke.sh api
+scripts/smoke.sh all-non-mutating
+```
+
+Mutating smoke groups are real mainnet actions. Read `scripts/smoke.sh` and set
+the required opt-in env vars before running them.
+
+## External References
+
+- [Jupiter Swap API V2 Order & Execute](https://developers.jup.ag/docs/swap/order-and-execute)
+- [Jupiter Swap API V2 Build](https://developers.jup.ag/docs/swap/build)
+- [Circle Gateway Solana Quickstart](https://developers.circle.com/gateway/quickstarts/unified-balance-solana)
+- [Circle Gateway Technical Guide](https://developers.circle.com/gateway/references/technical-guide)
+- [Coinbase cbBTC network addresses](https://www.coinbase.com/cbbtc)
