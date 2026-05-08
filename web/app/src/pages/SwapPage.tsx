@@ -388,6 +388,7 @@ export function SwapPage() {
   );
   const flowLocked = Boolean(settlement || lock || redeem);
   const completedSwap = Boolean(redeem?.settlement_status);
+  const canStartOver = Boolean((quote || settlement) && !lock && !redeem);
   const notionalOk = notionalValidation?.ok !== false;
   const showSourceRangeError = Boolean(
     sourceRangeLabel &&
@@ -504,6 +505,10 @@ export function SwapPage() {
       title: 'New swap ready',
       detail: 'Pick a receive asset and enter a fresh amount.'
     });
+  }
+
+  function startOverSwap() {
+    startNewSwap();
   }
 
   useEffect(() => {
@@ -910,6 +915,15 @@ export function SwapPage() {
           >
             {primaryLabel}
           </button>
+
+          {canStartOver && (
+            <div className="swap-recovery">
+              <span>Need to change details?</span>
+              <button type="button" className="secondary-swap-button" onClick={startOverSwap}>
+                Start over
+              </button>
+            </div>
+          )}
 
           {quoteAccepted && (
             <div className={quoteExpired ? 'quote-summary quote-summary-expired' : 'quote-summary'}>

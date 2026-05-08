@@ -279,6 +279,7 @@ nav a.active {
 
 .wallet-button,
 .primary-swap-button,
+.secondary-swap-button,
 .action-button,
 .step-row button,
 .flip-button {
@@ -304,6 +305,7 @@ nav a.active {
 
 .wallet-button:hover,
 .primary-swap-button:hover,
+.secondary-swap-button:hover,
 .action-button:hover,
 .step-row button:hover,
 .flip-button:hover {
@@ -785,6 +787,30 @@ nav a:focus-visible {
 
 .primary-swap-button-reset {
   background: var(--cyan);
+}
+
+.swap-recovery {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 3px solid var(--ink);
+  border-radius: var(--radius-sm);
+  background: var(--paper-2);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  font-weight: 800;
+}
+
+.secondary-swap-button {
+  min-height: 36px;
+  padding: 0 12px;
+  background: var(--paper);
+  color: var(--ink);
+  box-shadow: 3px 3px 0 var(--ink);
+  font-size: 0.72rem;
 }
 
 .field-error,
@@ -1781,6 +1807,14 @@ nav a:focus-visible {
 
   .token-row-controls {
     grid-template-columns: 1fr;
+  }
+
+  .swap-recovery {
+    grid-template-columns: 1fr;
+  }
+
+  .secondary-swap-button {
+    width: 100%;
   }
 
   .footer-brand,
