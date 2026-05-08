@@ -1,6 +1,7 @@
 //! Local Axum operator API for RFQ route shells and runtime projection reads.
 
 pub mod auth;
+pub mod runtime_read;
 pub mod types;
 
 use std::env;
@@ -112,6 +113,7 @@ pub fn router_with_service(
     });
 
     Router::new()
+        .route("/health", get(runtime_read::get_health))
         .route("/v1/rfq", post(post_rfq))
         .route("/v1/quotes/{quote_id}/accept", post(post_quote_accept))
         .route(

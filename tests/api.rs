@@ -265,6 +265,28 @@ async fn api_rfq_rejects_oversized_request_through_runtime_risk() {
 }
 
 #[tokio::test]
+async fn health_endpoint_returns_ok() {
+    let app = test_router().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_json(response).await;
+    assert_eq!(body["status"], "ok");
+    assert_eq!(body["service"], "firmament");
+    assert!(body["version"].is_string());
+    assert!(!body["version"].as_str().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn api_json_error_shape() {
     let app = test_router().await;
 
