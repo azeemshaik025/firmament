@@ -21,8 +21,11 @@ pub use wallet_monitor::{ObservationOutcome, WalletMonitor, WalletObservation};
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use time::OffsetDateTime;
+use tokio::sync::Notify;
+use tokio::time::sleep;
 
 use crate::application::runtime::orchestrator::RuntimeOrchestrator;
 use crate::config::ReconciliationConfig;
@@ -72,6 +75,27 @@ impl ReconciliationWorker {
         })
     }
 
+    /// Run one full reconciliation pass: each enabled wallet asset plus
+    /// the USDC Gateway scope. The production background loop calls this on
+    /// the configured cadence; tests can drive it directly to step the
+    /// worker deterministically.
+    ///
+    /// # Errors
+    ///
+    /// Returns adapter, ledger, or event-publish errors. Errors are
+    /// propagated; the background loop logs and continues.
+    pub async fn tick(&mut self) -> AppResult<()> {
+        let assets = self.enabled_assets();
+        for asset in &assets {
+            self.wallet.tick(self.orchestrator.as_ref(), asset).await?;
+        }
+        let usdc = AssetId::from("USDC");
+        self.gateway
+            .tick(self.orchestrator.as_ref(), &usdc)
+            .await?;
+        Ok(())
+    }
+
     /// Run one wallet observation for a specific asset. Used by integration
     /// tests that drive the worker deterministically.
     ///
@@ -80,6 +104,17 @@ impl ReconciliationWorker {
     /// Returns adapter, ledger, or event-publish errors.
     pub async fn tick_wallet(&mut self, asset: &AssetId) -> AppResult<WalletObservation> {
         self.wallet.tick(self.orchestrator.as_ref(), asset).await
+    }
+
+    fn enabled_assets(&self) -> Vec<AssetId> {
+        self.orchestrator
+            .config()
+            .assets
+            .supported
+            .iter()
+            .filter(|asset| asset.enabled)
+            .map(|asset| asset.id.clone())
+            .collect()
     }
 
     /// Run one Gateway observation for the supplied asset (USDC). Used by
@@ -96,6 +131,36 @@ impl ReconciliationWorker {
     #[must_use]
     pub const fn config(&self) -> &ReconciliationConfig {
         &self.config
+    }
+}
+
+/// Long-lived background loop. Calls [`ReconciliationWorker::tick`] on the
+/// configured cadence until `shutdown.notified()` resolves. Errors are
+/// logged through `tracing::error!` and do not stop the loop — operator
+/// visibility comes from the events stream.
+pub async fn run_loop(
+    orchestrator: Arc<RuntimeOrchestrator>,
+    config: ReconciliationConfig,
+    shutdown: Arc<Notify>,
+) {
+    let interval = Duration::from_secs(config.interval_seconds.max(1));
+    let mut worker = match ReconciliationWorker::new(orchestrator, config) {
+        Ok(worker) => worker,
+        Err(error) => {
+            tracing::error!(target: "reconciliation", %error, "failed to start worker");
+            return;
+        }
+    };
+
+    loop {
+        if let Err(error) = worker.tick().await {
+            tracing::error!(target: "reconciliation", %error, "reconciliation tick failed");
+        }
+
+        tokio::select! {
+            () = shutdown.notified() => break,
+            () = sleep(interval) => {}
+        }
     }
 }
 

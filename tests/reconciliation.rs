@@ -15,7 +15,7 @@ use firmament::config::ReconciliationConfig;
 use firmament::events::{ReconciliationEvent, ReconciliationOutcome, RuntimeEvent};
 use firmament::ledger::{LedgerAccountId, LedgerTransactionBuilder};
 use firmament::ports::{BalanceReader, GatewayClient, HtlcClient, PriceProvider, SwapExecutor};
-use firmament::runtime::reconciliation::{ObservationOutcome, ReconciliationWorker};
+use firmament::runtime::reconciliation::{ObservationOutcome, ReconciliationWorker, today_utc_date};
 use firmament::runtime::{
     RuntimeAdapters, RuntimeOrchestrator, RuntimeOrchestratorOptions, RuntimePersistence,
 };
@@ -183,6 +183,10 @@ async fn build_harness() -> Harness {
         RuntimePersistence::open_in_memory(AssetRegistry::default())
             .expect("open in-memory persistence"),
     );
+    build_harness_with_persistence(persistence).await
+}
+
+async fn build_harness_with_persistence(persistence: Arc<RuntimePersistence>) -> Harness {
     let app_state = bootstrap(AppConfig::default())
         .await
         .expect("bootstrap runtime state");
@@ -652,4 +656,76 @@ async fn recon_gateway_skip_when_gateway_reserved_active() {
         .account_balance(&LedgerAccountId::external(usdc(), "reconciliation"))
         .expect("external");
     assert_eq!(external, 0);
+}
+
+#[tokio::test]
+async fn recon_idempotent_across_restart() {
+    // Tick three times to post one adjustment with sequence 1; then drop
+    // the worker, construct a fresh worker against the same persistence,
+    // bump the chain again, and tick three more times. The new worker
+    // must reseed its sequence map from the ledger so the next adjustment
+    // lands at sequence 2 — never duplicating sequence 1.
+
+    let persistence = Arc::new(
+        RuntimePersistence::open_in_memory(AssetRegistry::default()).expect("persistence"),
+    );
+    let harness = build_harness_with_persistence(Arc::clone(&persistence)).await;
+
+    seed_working_custody(&harness.persistence, &usdc(), 1_000_000);
+    harness.balance_reader.set(usdc(), 1_020_000);
+    harness.balance_reader.set(sol(), 0);
+    harness.balance_reader.set(cbbtc(), 0);
+
+    let mut worker = build_worker(&harness);
+    for _ in 0..3 {
+        worker.tick_wallet(&usdc()).await.expect("tick");
+    }
+
+    let count_after_first =
+        count_recon_idempotency_keys(&persistence, "recon:wallet:USDC");
+    assert_eq!(count_after_first, 1);
+
+    // Restart: drop the in-memory worker and build a fresh one against the
+    // same persistence. The reseed should recover seq=1.
+    drop(worker);
+    let mut worker = build_worker(&harness);
+
+    // Push the chain higher again to create a fresh +20_000 drift
+    // relative to the new working_custody (which is now 1_020_000).
+    harness.balance_reader.set(usdc(), 1_040_000);
+    for _ in 0..3 {
+        worker
+            .tick_wallet(&usdc())
+            .await
+            .expect("tick after restart");
+    }
+
+    let count_after_restart =
+        count_recon_idempotency_keys(&persistence, "recon:wallet:USDC");
+    assert_eq!(
+        count_after_restart, 2,
+        "restart must not duplicate adjustments — expected exactly 2 distinct recon keys"
+    );
+
+    let date = today_utc_date();
+    let prefix = format!("recon:wallet:USDC:{date}:");
+    let max_seq = max_seq_for_prefix(&persistence, &prefix);
+    assert_eq!(max_seq, Some(2));
+}
+
+fn count_recon_idempotency_keys(persistence: &Arc<RuntimePersistence>, prefix: &str) -> usize {
+    persistence
+        .with_recon_idempotency_keys(prefix, |keys| keys.len())
+        .expect("read recon keys")
+}
+
+fn max_seq_for_prefix(persistence: &Arc<RuntimePersistence>, prefix: &str) -> Option<u64> {
+    persistence
+        .with_recon_idempotency_keys(prefix, |keys| {
+            keys.iter()
+                .filter_map(|key| key.strip_prefix(prefix))
+                .filter_map(|seq| seq.parse::<u64>().ok())
+                .max()
+        })
+        .expect("read recon keys")
 }
