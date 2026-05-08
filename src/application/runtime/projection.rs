@@ -217,6 +217,12 @@ impl RuntimeState {
                 self.rebalance.pending_swap_count =
                     self.rebalance.pending_swap_count.saturating_sub(1);
             }
+            // Trade-correlated swap events drive the Gateway-backed lifecycle
+            // ledger movements; they are not background rebalances and should
+            // not move the rebalance counters.
+            SwapEvent::TradeSwapSubmitted { .. }
+            | SwapEvent::TradeSwapConfirmed { .. }
+            | SwapEvent::TradeSwapFailed { .. } => {}
         }
     }
 
@@ -225,6 +231,9 @@ impl RuntimeState {
             GatewayEvent::BalanceChecked { .. } => "checked",
             GatewayEvent::RefillRequested { .. } => "refill_requested",
             GatewayEvent::RefillCompleted { .. } => "refill_completed",
+            GatewayEvent::BurnIntentSubmitted { .. } => "trade_burn_submitted",
+            GatewayEvent::MintConfirmed { .. } => "trade_mint_confirmed",
+            GatewayEvent::BurnFailed { .. } => "trade_burn_failed",
             GatewayEvent::Failed { .. } => "failed",
         };
         status.clone_into(&mut self.gateway.status);

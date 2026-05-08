@@ -197,6 +197,45 @@ pub enum SwapEvent {
         /// Swap receipt.
         receipt: SwapReceipt,
     },
+    /// Trade-correlated Jupiter swap input was submitted on chain. Carries the
+    /// debited input amount so the ledger can move
+    /// `working_custody → pending_dex_spend` for the trade.
+    ///
+    /// Background rebalance swaps do not emit this variant — they continue to
+    /// follow [`SwapEvent::Executed`] with `receipt.trade_id = None`.
+    TradeSwapSubmitted {
+        /// Event metadata.
+        metadata: EventMetadata,
+        /// Trade this swap belongs to.
+        trade_id: TradeId,
+        /// Asset/amount debited from working custody.
+        input_amount: TokenAmount,
+    },
+    /// Trade-correlated Jupiter swap was confirmed on chain. Carries both
+    /// sides so the ledger can move `pending_dex_spend → trading` (input)
+    /// AND `trading → working_custody` (output) atomically.
+    TradeSwapConfirmed {
+        /// Event metadata.
+        metadata: EventMetadata,
+        /// Trade this swap belongs to.
+        trade_id: TradeId,
+        /// Asset/amount that left working custody.
+        input_amount: TokenAmount,
+        /// Asset/amount that arrived in working custody.
+        output_amount: TokenAmount,
+    },
+    /// Trade-correlated Jupiter swap failed after it had been submitted —
+    /// unwind `pending_dex_spend → working_custody`.
+    TradeSwapFailed {
+        /// Event metadata.
+        metadata: EventMetadata,
+        /// Trade this swap belongs to.
+        trade_id: TradeId,
+        /// Asset/amount previously committed via [`SwapEvent::TradeSwapSubmitted`].
+        input_amount: TokenAmount,
+        /// Operator-facing reason.
+        reason: String,
+    },
     /// Swap failed before completion.
     Failed {
         /// Event metadata.
@@ -232,6 +271,42 @@ pub enum GatewayEvent {
         metadata: EventMetadata,
         /// Gateway receipt.
         receipt: GatewayReceipt,
+    },
+    /// Trade-correlated Gateway burn intent submitted. Drives a compound
+    /// ledger movement `gateway → gateway_reserved` (reservation) followed
+    /// immediately by `gateway_reserved → trading` (burn) — same back-to-back
+    /// pattern the maker leg uses for `Submitted{MakerOutput}`.
+    ///
+    /// Only emitted on the Gateway-backed execution path.
+    BurnIntentSubmitted {
+        /// Event metadata.
+        metadata: EventMetadata,
+        /// Trade this burn belongs to.
+        trade_id: TradeId,
+        /// USDC amount being burned for the trade.
+        amount: TokenAmount,
+    },
+    /// Trade-correlated Gateway mint confirmed. Moves `trading → working_custody`
+    /// for the USDC asset.
+    MintConfirmed {
+        /// Event metadata.
+        metadata: EventMetadata,
+        /// Trade this mint belongs to.
+        trade_id: TradeId,
+        /// USDC amount minted for the trade.
+        amount: TokenAmount,
+    },
+    /// Trade-correlated Gateway burn failed after the reservation landed —
+    /// release `gateway_reserved → gateway`.
+    BurnFailed {
+        /// Event metadata.
+        metadata: EventMetadata,
+        /// Trade this burn belonged to.
+        trade_id: TradeId,
+        /// USDC amount previously reserved.
+        amount: TokenAmount,
+        /// Operator-facing reason.
+        reason: String,
     },
     /// Gateway operation failed.
     Failed {

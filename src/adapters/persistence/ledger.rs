@@ -925,6 +925,16 @@ mod settlement_suffix {
     pub(super) const HTLC_ESCROW_TO_TRADING: &str = "htlc_escrow_to_trading";
     pub(super) const RECEIVABLE_TO_CUSTODY: &str = "receivable_to_custody";
     pub(super) const REFUND_REVERSE: &str = "refund_reverse";
+    // Gateway-backed lifecycle (Worktree C).
+    pub(super) const RESERVE_GATEWAY: &str = "reserve_gateway";
+    pub(super) const GATEWAY_TO_TRADING: &str = "gateway_to_trading";
+    pub(super) const TRADING_TO_CUSTODY: &str = "trading_to_custody";
+    pub(super) const GATEWAY_RESERVE_RELEASE: &str = "gateway_reserve_release";
+    // Jupiter spend slice for Gateway+SOL/cbBTC path (Worktree C).
+    pub(super) const DEX_SPEND_SUBMIT: &str = "dex_spend_submit";
+    pub(super) const DEX_SPEND_COMPLETE_INPUT: &str = "dex_spend_complete_input";
+    pub(super) const DEX_SPEND_COMPLETE_OUTPUT: &str = "dex_spend_complete_output";
+    pub(super) const DEX_SPEND_UNWIND: &str = "dex_spend_unwind";
 }
 
 /// Stable qualifier for the per-trade `external` account that mirrors the
@@ -1007,6 +1017,91 @@ impl LedgerEventConsumer<'_> {
                         .push("swap_executed missing output_amount".to_owned());
                 }
             }
+            RuntimeEvent::Gateway(GatewayEvent::BurnIntentSubmitted {
+                metadata,
+                trade_id,
+                amount,
+            }) => {
+                // Compound move (mirrors Submitted{MakerOutput}): reserve then
+                // burn back-to-back. The reservation lands at zero net balance
+                // immediately, but the audit log still records the
+                // intermediate `gateway_reserved` position.
+                let asset = amount.asset.clone();
+                let raw = amount.amount_raw;
+                transactions.push(
+                    LedgerTransactionBuilder::new("trade", trade_id.as_uuid())
+                        .description(
+                            "gateway-backed reservation for trade: gateway -> gateway_reserved",
+                        )
+                        .idempotency_key(settlement_idempotency_key(
+                            *trade_id,
+                            settlement_suffix::RESERVE_GATEWAY,
+                        ))
+                        .debit(
+                            LedgerAccountId::gateway_reserved(asset.clone(), trade_id.to_string()),
+                            raw,
+                        )
+                        .credit(LedgerAccountId::gateway(asset.clone()), raw)
+                        .build_at(metadata.occurred_at)?,
+                );
+                transactions.push(
+                    LedgerTransactionBuilder::new("trade", trade_id.as_uuid())
+                        .description("gateway-backed burn submitted: gateway_reserved -> trading")
+                        .idempotency_key(settlement_idempotency_key(
+                            *trade_id,
+                            settlement_suffix::GATEWAY_TO_TRADING,
+                        ))
+                        .debit(LedgerAccountId::trading(asset.clone()), raw)
+                        .credit(
+                            LedgerAccountId::gateway_reserved(asset, trade_id.to_string()),
+                            raw,
+                        )
+                        .build_at(metadata.occurred_at)?,
+                );
+            }
+            RuntimeEvent::Gateway(GatewayEvent::MintConfirmed {
+                metadata,
+                trade_id,
+                amount,
+            }) => {
+                let asset = amount.asset.clone();
+                let raw = amount.amount_raw;
+                transactions.push(
+                    LedgerTransactionBuilder::new("trade", trade_id.as_uuid())
+                        .description("gateway-backed mint confirmed: trading -> working_custody")
+                        .idempotency_key(settlement_idempotency_key(
+                            *trade_id,
+                            settlement_suffix::TRADING_TO_CUSTODY,
+                        ))
+                        .debit(LedgerAccountId::working(asset.clone()), raw)
+                        .credit(LedgerAccountId::trading(asset), raw)
+                        .build_at(metadata.occurred_at)?,
+                );
+            }
+            RuntimeEvent::Gateway(GatewayEvent::BurnFailed {
+                metadata,
+                trade_id,
+                amount,
+                ..
+            }) => {
+                // Reservation landed but burn never lifted into trading. The
+                // ledger has zero net `gateway_reserved` after BurnIntentSubmitted
+                // because that arm folds reserve+burn together. Releasing here
+                // means: reverse the trading position back to gateway. Idempotent.
+                let asset = amount.asset.clone();
+                let raw = amount.amount_raw;
+                transactions.push(
+                    LedgerTransactionBuilder::new("trade", trade_id.as_uuid())
+                        .description("gateway burn failed: trading -> gateway")
+                        .idempotency_key(settlement_idempotency_key(
+                            *trade_id,
+                            settlement_suffix::GATEWAY_RESERVE_RELEASE,
+                        ))
+                        .debit(LedgerAccountId::gateway(asset.clone()), raw)
+                        .credit(LedgerAccountId::trading(asset), raw)
+                        .build_at(metadata.occurred_at)?,
+                );
+            }
             RuntimeEvent::Gateway(GatewayEvent::BalanceChecked { .. }) => {
                 summary
                     .ignored
@@ -1040,6 +1135,97 @@ impl LedgerEventConsumer<'_> {
                 summary
                     .ignored
                     .push("system event has no token movement".to_owned());
+            }
+            RuntimeEvent::Swap(SwapEvent::TradeSwapSubmitted {
+                metadata,
+                trade_id,
+                input_amount,
+            }) => {
+                let asset = input_amount.asset.clone();
+                let raw = input_amount.amount_raw;
+                transactions.push(
+                    LedgerTransactionBuilder::new("trade", trade_id.as_uuid())
+                        .description(
+                            "trade-correlated jupiter swap submitted: working_custody -> pending_dex_spend",
+                        )
+                        .idempotency_key(settlement_idempotency_key(
+                            *trade_id,
+                            settlement_suffix::DEX_SPEND_SUBMIT,
+                        ))
+                        .debit(
+                            LedgerAccountId::pending_dex_spend(asset.clone(), trade_id.to_string()),
+                            raw,
+                        )
+                        .credit(LedgerAccountId::working(asset), raw)
+                        .build_at(metadata.occurred_at)?,
+                );
+            }
+            RuntimeEvent::Swap(SwapEvent::TradeSwapConfirmed {
+                metadata,
+                trade_id,
+                input_amount,
+                output_amount,
+            }) => {
+                // Two distinct movements: input completes (pending_dex_spend
+                // -> trading), output arrives (trading -> working_custody).
+                let in_asset = input_amount.asset.clone();
+                let in_raw = input_amount.amount_raw;
+                transactions.push(
+                    LedgerTransactionBuilder::new("trade", trade_id.as_uuid())
+                        .description(
+                            "trade-correlated jupiter swap confirmed (input): pending_dex_spend -> trading",
+                        )
+                        .idempotency_key(settlement_idempotency_key(
+                            *trade_id,
+                            settlement_suffix::DEX_SPEND_COMPLETE_INPUT,
+                        ))
+                        .debit(LedgerAccountId::trading(in_asset.clone()), in_raw)
+                        .credit(
+                            LedgerAccountId::pending_dex_spend(in_asset, trade_id.to_string()),
+                            in_raw,
+                        )
+                        .build_at(metadata.occurred_at)?,
+                );
+                let out_asset = output_amount.asset.clone();
+                let out_raw = output_amount.amount_raw;
+                transactions.push(
+                    LedgerTransactionBuilder::new("trade", trade_id.as_uuid())
+                        .description(
+                            "trade-correlated jupiter swap confirmed (output): trading -> working_custody",
+                        )
+                        .idempotency_key(settlement_idempotency_key(
+                            *trade_id,
+                            settlement_suffix::DEX_SPEND_COMPLETE_OUTPUT,
+                        ))
+                        .debit(LedgerAccountId::working(out_asset.clone()), out_raw)
+                        .credit(LedgerAccountId::trading(out_asset), out_raw)
+                        .build_at(metadata.occurred_at)?,
+                );
+            }
+            RuntimeEvent::Swap(SwapEvent::TradeSwapFailed {
+                metadata,
+                trade_id,
+                input_amount,
+                ..
+            }) => {
+                let asset = input_amount.asset.clone();
+                let raw = input_amount.amount_raw;
+                transactions.push(
+                    LedgerTransactionBuilder::new("trade", trade_id.as_uuid())
+                        .description(
+                            "trade-correlated jupiter swap failed: pending_dex_spend -> working_custody",
+                        )
+                        .idempotency_key(settlement_idempotency_key(
+                            *trade_id,
+                            settlement_suffix::DEX_SPEND_UNWIND,
+                        ))
+                        .debit(LedgerAccountId::working(asset.clone()), raw)
+                        .credit(
+                            LedgerAccountId::pending_dex_spend(asset, trade_id.to_string()),
+                            raw,
+                        )
+                        .build_at(metadata.occurred_at)?,
+                );
             }
             RuntimeEvent::Swap(SwapEvent::PriceObserved { .. } | SwapEvent::Quoted { .. }) => {
                 summary

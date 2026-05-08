@@ -826,6 +826,11 @@ impl RuntimeOrchestrator {
         self.publish(RuntimeEvent::Settlement(confirmation.event))
             .await?;
 
+        // Gateway-backed paths emit burn/mint (and Jupiter spend slice for
+        // non-USDC outputs) before the maker leg.
+        self.run_gateway_backed_input_slice(&state.quote, trade_id)
+            .await?;
+
         let maker_lock = self
             .adapters
             .htlc_client
@@ -1013,6 +1018,14 @@ impl RuntimeOrchestrator {
         self.publish(RuntimeEvent::Settlement(confirmation.event))
             .await?;
 
+        // For Gateway-backed paths, emit the Gateway burn / mint events (and
+        // when the output is non-USDC, the Jupiter spend slice) before the
+        // maker leg lands, so the consumer sees the full
+        // gateway -> trading -> working_custody chain ahead of
+        // `working_custody -> reserved`.
+        self.run_gateway_backed_input_slice(quote, settlement.terms.trade_id)
+            .await?;
+
         let maker_lock = match self
             .adapters
             .htlc_client
@@ -1058,6 +1071,74 @@ impl RuntimeOrchestrator {
         let confirmation = settlement.confirm_maker_lock(self.app_state.run_id())?;
         self.publish(RuntimeEvent::Settlement(confirmation.event))
             .await
+    }
+
+    /// Emit the Gateway-backed-path lifecycle events that fire between the
+    /// confirmed taker lock and the maker HTLC submission:
+    ///
+    /// 1. `Gateway::BurnIntentSubmitted` — `gateway -> gateway_reserved -> trading` (USDC).
+    /// 2. `Gateway::MintConfirmed`       — `trading -> working_custody` (USDC).
+    /// 3. (non-USDC outputs) `Swap::TradeSwapSubmitted` — `working_custody -> pending_dex_spend` (USDC).
+    /// 4. (non-USDC outputs) `Swap::TradeSwapConfirmed` — `pending_dex_spend -> trading` (USDC) AND `trading -> working_custody` (target asset).
+    ///
+    /// Inventory-only paths skip the entire helper.
+    ///
+    /// v1: this synthesizes the events directly. The real Gateway / Jupiter
+    /// adapter calls land on the orchestrator side as a follow-up; the
+    /// lifecycle ledger already reflects the intended state once these events
+    /// are emitted.
+    async fn run_gateway_backed_input_slice(
+        &self,
+        quote: &FirmQuote,
+        trade_id: TradeId,
+    ) -> AppResult<()> {
+        if quote.execution_path != ExecutionPath::GatewayToDex {
+            return Ok(());
+        }
+
+        let usdc = AssetId::from("USDC");
+        let usdc_amount = if quote.output_amount.asset == usdc {
+            // USDC output: gateway delivers the full output amount.
+            quote.output_amount.clone()
+        } else {
+            // Non-USDC output: the maker pulls USDC equivalent and swaps it
+            // on Jupiter. Use `input_amount` (the taker's input) as a best
+            // approximation of the USDC amount the maker needs to source —
+            // for v1, fakes don't model real swap economics so any monotone
+            // mapping suffices to drive the ledger flow.
+            TokenAmount::new(usdc.clone(), quote.input_amount.amount_raw)
+        };
+
+        self.publish(RuntimeEvent::Gateway(GatewayEvent::BurnIntentSubmitted {
+            metadata: EventMetadata::new(self.app_state.run_id()),
+            trade_id,
+            amount: usdc_amount.clone(),
+        }))
+        .await?;
+        self.publish(RuntimeEvent::Gateway(GatewayEvent::MintConfirmed {
+            metadata: EventMetadata::new(self.app_state.run_id()),
+            trade_id,
+            amount: usdc_amount.clone(),
+        }))
+        .await?;
+
+        if quote.output_amount.asset != usdc {
+            self.publish(RuntimeEvent::Swap(SwapEvent::TradeSwapSubmitted {
+                metadata: EventMetadata::new(self.app_state.run_id()),
+                trade_id,
+                input_amount: usdc_amount.clone(),
+            }))
+            .await?;
+            self.publish(RuntimeEvent::Swap(SwapEvent::TradeSwapConfirmed {
+                metadata: EventMetadata::new(self.app_state.run_id()),
+                trade_id,
+                input_amount: usdc_amount,
+                output_amount: quote.output_amount.clone(),
+            }))
+            .await?;
+        }
+
+        Ok(())
     }
 
     async fn run_settlement_redeems(
