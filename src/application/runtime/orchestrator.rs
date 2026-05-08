@@ -10,8 +10,8 @@ use tokio::sync::RwLock;
 
 use crate::adapters::persistence::db::Db;
 use crate::adapters::persistence::ledger::{
-    LedgerAccountId, LedgerAccountType, LedgerEventConsumer, LedgerSaveOutcome, LedgerTransaction,
-    SqliteLedgerRepository,
+    LedgerAccountId, LedgerAccountType, LedgerBalance, LedgerEventConsumer, LedgerSaveOutcome,
+    LedgerTransaction, SqliteLedgerRepository,
 };
 use crate::adapters::persistence::pnl::{PnlCategory, PnlEstimate, PnlPriceBook, PnlRepository};
 use crate::adapters::solana::htlc::{generate_secret, hash_secret};
@@ -93,12 +93,96 @@ pub struct RuntimeLedgerSummary {
     pub net_usdc_estimate: Decimal,
 }
 
+/// Snapshot of derived ledger balances and aggregate health used by the
+/// public `/v1/runtime/ledger` endpoint.
+///
+/// `healthy` combines the integrity report check with a per-protected-account
+/// non-negative invariant. `entry_count` and `healthy` describe the whole
+/// ledger; callers may filter `balances` by `account_type` without affecting
+/// the global counters.
+#[derive(Debug, Clone)]
+pub struct LedgerReadSnapshot {
+    /// True when integrity is healthy AND no protected account is negative.
+    pub healthy: bool,
+    /// Total ledger entry rows.
+    pub entry_count: u64,
+    /// Non-zero derived balances keyed by `(account_type, asset, qualifier)`.
+    pub balances: Vec<LedgerBalance>,
+}
+
 impl Default for RuntimeLedgerSummary {
     fn default() -> Self {
         Self {
             balanced: true,
             entry_count: 0,
             net_usdc_estimate: Decimal::ZERO,
+        }
+    }
+}
+
+/// One trade-bound transaction signature with kind discriminator.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TradeSignature {
+    /// Stable kind discriminator for downstream UI rendering.
+    pub kind: TradeSignatureKind,
+    /// Solana signature string.
+    pub signature: String,
+}
+
+/// Stable discriminator for trade-bound signatures. Background rebalance
+/// signatures are never reported here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TradeSignatureKind {
+    /// Taker leg HTLC submitted/confirmed.
+    TakerLock,
+    /// Taker leg HTLC redeemed by the maker.
+    TakerRedeem,
+    /// Taker leg HTLC refunded.
+    TakerRefund,
+    /// Maker leg HTLC submitted/confirmed.
+    MakerLock,
+    /// Maker leg HTLC redeemed by the taker.
+    MakerRedeem,
+    /// Maker leg HTLC refunded.
+    MakerRefund,
+    /// Gateway burn intent.
+    GatewayBurn,
+    /// Gateway mint receipt.
+    GatewayMint,
+    /// Jupiter swap submitted as part of a Gateway-to-DEX trade leg.
+    JupiterSwap,
+}
+
+impl TradeSignatureKind {
+    /// Map an HTLC receipt's `(leg, status)` pair into the trade-summary
+    /// signature kind. Returns `None` for transitional or pending states
+    /// where no trade-summary entry should be appended.
+    ///
+    /// Convention: `leg` identifies WHICH HTLC the receipt describes (not
+    /// who acted). So a `Redeemed` receipt with `leg = MakerOutput` means
+    /// "maker's HTLC was redeemed", which by lifecycle convention happens
+    /// by the taker → kind = `taker_redeem`.
+    #[must_use]
+    pub const fn from_htlc_receipt(
+        leg: crate::domain::settlement::SettlementLeg,
+        status: SettlementStatus,
+    ) -> Option<Self> {
+        use crate::domain::settlement::SettlementLeg;
+        match (leg, status) {
+            (
+                SettlementLeg::TakerInput,
+                SettlementStatus::Initiated | SettlementStatus::Pending,
+            ) => Some(Self::TakerLock),
+            (
+                SettlementLeg::MakerOutput,
+                SettlementStatus::Initiated | SettlementStatus::Pending,
+            ) => Some(Self::MakerLock),
+            (SettlementLeg::MakerOutput, SettlementStatus::Redeemed) => Some(Self::TakerRedeem),
+            (SettlementLeg::TakerInput, SettlementStatus::Redeemed) => Some(Self::MakerRedeem),
+            (SettlementLeg::TakerInput, SettlementStatus::Refunded) => Some(Self::TakerRefund),
+            (SettlementLeg::MakerOutput, SettlementStatus::Refunded) => Some(Self::MakerRefund),
+            _ => None,
         }
     }
 }
@@ -114,6 +198,13 @@ pub struct RuntimeTrade {
     pub settlement_status: SettlementStatus,
     /// Solana signatures observed during settlement.
     pub tx_signatures: Vec<TxSignature>,
+    /// Trade-bound transaction signatures with `kind` discriminator. Used
+    /// by `/v1/runtime/trades`. Background rebalance signatures are
+    /// excluded.
+    pub tx_signature_kinds: Vec<TradeSignature>,
+    /// UTC creation timestamp; used to sort trades newest-first in the
+    /// `/v1/runtime/trades` response.
+    pub created_at: OffsetDateTime,
     /// Taker input amount.
     pub input_amount: TokenAmount,
     /// Maker output amount.
@@ -171,6 +262,8 @@ struct WalletSettlementState {
     taker_lock_request: ExternalHtlcInitiation,
     taker_wallet: WalletAddress,
     tx_signatures: Vec<TxSignature>,
+    tx_signature_kinds: Vec<TradeSignature>,
+    created_at: OffsetDateTime,
 }
 
 /// Summary of one post-settlement automation pass.
@@ -433,6 +526,40 @@ impl RuntimePersistence {
         Ok(())
     }
 
+    /// Return the asset registry used by valuation and presentation layers.
+    #[must_use]
+    pub fn asset_registry(&self) -> &AssetRegistry {
+        &self.registry
+    }
+
+    /// Return a derived ledger snapshot suitable for the public read
+    /// endpoint. Combines `all_balances`, `entry_count`, and the integrity
+    /// report into a single atomic-ish read. Health is `true` only when the
+    /// integrity report is healthy AND no protected account holds a
+    /// negative balance.
+    ///
+    /// # Errors
+    ///
+    /// Returns a persistence error when any underlying read fails.
+    pub fn ledger_snapshot(&self) -> AppResult<LedgerReadSnapshot> {
+        let ledger = SqliteLedgerRepository::new(self.db.as_ref());
+        let balances = ledger.all_balances()?;
+        let entry_count = ledger.entry_count()?;
+        let integrity = ledger.integrity_report()?;
+
+        let protected_types = LedgerAccountType::protected_account_types();
+        let protected_negative = balances.iter().any(|balance| {
+            balance.balance_raw < 0 && protected_types.contains(&balance.account.account_type)
+        });
+        let healthy = integrity.healthy && !protected_negative;
+
+        Ok(LedgerReadSnapshot {
+            healthy,
+            entry_count,
+            balances,
+        })
+    }
+
     /// Return the latest P&L projection.
     ///
     /// # Errors
@@ -570,6 +697,13 @@ impl RuntimeOrchestrator {
         self.persistence.clone()
     }
 
+    /// Return the durable runtime persistence layer when wired. Alias for
+    /// `persistence_handle` used by the public read endpoints.
+    #[must_use]
+    pub fn persistence(&self) -> Option<Arc<RuntimePersistence>> {
+        self.persistence.clone()
+    }
+
     /// Read live wallet balances through the configured `BalanceReader` port.
     ///
     /// # Errors
@@ -590,6 +724,17 @@ impl RuntimeOrchestrator {
         asset: AssetId,
     ) -> AppResult<crate::domain::types::GatewayReceipt> {
         self.adapters.gateway_client.balance(asset).await
+    }
+
+    /// Return the asset registry from the durable runtime persistence layer
+    /// when wired, falling back to a registry built from the current config
+    /// otherwise.
+    #[must_use]
+    pub fn asset_registry(&self) -> AssetRegistry {
+        self.persistence.as_ref().map_or_else(
+            || AssetRegistry::from_config(self.app_state.config()),
+            |persistence| persistence.asset_registry().clone(),
+        )
     }
 
     /// Request a firm quote and store it only when risk accepts the RFQ.
@@ -707,12 +852,14 @@ impl RuntimeOrchestrator {
 
         let quote = self.take_quote(quote_id).await?;
         let trade_id = self.accept_quote_for_trade(&quote).await?;
-        let tx_signatures = self.settle_quote(&quote, trade_id).await?;
+        let (tx_signatures, tx_signature_kinds) = self.settle_quote(&quote, trade_id).await?;
         let trade = RuntimeTrade {
             quote_id,
             trade_id,
             settlement_status: SettlementStatus::Redeemed,
             tx_signatures,
+            tx_signature_kinds,
+            created_at: OffsetDateTime::now_utc(),
             input_amount: quote.input_amount.clone(),
             output_amount: quote.output_amount.clone(),
         };
@@ -762,7 +909,7 @@ impl RuntimeOrchestrator {
         &self,
         quote: &FirmQuote,
         trade_id: TradeId,
-    ) -> AppResult<Vec<TxSignature>> {
+    ) -> AppResult<(Vec<TxSignature>, Vec<TradeSignature>)> {
         let secret = generate_secret();
         let preimage = hex::encode(secret);
         let terms = SettlementTerms {
@@ -777,11 +924,23 @@ impl RuntimeOrchestrator {
         };
         let mut settlement = TwoSidedSettlement::new(terms);
         let mut tx_signatures = Vec::new();
+        let mut tx_signature_kinds = Vec::new();
 
-        self.run_settlement_locks(&mut settlement, quote, &mut tx_signatures)
-            .await?;
-        self.run_settlement_redeems(&mut settlement, quote, &mut tx_signatures, preimage)
-            .await?;
+        self.run_settlement_locks(
+            &mut settlement,
+            quote,
+            &mut tx_signatures,
+            &mut tx_signature_kinds,
+        )
+        .await?;
+        self.run_settlement_redeems(
+            &mut settlement,
+            quote,
+            &mut tx_signatures,
+            &mut tx_signature_kinds,
+            preimage,
+        )
+        .await?;
         self.publish(RuntimeEvent::Settlement(SettlementEvent::StatusChanged {
             metadata: EventMetadata::new(self.app_state.run_id()),
             trade_id,
@@ -789,7 +948,7 @@ impl RuntimeOrchestrator {
         }))
         .await?;
 
-        Ok(tx_signatures)
+        Ok((tx_signatures, tx_signature_kinds))
     }
 
     /// Start connected-wallet settlement for an accepted quote.
@@ -854,6 +1013,8 @@ impl RuntimeOrchestrator {
                 taker_lock_request,
                 taker_wallet,
                 tx_signatures: Vec::new(),
+                tx_signature_kinds: Vec::new(),
+                created_at: OffsetDateTime::now_utc(),
             },
         );
 
@@ -882,7 +1043,11 @@ impl RuntimeOrchestrator {
             .htlc_client
             .record_external_initiate(state.taker_lock_request.clone(), taker_lock_signature)
             .await?;
-        push_signature(&mut state.tx_signatures, taker_lock.signature.as_ref());
+        push_trade_signature(
+            &mut state.tx_signatures,
+            &mut state.tx_signature_kinds,
+            &taker_lock,
+        );
         let transition = state.settlement.record_taker_lock(
             self.app_state.run_id(),
             taker_lock.signature.as_ref().map(ToString::to_string),
@@ -907,7 +1072,11 @@ impl RuntimeOrchestrator {
                 state.taker_wallet.clone(),
             )
             .await?;
-        push_signature(&mut state.tx_signatures, maker_lock.signature.as_ref());
+        push_trade_signature(
+            &mut state.tx_signatures,
+            &mut state.tx_signature_kinds,
+            &maker_lock,
+        );
         let transition = state.settlement.record_maker_lock(
             self.app_state.run_id(),
             maker_lock.signature.as_ref().map(ToString::to_string),
@@ -978,7 +1147,11 @@ impl RuntimeOrchestrator {
             .htlc_client
             .record_external_redeem(trade_id, taker_redeem_signature)
             .await?;
-        push_signature(&mut state.tx_signatures, taker_redeem.signature.as_ref());
+        push_trade_signature(
+            &mut state.tx_signatures,
+            &mut state.tx_signature_kinds,
+            &taker_redeem,
+        );
         let transition = state.settlement.record_taker_redeem(
             self.app_state.run_id(),
             taker_redeem.signature.as_ref().map(ToString::to_string),
@@ -987,7 +1160,11 @@ impl RuntimeOrchestrator {
             .await?;
 
         let maker_redeem = self.adapters.htlc_client.redeem(trade_id, preimage).await?;
-        push_signature(&mut state.tx_signatures, maker_redeem.signature.as_ref());
+        push_trade_signature(
+            &mut state.tx_signatures,
+            &mut state.tx_signature_kinds,
+            &maker_redeem,
+        );
         let transition = state.settlement.record_maker_redeem(
             self.app_state.run_id(),
             maker_redeem.signature.as_ref().map(ToString::to_string),
@@ -1006,6 +1183,8 @@ impl RuntimeOrchestrator {
             trade_id,
             settlement_status: SettlementStatus::Redeemed,
             tx_signatures: state.tx_signatures.clone(),
+            tx_signature_kinds: state.tx_signature_kinds.clone(),
+            created_at: state.created_at,
             input_amount: state.quote.input_amount,
             output_amount: state.quote.output_amount,
         };
@@ -1035,6 +1214,7 @@ impl RuntimeOrchestrator {
         settlement: &mut TwoSidedSettlement,
         quote: &FirmQuote,
         tx_signatures: &mut Vec<TxSignature>,
+        tx_signature_kinds: &mut Vec<TradeSignature>,
     ) -> AppResult<()> {
         let start = settlement.start(self.app_state.run_id());
         self.publish(RuntimeEvent::Settlement(start.event)).await?;
@@ -1053,7 +1233,7 @@ impl RuntimeOrchestrator {
                 return Err(AppError::solana(reason));
             }
         };
-        push_signature(tx_signatures, taker_lock.signature.as_ref());
+        push_trade_signature(tx_signatures, tx_signature_kinds, &taker_lock);
         let transition = settlement.record_taker_lock(
             self.app_state.run_id(),
             taker_lock.signature.as_ref().map(ToString::to_string),
@@ -1099,7 +1279,7 @@ impl RuntimeOrchestrator {
                 return Err(AppError::solana(reason));
             }
         };
-        push_signature(tx_signatures, maker_lock.signature.as_ref());
+        push_trade_signature(tx_signatures, tx_signature_kinds, &maker_lock);
         let transition = settlement.record_maker_lock(
             self.app_state.run_id(),
             maker_lock.signature.as_ref().map(ToString::to_string),
@@ -1137,6 +1317,7 @@ impl RuntimeOrchestrator {
         settlement: &mut TwoSidedSettlement,
         quote: &FirmQuote,
         tx_signatures: &mut Vec<TxSignature>,
+        tx_signature_kinds: &mut Vec<TradeSignature>,
         preimage: String,
     ) -> AppResult<()> {
         let trade_id = settlement.terms.trade_id;
@@ -1154,7 +1335,7 @@ impl RuntimeOrchestrator {
                 return Err(AppError::solana(reason));
             }
         };
-        push_signature(tx_signatures, taker_redeem.signature.as_ref());
+        push_trade_signature(tx_signatures, tx_signature_kinds, &taker_redeem);
         let transition = settlement.record_taker_redeem(
             self.app_state.run_id(),
             taker_redeem.signature.as_ref().map(ToString::to_string),
@@ -1171,7 +1352,7 @@ impl RuntimeOrchestrator {
                 return Err(AppError::solana(reason));
             }
         };
-        push_signature(tx_signatures, maker_redeem.signature.as_ref());
+        push_trade_signature(tx_signatures, tx_signature_kinds, &maker_redeem);
         let transition = settlement.record_maker_redeem(
             self.app_state.run_id(),
             maker_redeem.signature.as_ref().map(ToString::to_string),
@@ -1183,6 +1364,27 @@ impl RuntimeOrchestrator {
     /// Return a stored trade record.
     pub async fn trade(&self, trade_id: TradeId) -> Option<RuntimeTrade> {
         self.trades.read().await.get(&trade_id).cloned()
+    }
+
+    /// Return up to `limit` of the most recently created in-memory trades,
+    /// sorted newest-first by `created_at`.
+    pub async fn recent_trades(&self, limit: usize) -> Vec<RuntimeTrade> {
+        let mut trades: Vec<RuntimeTrade> = self.trades.read().await.values().cloned().collect();
+        trades.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        trades.truncate(limit);
+        trades
+    }
+
+    /// Return `(total, successful)` counts where `successful` counts trades
+    /// whose settlement status is [`SettlementStatus::Redeemed`].
+    pub async fn trade_counts(&self) -> (usize, usize) {
+        let trades = self.trades.read().await;
+        let total = trades.len();
+        let successful = trades
+            .values()
+            .filter(|trade| trade.settlement_status == SettlementStatus::Redeemed)
+            .count();
+        (total, successful)
     }
 
     /// Return the latest durable ledger/P&L summary.
@@ -1517,6 +1719,8 @@ impl RuntimeOrchestrator {
             trade_id: settlement.terms.trade_id,
             settlement_status: SettlementStatus::Failed,
             tx_signatures: tx_signatures.to_vec(),
+            tx_signature_kinds: Vec::new(),
+            created_at: OffsetDateTime::now_utc(),
             input_amount: quote.input_amount.clone(),
             output_amount: quote.output_amount.clone(),
         };
@@ -1772,5 +1976,25 @@ impl RuntimeOrchestrator {
 fn push_signature(signatures: &mut Vec<TxSignature>, signature: Option<&TxSignature>) {
     if let Some(signature) = signature {
         signatures.push(signature.clone());
+    }
+}
+
+/// Append a signature plus its kind discriminator derived from the receipt's
+/// `(leg, status)` pair. No-op when the receipt has no signature or the
+/// kind is not a trade-summary state.
+fn push_trade_signature(
+    plain: &mut Vec<TxSignature>,
+    kinded: &mut Vec<TradeSignature>,
+    receipt: &crate::domain::types::HtlcReceipt,
+) {
+    push_signature(plain, receipt.signature.as_ref());
+    if let (Some(signature), Some(kind)) = (
+        receipt.signature.as_ref(),
+        TradeSignatureKind::from_htlc_receipt(receipt.leg, receipt.status),
+    ) {
+        kinded.push(TradeSignature {
+            kind,
+            signature: signature.as_str().to_owned(),
+        });
     }
 }

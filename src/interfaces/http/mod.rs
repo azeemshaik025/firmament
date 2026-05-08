@@ -1,6 +1,7 @@
 //! Local Axum operator API for RFQ route shells and runtime projection reads.
 
 pub mod auth;
+pub mod runtime_read;
 pub mod types;
 
 use std::env;
@@ -21,7 +22,9 @@ use tower_http::services::ServeDir;
 use tracing::info;
 
 use crate::application::rfq;
-use crate::application::runtime::{AppState, RuntimeHandle, RuntimeOrchestrator, RuntimeTrade};
+use crate::application::runtime::{
+    AppState, RuntimeHandle, RuntimeOrchestrator, RuntimePersistence, RuntimeTrade,
+};
 use crate::config::{
     AppConfig, FIRMAMENT_ADMIN_PASSWORD_HASHES_ENV, FIRMAMENT_ADMIN_SESSION_SECRET_ENV,
 };
@@ -95,8 +98,17 @@ pub fn router(app_state: &AppState) -> Router {
 pub fn router_with_orchestrator(orchestrator: Arc<RuntimeOrchestrator>) -> Router {
     let runtime = orchestrator.runtime();
     let config = orchestrator.config().clone();
-    let service = Arc::new(OrchestratorRfqApiService::new(orchestrator));
-    router_with_service(config, runtime, service)
+    let persistence = orchestrator.persistence();
+    let service: Arc<dyn RfqApiService> =
+        Arc::new(OrchestratorRfqApiService::new(orchestrator.clone()));
+    let context = Arc::new(ApiContext {
+        config,
+        runtime,
+        service,
+        persistence,
+        orchestrator: Some(orchestrator),
+    });
+    build_router(context)
 }
 
 /// Build a router with an injected RFQ service implementation.
@@ -109,9 +121,17 @@ pub fn router_with_service(
         config,
         runtime,
         service,
+        persistence: None,
+        orchestrator: None,
     });
+    build_router(context)
+}
 
+fn build_router(context: Arc<ApiContext>) -> Router {
     Router::new()
+        .route("/health", get(runtime_read::get_health))
+        .route("/v1/runtime/ledger", get(runtime_read::get_ledger))
+        .route("/v1/runtime/trades", get(runtime_read::get_trades))
         .route("/v1/rfq", post(post_rfq))
         .route("/v1/quotes/{quote_id}/accept", post(post_quote_accept))
         .route(
@@ -192,10 +212,14 @@ pub async fn serve_orchestrator(orchestrator: Arc<RuntimeOrchestrator>) -> AppRe
 }
 
 #[derive(Clone)]
-struct ApiContext {
-    config: AppConfig,
-    runtime: RuntimeHandle,
-    service: Arc<dyn RfqApiService>,
+pub(crate) struct ApiContext {
+    pub(crate) config: AppConfig,
+    pub(crate) runtime: RuntimeHandle,
+    pub(crate) service: Arc<dyn RfqApiService>,
+    /// Durable persistence layer when wired (orchestrator router only).
+    pub(crate) persistence: Option<Arc<RuntimePersistence>>,
+    /// Live orchestrator handle when wired (orchestrator router only).
+    pub(crate) orchestrator: Option<Arc<RuntimeOrchestrator>>,
 }
 
 #[derive(Debug, Clone)]
@@ -823,7 +847,7 @@ pub struct ApiError {
 }
 
 impl ApiError {
-    fn new(
+    pub(crate) fn new(
         status: StatusCode,
         code: &'static str,
         message: impl Into<String>,
@@ -837,7 +861,7 @@ impl ApiError {
         }
     }
 
-    fn bad_request(code: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn bad_request(code: &'static str, message: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_REQUEST, code, message, Vec::new())
     }
 
@@ -862,7 +886,7 @@ impl ApiError {
         Self::bad_request("invalid_path", error.body_text())
     }
 
-    fn from_app_error(error: AppError) -> Self {
+    pub(crate) fn from_app_error(error: AppError) -> Self {
         match error {
             AppError::Validation(message) => Self::bad_request("validation_failed", message),
             AppError::Unsupported(message) => Self::new(

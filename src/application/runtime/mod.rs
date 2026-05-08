@@ -10,9 +10,10 @@ pub use bootstrap::{
     bootstrap_maker_runtime,
 };
 pub use orchestrator::{
-    AutomationRunSummary, RuntimeAdapters, RuntimeLedgerSummary, RuntimeOrchestrator,
-    RuntimeOrchestratorOptions, RuntimePersistence, RuntimeTrade, WalletSettlementStart,
-    WalletTakerLockResult, WalletTakerRedeemPreparation, WalletTakerRedeemResult,
+    AutomationRunSummary, LedgerReadSnapshot, RuntimeAdapters, RuntimeLedgerSummary,
+    RuntimeOrchestrator, RuntimeOrchestratorOptions, RuntimePersistence, RuntimeTrade,
+    TradeSignature, TradeSignatureKind, WalletSettlementStart, WalletTakerLockResult,
+    WalletTakerRedeemPreparation, WalletTakerRedeemResult,
 };
 pub use projection::{
     GatewayProjection, InventoryProjection, PnlProjection, RebalanceProjection, RfqProjection,
