@@ -12,9 +12,11 @@
 //! for operator visibility.
 
 pub mod drift;
+pub mod gateway_monitor;
 pub mod wallet_monitor;
 
 pub use drift::{DriftOutcome, DriftWindow};
+pub use gateway_monitor::{GatewayMonitor, GatewayObservation};
 pub use wallet_monitor::{ObservationOutcome, WalletMonitor, WalletObservation};
 
 use std::collections::HashMap;
@@ -32,13 +34,14 @@ pub(crate) type SequenceMap = HashMap<(&'static str, AssetId, String), u64>;
 
 /// Always-on reconciliation worker handle.
 ///
-/// Owns the per-asset `WalletMonitor` plus the daily idempotency-sequence
-/// map seeded from the ledger at startup. The Gateway monitor lands in a
-/// follow-up commit (Task A5).
+/// Owns the per-asset `WalletMonitor` and the singleton `GatewayMonitor`,
+/// plus the daily idempotency-sequence map seeded from the ledger at
+/// startup.
 pub struct ReconciliationWorker {
     orchestrator: Arc<RuntimeOrchestrator>,
     config: ReconciliationConfig,
     wallet: WalletMonitor,
+    gateway: GatewayMonitor,
 }
 
 impl ReconciliationWorker {
@@ -58,12 +61,14 @@ impl ReconciliationWorker {
             persistence.seed_recon_sequences(&today, &mut sequences)?;
         }
 
-        let wallet = WalletMonitor::new(&config, sequences);
+        let wallet = WalletMonitor::new(&config, sequences.clone());
+        let gateway = GatewayMonitor::new(&config, sequences);
 
         Ok(Self {
             orchestrator,
             config,
             wallet,
+            gateway,
         })
     }
 
@@ -75,6 +80,16 @@ impl ReconciliationWorker {
     /// Returns adapter, ledger, or event-publish errors.
     pub async fn tick_wallet(&mut self, asset: &AssetId) -> AppResult<WalletObservation> {
         self.wallet.tick(self.orchestrator.as_ref(), asset).await
+    }
+
+    /// Run one Gateway observation for the supplied asset (USDC). Used by
+    /// integration tests that drive the worker deterministically.
+    ///
+    /// # Errors
+    ///
+    /// Returns adapter, ledger, or event-publish errors.
+    pub async fn tick_gateway(&mut self, asset: &AssetId) -> AppResult<GatewayObservation> {
+        self.gateway.tick(self.orchestrator.as_ref(), asset).await
     }
 
     /// Borrow the active reconciliation config.

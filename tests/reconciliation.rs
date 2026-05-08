@@ -92,6 +92,10 @@ impl ProgrammableGatewayClient {
             balance_raw: Arc::new(Mutex::new(initial)),
         }
     }
+
+    fn set(&self, raw: u64) {
+        *self.balance_raw.lock().expect("gateway lock") = raw;
+    }
 }
 
 #[async_trait]
@@ -171,7 +175,6 @@ struct Harness {
     orchestrator: Arc<RuntimeOrchestrator>,
     persistence: Arc<RuntimePersistence>,
     balance_reader: ProgrammableBalanceReader,
-    #[allow(dead_code)]
     gateway_client: ProgrammableGatewayClient,
 }
 
@@ -203,6 +206,64 @@ async fn build_harness() -> Harness {
         balance_reader,
         gateway_client,
     }
+}
+
+fn seed_gateway(persistence: &Arc<RuntimePersistence>, asset: &AssetId, amount: u64) {
+    if amount == 0 {
+        return;
+    }
+    let transaction = LedgerTransactionBuilder::new("test_seed_gateway", uuid::Uuid::now_v7())
+        .description("seed gateway for reconciliation test")
+        .idempotency_key(format!(
+            "test:seed:gateway:{}:{}:{}",
+            asset.as_str(),
+            amount,
+            uuid::Uuid::now_v7()
+        ))
+        .debit(LedgerAccountId::gateway(asset.clone()), AmountRaw::new(amount))
+        .credit(
+            LedgerAccountId::external(asset.clone(), "seed"),
+            AmountRaw::new(amount),
+        )
+        .build()
+        .expect("balanced gateway seed");
+    persistence
+        .save_ledger_transaction(&transaction)
+        .expect("save gateway seed");
+}
+
+fn seed_gateway_reserved(
+    persistence: &Arc<RuntimePersistence>,
+    asset: &AssetId,
+    trade_id: &str,
+    amount: u64,
+) {
+    if amount == 0 {
+        return;
+    }
+    let transaction =
+        LedgerTransactionBuilder::new("test_seed_gateway_reserved", uuid::Uuid::now_v7())
+            .description("seed gateway_reserved")
+            .idempotency_key(format!(
+                "test:seed:gateway_reserved:{}:{}:{}:{}",
+                asset.as_str(),
+                trade_id,
+                amount,
+                uuid::Uuid::now_v7()
+            ))
+            .debit(
+                LedgerAccountId::gateway_reserved(asset.clone(), trade_id.to_owned()),
+                AmountRaw::new(amount),
+            )
+            .credit(
+                LedgerAccountId::external(asset.clone(), "seed_gateway_reserved"),
+                AmountRaw::new(amount),
+            )
+            .build()
+            .expect("balanced gateway_reserved seed");
+    persistence
+        .save_ledger_transaction(&transaction)
+        .expect("save gateway_reserved seed");
 }
 
 fn seed_in_flight_pending_escrow(
@@ -512,4 +573,83 @@ async fn recon_emits_event_on_skip() {
         firmament::events::ReconciliationScope::Wallet
     ));
     assert!(matches!(outcome, ReconciliationOutcome::WithinDust));
+}
+
+#[tokio::test]
+async fn recon_gateway_positive_drift_adjusts_external_to_gateway() {
+    let harness = build_harness().await;
+
+    seed_gateway(&harness.persistence, &usdc(), 1_000_000);
+    harness.gateway_client.set(1_020_000); // drift = +20_000
+
+    let mut worker = build_worker(&harness);
+    let mut last_outcome: Option<ObservationOutcome> = None;
+    for _ in 0..3 {
+        last_outcome = Some(
+            worker
+                .tick_gateway(&usdc())
+                .await
+                .expect("gateway tick")
+                .outcome,
+        );
+    }
+    let key = match last_outcome.expect("three ticks ran") {
+        ObservationOutcome::Adjusted { idempotency_key } => idempotency_key,
+        other => panic!("expected Adjusted, got {other:?}"),
+    };
+    assert!(
+        key.starts_with("recon:gateway:USDC:"),
+        "unexpected gateway key: {key}"
+    );
+
+    let gateway = harness
+        .persistence
+        .account_balance(&LedgerAccountId::gateway(usdc()))
+        .expect("gateway balance");
+    assert_eq!(gateway, 1_020_000);
+
+    let external = harness
+        .persistence
+        .account_balance(&LedgerAccountId::external(usdc(), "reconciliation"))
+        .expect("external");
+    assert_eq!(external, -20_000);
+}
+
+#[tokio::test]
+async fn recon_gateway_skip_when_gateway_reserved_active() {
+    let harness = build_harness().await;
+
+    // Gateway holds 1_000_000 USDC, with 100 reserved for an in-flight trade.
+    seed_gateway(&harness.persistence, &usdc(), 1_000_000);
+    seed_gateway_reserved(&harness.persistence, &usdc(), "trade-1", 100);
+
+    // On-chain Gateway balance is BELOW expected (1_000_100). Drift is
+    // 980_000 - 1_000_100 = -20_100 — well above dust and negative.
+    harness.gateway_client.set(980_000);
+
+    let mut worker = build_worker(&harness);
+    let mut outcomes = Vec::new();
+    for _ in 0..3 {
+        outcomes.push(
+            worker
+                .tick_gateway(&usdc())
+                .await
+                .expect("gateway tick")
+                .outcome,
+        );
+    }
+
+    let last = outcomes.last().expect("three ticks ran").clone();
+    match last {
+        ObservationOutcome::Skipped { reason } => {
+            assert_eq!(reason, "gateway_reserved_active");
+        }
+        other => panic!("expected Skipped(gateway_reserved_active), got {other:?}"),
+    }
+
+    let external = harness
+        .persistence
+        .account_balance(&LedgerAccountId::external(usdc(), "reconciliation"))
+        .expect("external");
+    assert_eq!(external, 0);
 }
