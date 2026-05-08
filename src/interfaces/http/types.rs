@@ -289,6 +289,114 @@ pub struct AdminSummaryResponse {
     pub recent_events: Vec<RuntimeEvent>,
 }
 
+/// Response body for `GET /v1/runtime/ledger`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LedgerSnapshotResponse {
+    /// Whether the ledger is healthy: integrity report passes and no
+    /// protected account holds a negative balance.
+    pub healthy: bool,
+    /// Total ledger entry count (whole ledger, ignores filtering).
+    pub entry_count: u64,
+    /// Non-zero derived balances. Filtered subset when `account_type` is
+    /// passed.
+    pub balances: Vec<LedgerBalanceEntry>,
+}
+
+/// One derived ledger balance row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LedgerBalanceEntry {
+    /// Snake-case account-type string from
+    /// [`crate::adapters::persistence::ledger::LedgerAccountType`].
+    pub account_type: String,
+    /// Asset identifier (e.g. `USDC`).
+    pub asset: String,
+    /// Optional account qualifier echoed verbatim from the entry. Never
+    /// includes a Solana wallet address.
+    pub qualifier: Option<String>,
+    /// Stringified `i128` raw amount; signed.
+    pub balance_raw: String,
+    /// Asset native decimals from the registry, or `0` when unknown.
+    pub decimals: u8,
+    /// Fixed-width display amount with `decimals` fractional digits.
+    pub display_amount: String,
+}
+
+/// Response body for `GET /v1/runtime/trades`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TradesResponse {
+    /// Total in-memory trade count.
+    pub total_count: u64,
+    /// Total trades whose settlement status is `redeemed`.
+    pub successful_count: u64,
+    /// Trades returned, newest first, capped at `limit` (default 10, max 100).
+    pub trades: Vec<TradeSummary>,
+}
+
+/// One trade summary row returned by `/v1/runtime/trades`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TradeSummary {
+    /// Runtime trade identifier.
+    pub trade_id: String,
+    /// Quote that produced the trade.
+    pub quote_id: String,
+    /// Snake-case settlement status.
+    pub settlement_status: String,
+    /// Taker input amount.
+    pub input: TradeAmount,
+    /// Maker output amount.
+    pub output: TradeAmount,
+    /// Trade-bound transaction signatures with `kind` discriminator.
+    /// Background rebalance signatures are excluded.
+    pub tx_signatures: Vec<TradeSignature>,
+}
+
+/// Per-trade input/output amount breakdown.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TradeAmount {
+    /// Asset identifier.
+    pub asset: String,
+    /// Stringified `i128` raw amount.
+    pub amount_raw: String,
+    /// Asset native decimals from the registry, or `0` when unknown.
+    pub decimals: u8,
+    /// Fixed-width display amount with `decimals` fractional digits.
+    pub display_amount: String,
+}
+
+/// One trade-bound transaction signature with kind discriminator.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TradeSignature {
+    /// Stable kind discriminator for downstream UI rendering.
+    pub kind: TradeSignatureKind,
+    /// Solana signature string.
+    pub signature: String,
+}
+
+/// Stable discriminator for trade-bound signatures. Background rebalance
+/// signatures are never reported here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TradeSignatureKind {
+    /// Taker leg HTLC submitted/confirmed.
+    TakerLock,
+    /// Taker leg HTLC redeemed by the maker.
+    TakerRedeem,
+    /// Taker leg HTLC refunded.
+    TakerRefund,
+    /// Maker leg HTLC submitted/confirmed.
+    MakerLock,
+    /// Maker leg HTLC redeemed by the taker.
+    MakerRedeem,
+    /// Maker leg HTLC refunded.
+    MakerRefund,
+    /// Gateway burn intent.
+    GatewayBurn,
+    /// Gateway mint receipt.
+    GatewayMint,
+    /// Jupiter swap submitted as part of a Gateway-to-DEX trade leg.
+    JupiterSwap,
+}
+
 /// Stable JSON error envelope used by API routes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ErrorResponse {

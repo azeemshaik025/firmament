@@ -287,6 +287,84 @@ async fn health_endpoint_returns_ok() {
 }
 
 #[tokio::test]
+async fn ledger_endpoint_returns_balances() {
+    let app = test_orchestrator_router().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/runtime/ledger")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_json(response).await;
+    assert_eq!(body["healthy"], true);
+    assert!(body["entry_count"].as_u64().unwrap() > 0);
+    let balances = body["balances"].as_array().expect("balances array");
+    assert!(balances.iter().any(|b| {
+        b["account_type"] == "working_custody"
+            && b["asset"] == "USDC"
+            && b["balance_raw"].is_string()
+            && b["decimals"].as_u64() == Some(6)
+            && b["display_amount"].is_string()
+    }));
+}
+
+#[tokio::test]
+async fn ledger_endpoint_filters_by_account_type() {
+    let app = test_orchestrator_router().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/runtime/ledger?account_type=working_custody")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_json(response).await;
+    let balances = body["balances"].as_array().expect("balances array");
+    assert!(!balances.is_empty(), "expected at least one filtered entry");
+    for entry in balances {
+        assert_eq!(entry["account_type"], "working_custody");
+    }
+    // entry_count is global, so it includes the unfiltered total.
+    assert!(body["entry_count"].as_u64().unwrap() > 0);
+}
+
+#[tokio::test]
+async fn ledger_endpoint_rejects_unknown_account_type() {
+    let app = test_orchestrator_router().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/runtime/ledger?account_type=foo")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = response_json(response).await;
+    assert_eq!(body["error"]["code"], "invalid_account_type");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("foo")
+    );
+}
+
+#[tokio::test]
 async fn api_json_error_shape() {
     let app = test_router().await;
 

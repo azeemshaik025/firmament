@@ -10,8 +10,8 @@ use tokio::sync::RwLock;
 
 use crate::adapters::persistence::db::Db;
 use crate::adapters::persistence::ledger::{
-    LedgerAccountId, LedgerAccountType, LedgerEventConsumer, LedgerSaveOutcome, LedgerTransaction,
-    SqliteLedgerRepository,
+    LedgerAccountId, LedgerAccountType, LedgerBalance, LedgerEventConsumer, LedgerSaveOutcome,
+    LedgerTransaction, SqliteLedgerRepository,
 };
 use crate::adapters::persistence::pnl::{PnlCategory, PnlEstimate, PnlPriceBook, PnlRepository};
 use crate::adapters::solana::htlc::{generate_secret, hash_secret};
@@ -91,6 +91,23 @@ pub struct RuntimeLedgerSummary {
     pub entry_count: usize,
     /// Net USDC-estimated P&L.
     pub net_usdc_estimate: Decimal,
+}
+
+/// Snapshot of derived ledger balances and aggregate health used by the
+/// public `/v1/runtime/ledger` endpoint.
+///
+/// `healthy` combines the integrity report check with a per-protected-account
+/// non-negative invariant. `entry_count` and `healthy` describe the whole
+/// ledger; callers may filter `balances` by `account_type` without affecting
+/// the global counters.
+#[derive(Debug, Clone)]
+pub struct LedgerReadSnapshot {
+    /// True when integrity is healthy AND no protected account is negative.
+    pub healthy: bool,
+    /// Total ledger entry rows.
+    pub entry_count: u64,
+    /// Non-zero derived balances keyed by `(account_type, asset, qualifier)`.
+    pub balances: Vec<LedgerBalance>,
 }
 
 impl Default for RuntimeLedgerSummary {
@@ -309,6 +326,40 @@ impl RuntimePersistence {
         SqliteLedgerRepository::new(self.db.as_ref()).save_transaction(transaction)
     }
 
+    /// Return the asset registry used by valuation and presentation layers.
+    #[must_use]
+    pub fn asset_registry(&self) -> &AssetRegistry {
+        &self.registry
+    }
+
+    /// Return a derived ledger snapshot suitable for the public read
+    /// endpoint. Combines `all_balances`, `entry_count`, and the integrity
+    /// report into a single atomic-ish read. Health is `true` only when the
+    /// integrity report is healthy AND no protected account holds a
+    /// negative balance.
+    ///
+    /// # Errors
+    ///
+    /// Returns a persistence error when any underlying read fails.
+    pub fn ledger_snapshot(&self) -> AppResult<LedgerReadSnapshot> {
+        let ledger = SqliteLedgerRepository::new(self.db.as_ref());
+        let balances = ledger.all_balances()?;
+        let entry_count = ledger.entry_count()?;
+        let integrity = ledger.integrity_report()?;
+
+        let protected_types = LedgerAccountType::protected_account_types();
+        let protected_negative = balances.iter().any(|balance| {
+            balance.balance_raw < 0 && protected_types.contains(&balance.account.account_type)
+        });
+        let healthy = integrity.healthy && !protected_negative;
+
+        Ok(LedgerReadSnapshot {
+            healthy,
+            entry_count,
+            balances,
+        })
+    }
+
     /// Return the latest P&L projection.
     ///
     /// # Errors
@@ -430,6 +481,23 @@ impl RuntimeOrchestrator {
     #[must_use]
     pub fn runtime(&self) -> RuntimeHandle {
         self.app_state.runtime()
+    }
+
+    /// Return the durable runtime persistence layer when wired.
+    #[must_use]
+    pub fn persistence(&self) -> Option<Arc<RuntimePersistence>> {
+        self.persistence.clone()
+    }
+
+    /// Return the asset registry from the durable runtime persistence layer
+    /// when wired, falling back to a registry built from the current config
+    /// otherwise.
+    #[must_use]
+    pub fn asset_registry(&self) -> AssetRegistry {
+        self.persistence.as_ref().map_or_else(
+            || AssetRegistry::from_config(self.app_state.config()),
+            |persistence| persistence.asset_registry().clone(),
+        )
     }
 
     /// Request a firm quote and store it only when risk accepts the RFQ.
