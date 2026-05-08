@@ -92,20 +92,20 @@ fn funded_demo_inventory() -> BalanceSnapshot {
     ])
 }
 
-/// Relax per-asset min/max notional caps on every supported asset to a wide
+/// Relax per-asset min/max amount caps on every supported asset to a wide
 /// test range so legacy tests that send arbitrary mocked amounts continue to
-/// reach the gate they are exercising. The default config caps trades at $1-$2
-/// (or $1-$5 for cbBTC), which the per-asset gate (correctly) enforces.
-fn relax_asset_notional_limits(config: &mut AppConfig) {
+/// reach the gate they are exercising. The default config caps user-entered
+/// amounts per asset, which the per-asset gate (correctly) enforces.
+fn relax_asset_amount_limits(config: &mut AppConfig) {
     for asset in &mut config.assets.supported {
-        asset.min_trade_notional_usd = Decimal::new(1, 6); // $0.000001
-        asset.max_trade_notional_usd = Decimal::from(1_000);
+        asset.min_trade_amount = Decimal::new(1, 6);
+        asset.max_trade_amount = Decimal::from(1_000);
     }
 }
 
 fn relaxed_default_config() -> AppConfig {
     let mut config = AppConfig::default();
-    relax_asset_notional_limits(&mut config);
+    relax_asset_amount_limits(&mut config);
     config
 }
 
@@ -857,7 +857,7 @@ async fn rfq_gateway_quoteability_uses_ledger_minus_reserved() {
     config.risk.max_trade_notional_usd = Decimal::from(1_000);
     config.risk.max_daily_notional_usd = Decimal::from(10_000);
     config.risk.max_non_stable_asset_notional_usd = Decimal::from(1_000);
-    relax_asset_notional_limits(&mut config);
+    relax_asset_amount_limits(&mut config);
 
     // SOL = $200 reference: 1 USDC = 0.005 SOL, 1 SOL = 200 USDC.
     let price_provider = FakePriceProvider {
@@ -971,14 +971,14 @@ async fn quote_records_inventory_to_inventory_path_when_custody_covers() {
 async fn quote_records_gateway_to_dex_path_when_only_gateway_covers() {
     // working_custody:SOL = 0; gateway:USDC seeded with enough free supply to
     // cover the requested SOL output. Quote should resolve to
-    // ExecutionPath::GatewayToDex. Per-asset notional caps are relaxed so the
+    // ExecutionPath::GatewayToDex. Per-asset amount caps are relaxed so the
     // Gateway-path resolution is the load-bearing assertion.
     let mut config = AppConfig::default();
     config.risk.max_quote_notional_usd = Decimal::from(1_000);
     config.risk.max_trade_notional_usd = Decimal::from(1_000);
     config.risk.max_daily_notional_usd = Decimal::from(10_000);
     config.risk.max_non_stable_asset_notional_usd = Decimal::from(1_000);
-    relax_asset_notional_limits(&mut config);
+    relax_asset_amount_limits(&mut config);
 
     // SOL = $200 reference: 1 USDC = 0.005 SOL.
     let price_provider = FakePriceProvider {
@@ -1052,9 +1052,9 @@ fn rfq_with(input_mint: MintAddress, output_mint: MintAddress, amount_raw: u64) 
 }
 
 #[tokio::test]
-async fn rfq_rejects_input_below_asset_min_notional() {
-    // Default per-asset USDC min is $1. $0.50 USDC must reject with the
-    // per-asset reason — not the global cap.
+async fn rfq_rejects_input_below_asset_min_amount() {
+    // Default per-asset USDC min is 1 USDC. 0.50 USDC must reject with the
+    // per-asset amount reason, not the global cap.
     let persistence = Arc::new(
         RuntimePersistence::open_in_memory(AssetRegistry::default()).expect("persistence"),
     );
@@ -1079,19 +1079,19 @@ async fn rfq_rejects_input_below_asset_min_notional() {
         .expect("request rfq");
     match response {
         RfqResponse::Rejected(rejection) => {
-            assert_eq!(rejection.reason, RejectionReason::BelowAssetMinNotional);
+            assert_eq!(rejection.reason, RejectionReason::BelowAssetMinAmount);
         }
         RfqResponse::Accepted(quote) => {
-            panic!("expected BelowAssetMinNotional rejection, got {quote:?}")
+            panic!("expected BelowAssetMinAmount rejection, got {quote:?}")
         }
     }
 }
 
 #[tokio::test]
-async fn rfq_rejects_input_above_asset_max_notional() {
-    // Default per-asset USDC max is $2. $3 USDC must reject with the
-    // per-asset reason; the global $2 cap is also breached but the per-asset
-    // gate runs first.
+async fn rfq_rejects_input_above_asset_max_amount() {
+    // Default per-asset USDC max is 2 USDC. 3 USDC must reject with the
+    // per-asset amount reason; the global $2 cap is also breached but the
+    // per-asset gate runs first.
     let persistence = Arc::new(
         RuntimePersistence::open_in_memory(AssetRegistry::default()).expect("persistence"),
     );
@@ -1116,20 +1116,19 @@ async fn rfq_rejects_input_above_asset_max_notional() {
         .expect("request rfq");
     match response {
         RfqResponse::Rejected(rejection) => {
-            assert_eq!(rejection.reason, RejectionReason::AboveAssetMaxNotional);
+            assert_eq!(rejection.reason, RejectionReason::AboveAssetMaxAmount);
         }
         RfqResponse::Accepted(quote) => {
-            panic!("expected AboveAssetMaxNotional rejection, got {quote:?}")
+            panic!("expected AboveAssetMaxAmount rejection, got {quote:?}")
         }
     }
 }
 
 #[tokio::test]
-async fn rfq_rejects_output_above_asset_max_notional_when_input_passes() {
-    // Bump USDC max to $10 so the input passes, but cbBTC max stays at $5.
-    // Send $7 USDC -> cbBTC: input ($7) < USDC max ($10), output (~$7 cbBTC
-    // worth) > cbBTC max ($5), so the gate must reject on the output side
-    // with AboveAssetMaxNotional.
+async fn rfq_amount_gate_only_checks_user_entered_input_asset() {
+    // Bump USDC max to 10 so the input passes. cbBTC keeps its tiny default
+    // amount range, but the output is quote-derived and should not make the
+    // input box feel hostile.
     let mut config = AppConfig::default();
     config.risk.max_quote_notional_usd = Decimal::from(20);
     config.risk.max_trade_notional_usd = Decimal::from(20);
@@ -1137,8 +1136,8 @@ async fn rfq_rejects_output_above_asset_max_notional_when_input_passes() {
     config.risk.max_non_stable_asset_notional_usd = Decimal::from(20);
     for asset in &mut config.assets.supported {
         if asset.id.as_str() == "USDC" {
-            asset.min_trade_notional_usd = Decimal::ONE;
-            asset.max_trade_notional_usd = Decimal::from(10);
+            asset.min_trade_amount = Decimal::ONE;
+            asset.max_trade_amount = Decimal::from(10);
         }
     }
 
@@ -1188,16 +1187,12 @@ async fn rfq_rejects_output_above_asset_max_notional_when_input_passes() {
         .await
         .expect("request rfq");
     match response {
-        RfqResponse::Rejected(rejection) => {
-            assert_eq!(
-                rejection.reason,
-                RejectionReason::AboveAssetMaxNotional,
-                "expected output-side AboveAssetMaxNotional, got {:?}",
-                rejection.reason,
-            );
-        }
         RfqResponse::Accepted(quote) => {
-            panic!("expected output-side AboveAssetMaxNotional, got {quote:?}")
+            assert_eq!(quote.input_amount.asset, usdc());
+            assert_eq!(quote.output_amount.asset, cbbtc());
+        }
+        RfqResponse::Rejected(rejection) => {
+            panic!("expected accepted input-range quote, got {rejection:?}")
         }
     }
 }
@@ -2725,7 +2720,7 @@ fn relaxed_gateway_path_config() -> AppConfig {
     config.risk.max_trade_notional_usd = Decimal::from(1_000);
     config.risk.max_daily_notional_usd = Decimal::from(10_000);
     config.risk.max_non_stable_asset_notional_usd = Decimal::from(1_000);
-    relax_asset_notional_limits(&mut config);
+    relax_asset_amount_limits(&mut config);
     config
 }
 

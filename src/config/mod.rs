@@ -228,6 +228,36 @@ impl AppConfig {
         if self.runtime.scaffold_hold_millis > 10_000 {
             self.runtime.scaffold_hold_millis = 10_000;
         }
+
+        for asset in &mut self.assets.supported {
+            normalize_asset_trade_amounts(asset);
+        }
+    }
+}
+
+fn normalize_asset_trade_amounts(asset: &mut AssetConfig) {
+    let Some((default_min, default_max)) = default_trade_amount_limits(asset.id.as_str()) else {
+        return;
+    };
+
+    let legacy_default_limits = (Decimal::ONE, Decimal::new(2, 0));
+    let legacy_cbbtc_limits = (Decimal::ONE, Decimal::new(5, 0));
+    let current_limits = (asset.min_trade_amount, asset.max_trade_amount);
+    let looks_like_legacy_notional = current_limits == legacy_default_limits
+        || (asset.id.as_str() == "cbBTC" && current_limits == legacy_cbbtc_limits);
+
+    if asset.id.as_str() != "USDC" && looks_like_legacy_notional {
+        asset.min_trade_amount = default_min;
+        asset.max_trade_amount = default_max;
+    }
+}
+
+fn default_trade_amount_limits(asset_id: &str) -> Option<(Decimal, Decimal)> {
+    match asset_id {
+        "USDC" => Some((Decimal::ONE, Decimal::new(2, 0))),
+        "SOL" => Some((Decimal::new(1, 2), Decimal::new(2, 2))),
+        "cbBTC" => Some((Decimal::new(1, 5), Decimal::new(2, 5))),
+        _ => None,
     }
 }
 
@@ -337,16 +367,16 @@ pub struct AssetConfig {
     pub target_weight: Decimal,
     /// Minimum raw working inventory required before quoting this asset.
     pub quoteable_threshold_raw: AmountRaw,
-    /// Per-asset minimum trade notional in estimated USD. Both legs of a trade
-    /// must clear their own asset's minimum.
-    pub min_trade_notional_usd: Decimal,
-    /// Per-asset maximum trade notional in estimated USD. Both legs of a trade
-    /// must stay below their own asset's maximum.
-    pub max_trade_notional_usd: Decimal,
+    /// Per-asset minimum user-entered trade amount in display units.
+    #[serde(alias = "min_trade_notional_usd")]
+    pub min_trade_amount: Decimal,
+    /// Per-asset maximum user-entered trade amount in display units.
+    #[serde(alias = "max_trade_notional_usd")]
+    pub max_trade_amount: Decimal,
 }
 
-/// Sane ceiling for per-asset notional caps; guards against u64 overflow.
-const ASSET_NOTIONAL_USD_CEILING: u64 = 1_000_000;
+/// Sane ceiling for per-asset display amount caps; guards against u64 overflow.
+const ASSET_TRADE_AMOUNT_CEILING: u64 = 1_000_000;
 
 impl AssetConfig {
     /// Validate local asset metadata.
@@ -388,25 +418,37 @@ impl AssetConfig {
             )));
         }
 
-        if self.min_trade_notional_usd <= Decimal::ZERO {
+        if self.min_trade_amount <= Decimal::ZERO {
             return Err(AppError::validation(format!(
-                "asset {} min_trade_notional_usd must be greater than zero",
+                "asset {} min_trade_amount must be greater than zero",
                 self.id
             )));
         }
 
-        if self.max_trade_notional_usd < self.min_trade_notional_usd {
+        if self.max_trade_amount < self.min_trade_amount {
             return Err(AppError::validation(format!(
-                "asset {} max_trade_notional_usd must be at least min_trade_notional_usd",
+                "asset {} max_trade_amount must be at least min_trade_amount",
                 self.id
             )));
         }
 
-        if self.max_trade_notional_usd > Decimal::from(ASSET_NOTIONAL_USD_CEILING) {
+        if self.max_trade_amount > Decimal::from(ASSET_TRADE_AMOUNT_CEILING) {
             return Err(AppError::validation(format!(
-                "asset {} max_trade_notional_usd exceeds ceiling {ASSET_NOTIONAL_USD_CEILING}",
+                "asset {} max_trade_amount exceeds ceiling {ASSET_TRADE_AMOUNT_CEILING}",
                 self.id
             )));
+        }
+
+        for (field, amount) in [
+            ("min_trade_amount", self.min_trade_amount),
+            ("max_trade_amount", self.max_trade_amount),
+        ] {
+            if amount.normalize().scale() > u32::from(self.decimals) {
+                return Err(AppError::validation(format!(
+                    "asset {} {field} has more precision than its {} decimals",
+                    self.id, self.decimals
+                )));
+            }
         }
 
         Ok(())
@@ -423,8 +465,8 @@ impl Default for AssetConfig {
             enabled: true,
             target_weight: Decimal::new(60, 2),
             quoteable_threshold_raw: AmountRaw::new(2_000_000),
-            min_trade_notional_usd: Decimal::ONE,
-            max_trade_notional_usd: Decimal::new(2, 0),
+            min_trade_amount: Decimal::ONE,
+            max_trade_amount: Decimal::new(2, 0),
         }
     }
 }
@@ -761,8 +803,8 @@ fn default_assets() -> Vec<AssetConfig> {
             enabled: true,
             target_weight: Decimal::new(35, 2),
             quoteable_threshold_raw: AmountRaw::new(10_000_000),
-            min_trade_notional_usd: Decimal::ONE,
-            max_trade_notional_usd: Decimal::new(2, 0),
+            min_trade_amount: Decimal::new(1, 2),
+            max_trade_amount: Decimal::new(2, 2),
         },
         AssetConfig {
             id: AssetId::from("cbBTC"),
@@ -772,8 +814,51 @@ fn default_assets() -> Vec<AssetConfig> {
             enabled: true,
             target_weight: Decimal::new(5, 2),
             quoteable_threshold_raw: AmountRaw::new(1_000),
-            min_trade_notional_usd: Decimal::ONE,
-            max_trade_notional_usd: Decimal::new(5, 0),
+            min_trade_amount: Decimal::new(1, 5),
+            max_trade_amount: Decimal::new(2, 5),
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_migrates_legacy_sol_and_cbbtc_notional_defaults_to_amount_ranges() {
+        let mut config = AppConfig::default();
+        for asset in &mut config.assets.supported {
+            match asset.id.as_str() {
+                "SOL" => {
+                    asset.min_trade_amount = Decimal::ONE;
+                    asset.max_trade_amount = Decimal::new(2, 0);
+                }
+                "cbBTC" => {
+                    asset.min_trade_amount = Decimal::ONE;
+                    asset.max_trade_amount = Decimal::new(5, 0);
+                }
+                _ => {}
+            }
+        }
+
+        config.normalize();
+
+        let sol = config
+            .assets
+            .supported
+            .iter()
+            .find(|asset| asset.id.as_str() == "SOL")
+            .expect("SOL asset");
+        assert_eq!(sol.min_trade_amount, Decimal::new(1, 2));
+        assert_eq!(sol.max_trade_amount, Decimal::new(2, 2));
+
+        let cbbtc = config
+            .assets
+            .supported
+            .iter()
+            .find(|asset| asset.id.as_str() == "cbBTC")
+            .expect("cbBTC asset");
+        assert_eq!(cbbtc.min_trade_amount, Decimal::new(1, 5));
+        assert_eq!(cbbtc.max_trade_amount, Decimal::new(2, 5));
+    }
 }

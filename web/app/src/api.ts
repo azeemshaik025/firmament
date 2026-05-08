@@ -6,8 +6,8 @@ export type Asset = {
   name?: string;
   // serde rust_decimal::Decimal serializes as a JSON string (e.g. "1.50").
   // Marked optional so older runtimes without the field still type-check.
-  min_trade_notional_usd?: string;
-  max_trade_notional_usd?: string;
+  min_trade_amount?: string;
+  max_trade_amount?: string;
   aliases?: string[];
   kind?: 'native' | 'spl';
   network?: string;
@@ -25,6 +25,8 @@ export type Pair = {
   output_decimals: number;
   max_quote_notional_usd: string;
   min_quote_notional_usd: string;
+  min_input_trade_amount?: string;
+  max_input_trade_amount?: string;
   default_expiry_seconds: number;
 };
 

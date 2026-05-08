@@ -18,6 +18,7 @@ use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use rust_decimal::Decimal;
 use serde::Deserialize;
 use tokio::net::TcpListener;
 use tower_http::cors::{Any, CorsLayer};
@@ -47,7 +48,6 @@ use crate::interfaces::http::types::{
     TakerRedeemResponse, TradeAmounts, TradeResponse, WalletSettlementRequest,
     WalletSettlementResponse,
 };
-use rust_decimal::Decimal;
 use std::str::FromStr;
 
 const ADMIN_COOKIE_NAME: &str = "firmament_admin";
@@ -707,8 +707,8 @@ fn build_assets_response(config: &AppConfig) -> Vec<AssetResponse> {
                 symbol: asset.symbol.clone(),
                 mint: asset.mint.clone(),
                 decimals: asset.decimals,
-                min_trade_notional_usd: asset.min_trade_notional_usd,
-                max_trade_notional_usd: asset.max_trade_notional_usd,
+                min_trade_amount: asset.min_trade_amount,
+                max_trade_amount: asset.max_trade_amount,
                 aliases,
                 kind,
                 network: network.clone(),
@@ -735,12 +735,6 @@ fn build_pairs_response(config: &AppConfig) -> PairsResponse {
         .filter_map(|pair| {
             let input = by_id.get(&pair.input)?;
             let output = by_id.get(&pair.output)?;
-            let max_quote_notional_usd = input
-                .max_trade_notional_usd
-                .min(output.max_trade_notional_usd);
-            let min_quote_notional_usd = input
-                .min_trade_notional_usd
-                .max(output.min_trade_notional_usd);
             Some(PairResponse {
                 input_asset: input.id.to_string(),
                 output_asset: output.id.to_string(),
@@ -748,8 +742,10 @@ fn build_pairs_response(config: &AppConfig) -> PairsResponse {
                 output_mint: output.mint.clone(),
                 input_decimals: input.decimals,
                 output_decimals: output.decimals,
-                max_quote_notional_usd,
-                min_quote_notional_usd,
+                max_quote_notional_usd: config.risk.max_quote_notional_usd,
+                min_quote_notional_usd: Decimal::ZERO,
+                min_input_trade_amount: input.min_trade_amount,
+                max_input_trade_amount: input.max_trade_amount,
                 default_expiry_seconds: config.assets.policy.default_quote_expiry_seconds,
             })
         })
@@ -1355,11 +1351,12 @@ fn rejection_message(reason: &RejectionReason) -> (&'static str, &'static str) {
         ),
         RejectionReason::MaxNotionalExceeded
         | RejectionReason::AboveAssetMaxNotional
+        | RejectionReason::AboveAssetMaxAmount
         | RejectionReason::CumulativeCapExceeded => (
             "The amount exceeds a configured maximum.",
             "Try a smaller amount.",
         ),
-        RejectionReason::BelowAssetMinNotional => (
+        RejectionReason::BelowAssetMinNotional | RejectionReason::BelowAssetMinAmount => (
             "The amount is below the per-asset minimum.",
             "Try a larger amount.",
         ),

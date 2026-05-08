@@ -85,6 +85,20 @@ max_daily_notional_usd = "15"
 max_non_stable_asset_notional_usd = "5"
 ```
 
+The swap input box uses per-asset display-unit ranges from each
+`[[assets.supported]]` row:
+
+```toml
+min_trade_amount = "1"       # USDC
+max_trade_amount = "2"
+
+min_trade_amount = "0.01"    # SOL
+max_trade_amount = "0.02"
+
+min_trade_amount = "0.00001" # cbBTC
+max_trade_amount = "0.00002"
+```
+
 USDC and SOL are already configured for Solana mainnet. cbBTC ships with a
 placeholder so nobody accidentally enables live mode against an unverified mint.
 Replace it before live mode:

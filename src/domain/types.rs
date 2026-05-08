@@ -301,6 +301,10 @@ pub enum RejectionReason {
     BelowAssetMinNotional,
     /// Trade notional exceeds the per-asset maximum.
     AboveAssetMaxNotional,
+    /// User-entered asset amount is below the per-asset minimum.
+    BelowAssetMinAmount,
+    /// User-entered asset amount exceeds the per-asset maximum.
+    AboveAssetMaxAmount,
     /// The cumulative automation cap would be exceeded.
     CumulativeCapExceeded,
     /// Inventory is below the configured quoteable threshold.

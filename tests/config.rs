@@ -76,6 +76,24 @@ fn config_example_preserves_tiny_demo_caps() {
     );
     assert_eq!(config.gateway.max_refill_notional_usd, Decimal::from(2));
     assert_eq!(config.gateway.max_refill_fee_raw.as_u64(), 250_000);
+
+    let sol = config
+        .assets
+        .supported
+        .iter()
+        .find(|asset| asset.id.as_str() == "SOL")
+        .expect("SOL asset");
+    assert_eq!(sol.min_trade_amount, Decimal::new(1, 2));
+    assert_eq!(sol.max_trade_amount, Decimal::new(2, 2));
+
+    let cbbtc = config
+        .assets
+        .supported
+        .iter()
+        .find(|asset| asset.id.as_str() == "cbBTC")
+        .expect("cbBTC asset");
+    assert_eq!(cbbtc.min_trade_amount, Decimal::new(1, 5));
+    assert_eq!(cbbtc.max_trade_amount, Decimal::new(2, 5));
 }
 
 #[test]

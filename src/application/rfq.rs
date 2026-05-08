@@ -315,16 +315,10 @@ pub async fn request_quote<P: PriceProvider + ?Sized>(
         );
     };
 
-    // Per-asset min/max gate. Each side must clear its own asset's range.
-    // The more restrictive bound wins. Runs after price resolution but before
-    // any quote acceptance so a rejection here is final.
-    if let Some(rejection) = check_per_asset_notional(
-        &quote.input_amount,
-        input_asset,
-        &quote.output_amount,
-        output_asset,
-        &context.risk_policy,
-    ) {
+    // Per-asset user-entered amount gate. This validates the denomination the
+    // taker typed, while the global USD notional cap below remains the safety
+    // rail for the whole RFQ.
+    if let Some(rejection) = check_input_asset_amount(&quote.input_amount, input_asset) {
         return rejected_outcome(quote_id, run_id, now, rejection.0, rejection.1, events);
     }
 
@@ -551,100 +545,33 @@ fn estimate_notional_usd(
     Some(input_ui * usd_price)
 }
 
-/// Compute the USD value of a single asset-tagged amount, using the
-/// USDC=1 peg and the policy's `asset_usd_prices` table for non-USDC assets.
-///
-/// For non-USDC assets where neither side of the pair offers a peg, callers
-/// must pass the counter-asset USD value to derive a synthetic price. This
-/// helper covers the common case where the policy carries a direct USD
-/// reference for the asset.
-fn side_notional_usd(
-    amount: &TokenAmount,
-    decimals: u8,
-    policy: &RiskPolicy,
-    counter_amount: &TokenAmount,
-    counter_decimals: u8,
-) -> Option<Decimal> {
-    if amount.asset.as_str() == "USDC" {
-        return raw_to_decimal(amount.amount_raw, decimals);
-    }
-
-    if let Some(price) = policy
-        .asset_usd_prices
-        .iter()
-        .find(|(asset, _)| asset == &amount.asset)
-        .map(|(_, price)| *price)
-    {
-        let ui = raw_to_decimal(amount.amount_raw, decimals)?;
-        return Some(ui * price);
-    }
-
-    // Fall back to the counter amount when the counter is USDC. This keeps the
-    // gate functioning for USDC<->X pairs without requiring a populated USD
-    // price table for X.
-    if counter_amount.asset.as_str() == "USDC" {
-        return raw_to_decimal(counter_amount.amount_raw, counter_decimals);
-    }
-
-    None
-}
-
-fn check_per_asset_notional(
+fn check_input_asset_amount(
     input: &TokenAmount,
-    input_asset: &AssetConfig,
-    output: &TokenAmount,
-    output_asset: &AssetConfig,
-    policy: &RiskPolicy,
-) -> Option<(RejectionReason, String)> {
-    let input_usd = side_notional_usd(
-        input,
-        input_asset.decimals,
-        policy,
-        output,
-        output_asset.decimals,
-    );
-    let output_usd = side_notional_usd(
-        output,
-        output_asset.decimals,
-        policy,
-        input,
-        input_asset.decimals,
-    );
-
-    if let Some(rejection) = check_side(&input.asset, input_asset, input_usd) {
-        return Some(rejection);
-    }
-    check_side(&output.asset, output_asset, output_usd)
-}
-
-fn check_side(
-    asset: &AssetId,
     asset_config: &AssetConfig,
-    notional_usd: Option<Decimal>,
 ) -> Option<(RejectionReason, String)> {
-    let Some(notional_usd) = notional_usd else {
+    let Some(display_amount) = raw_to_decimal(input.amount_raw, asset_config.decimals) else {
         return Some((
             RejectionReason::ValidationFailed,
-            format!("missing USD valuation for asset {asset}"),
+            format!("unable to convert {} amount to display units", input.asset),
         ));
     };
 
-    if notional_usd < asset_config.min_trade_notional_usd {
+    if display_amount < asset_config.min_trade_amount {
         return Some((
-            RejectionReason::BelowAssetMinNotional,
+            RejectionReason::BelowAssetMinAmount,
             format!(
-                "{asset} notional ${notional_usd} is below the per-asset minimum ${}",
-                asset_config.min_trade_notional_usd
+                "{} amount {} is below the per-asset minimum {}",
+                input.asset, display_amount, asset_config.min_trade_amount
             ),
         ));
     }
 
-    if notional_usd > asset_config.max_trade_notional_usd {
+    if display_amount > asset_config.max_trade_amount {
         return Some((
-            RejectionReason::AboveAssetMaxNotional,
+            RejectionReason::AboveAssetMaxAmount,
             format!(
-                "{asset} notional ${notional_usd} exceeds the per-asset maximum ${}",
-                asset_config.max_trade_notional_usd
+                "{} amount {} exceeds the per-asset maximum {}",
+                input.asset, display_amount, asset_config.max_trade_amount
             ),
         ));
     }
@@ -706,6 +633,11 @@ mod tests {
     }
 
     fn asset(id: AssetId, mint: MintAddress, decimals: u8, threshold: u64) -> AssetConfig {
+        let (min_trade_amount, max_trade_amount) = match id.as_str() {
+            "SOL" => (Decimal::new(1, 2), Decimal::new(2, 2)),
+            "cbBTC" => (Decimal::new(1, 5), Decimal::new(2, 5)),
+            _ => (Decimal::ONE, Decimal::new(2, 0)),
+        };
         AssetConfig {
             id,
             symbol: String::new(),
@@ -714,8 +646,8 @@ mod tests {
             enabled: true,
             target_weight: Decimal::ZERO,
             quoteable_threshold_raw: AmountRaw::new(threshold),
-            min_trade_notional_usd: Decimal::ONE,
-            max_trade_notional_usd: Decimal::new(2, 0),
+            min_trade_amount,
+            max_trade_amount,
         }
     }
 
@@ -788,6 +720,16 @@ mod tests {
         }
     }
 
+    fn sol_to_usdc_rfq(amount: u64) -> RfqRequest {
+        RfqRequest {
+            input_mint: sol_mint(),
+            output_mint: usdc_mint(),
+            input_amount_raw: AmountRaw::new(amount),
+            taker_wallet: taker(),
+            expiry_seconds: None,
+        }
+    }
+
     #[derive(Debug, Clone)]
     struct FakePriceProvider {
         price: ReferencePrice,
@@ -822,6 +764,41 @@ mod tests {
                 observed_at,
             },
         }
+    }
+
+    fn sol_usdc_price(observed_at: OffsetDateTime) -> FakePriceProvider {
+        FakePriceProvider {
+            price: ReferencePrice {
+                pair: AssetPair::new(sol(), usdc()),
+                output_per_input: Decimal::new(90, 0),
+                observed_at,
+            },
+        }
+    }
+
+    fn denomination_amount_context() -> RfqContext {
+        let mut context = context(1_000_000_000);
+        context.risk_policy.supported_pairs = vec![AssetPair::new(sol(), usdc())];
+        context.risk_policy.asset_usd_prices =
+            vec![(usdc(), Decimal::ONE), (sol(), Decimal::new(90, 0))];
+        context.assets = vec![
+            asset(usdc(), usdc_mint(), 6, 1_000_000),
+            asset(sol(), sol_mint(), 9, 1_000_000),
+        ];
+        for asset in &mut context.assets {
+            match asset.id.as_str() {
+                "USDC" => {
+                    asset.min_trade_amount = Decimal::ONE;
+                    asset.max_trade_amount = Decimal::new(2, 0);
+                }
+                "SOL" => {
+                    asset.min_trade_amount = Decimal::new(1, 2);
+                    asset.max_trade_amount = Decimal::new(2, 2);
+                }
+                _ => {}
+            }
+        }
+        context
     }
 
     fn direct_non_usdc_context() -> RfqContext {
@@ -929,9 +906,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rfq_uses_input_asset_denomination_limits_not_usd_notional() {
+        // 0.01 SOL is inside the configured SOL amount range (0.01..=0.02)
+        // even when the reference price makes its USD notional less than $1.
+        let outcome = request_quote(
+            sol_to_usdc_rfq(10_000_000),
+            &denomination_amount_context(),
+            &sol_usdc_price(now()),
+            RuntimeRunId::generate(),
+            now(),
+        )
+        .await;
+
+        match outcome.response {
+            RfqResponse::Accepted(quote) => {
+                assert_eq!(quote.input_amount.amount_raw, AmountRaw::new(10_000_000));
+                assert_eq!(quote.input_amount.asset, sol());
+            }
+            RfqResponse::Rejected(rejection) => {
+                panic!("expected accepted denomination-range quote, got {rejection:?}");
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn rfq_rejects_oversized_request() {
-        // Per-asset USDC max ($2) trips before the global cap when the
-        // request notional is $3.
+        // Per-asset USDC max (2 USDC) trips before the global cap when the
+        // user enters 3 USDC.
         let outcome = request_quote(
             rfq(3_000_000),
             &context(1_000_000_000),
@@ -943,7 +944,7 @@ mod tests {
 
         assert_eq!(
             rejection_reason(&outcome),
-            Some(&RejectionReason::AboveAssetMaxNotional)
+            Some(&RejectionReason::AboveAssetMaxAmount)
         );
     }
 

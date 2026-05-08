@@ -84,6 +84,7 @@ Default safety caps in the sample config:
 - `$2` max notional per action
 - `$15` cumulative automated notional per run
 - `$5` non-native, non-stable asset exception cap for route minimums
+- user-entered RFQ ranges: `1-2 USDC`, `0.01-0.02 SOL`, and `0.00001-0.00002 cbBTC`
 
 Before any live cbBTC run, replace the sample placeholder mint with the Solana
 mint listed by Coinbase:

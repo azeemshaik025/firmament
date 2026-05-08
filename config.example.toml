@@ -21,8 +21,8 @@ decimals = 6
 enabled = true
 target_weight = "0.60"
 quoteable_threshold_raw = 2_000_000
-min_trade_notional_usd = "1"
-max_trade_notional_usd = "2"
+min_trade_amount = "1"
+max_trade_amount = "2"
 
 [[assets.supported]]
 id = "SOL"
@@ -32,8 +32,8 @@ decimals = 9
 enabled = true
 target_weight = "0.35"
 quoteable_threshold_raw = 10_000_000
-min_trade_notional_usd = "1"
-max_trade_notional_usd = "2"
+min_trade_amount = "0.01"
+max_trade_amount = "0.02"
 
 [[assets.supported]]
 id = "cbBTC"
@@ -43,8 +43,8 @@ decimals = 8
 enabled = true
 target_weight = "0.05"
 quoteable_threshold_raw = 1_000
-min_trade_notional_usd = "1"
-max_trade_notional_usd = "5"
+min_trade_amount = "0.00001"
+max_trade_amount = "0.00002"
 
 # Every enabled supported asset can quote against every other enabled asset by
 # default. Add directional blacklist rows only for pairs you want to disable.

@@ -20,20 +20,20 @@ use std::sync::{Arc, Mutex};
 use time::{Duration, OffsetDateTime};
 use tower::ServiceExt;
 
-/// Relax per-asset notional limits to a wide test range so legacy API tests
+/// Relax per-asset amount limits to a wide test range so legacy API tests
 /// that send arbitrary mocked amounts continue to reach the gate they
-/// exercise. The default config caps each asset's trades at $1-$2 (or $1-$5
-/// for cbBTC), which the per-asset gate (correctly) enforces.
-fn relax_asset_notional_limits(config: &mut AppConfig) {
+/// exercise. The default config caps each asset's user-entered amount, which
+/// the per-asset gate (correctly) enforces.
+fn relax_asset_amount_limits(config: &mut AppConfig) {
     for asset in &mut config.assets.supported {
-        asset.min_trade_notional_usd = Decimal::new(1, 6); // $0.000001
-        asset.max_trade_notional_usd = Decimal::from(1_000);
+        asset.min_trade_amount = Decimal::new(1, 6);
+        asset.max_trade_amount = Decimal::from(1_000);
     }
 }
 
 fn relaxed_default_config() -> AppConfig {
     let mut config = AppConfig::default();
-    relax_asset_notional_limits(&mut config);
+    relax_asset_amount_limits(&mut config);
     config
 }
 
@@ -343,10 +343,10 @@ async fn api_docs_playground_preflight_allows_local_docs_origin() {
 }
 
 #[tokio::test]
-async fn assets_endpoint_exposes_per_asset_notional_limits() {
-    // GET /v1/assets must include min_trade_notional_usd and
-    // max_trade_notional_usd for every supported, enabled asset so the swap
-    // UI can validate input amounts before sending an RFQ.
+async fn assets_endpoint_exposes_per_asset_amount_limits() {
+    // GET /v1/assets must include native-denomination min/max amounts for
+    // every supported, enabled asset so the swap UI can validate the user's
+    // typed input directly before sending an RFQ.
     let app_state = bootstrap(AppConfig::default())
         .await
         .expect("bootstrap state");
@@ -370,14 +370,21 @@ async fn assets_endpoint_exposes_per_asset_notional_limits() {
     for asset in assets {
         let id = asset["id"].as_str().expect("asset id");
         assert!(
-            asset.get("min_trade_notional_usd").is_some(),
-            "asset {id} missing min_trade_notional_usd",
+            asset.get("min_trade_amount").is_some(),
+            "asset {id} missing min_trade_amount",
         );
         assert!(
-            asset.get("max_trade_notional_usd").is_some(),
-            "asset {id} missing max_trade_notional_usd",
+            asset.get("max_trade_amount").is_some(),
+            "asset {id} missing max_trade_amount",
         );
     }
+
+    let sol = assets
+        .iter()
+        .find(|asset| asset["id"] == "SOL")
+        .expect("SOL asset");
+    assert_eq!(sol["min_trade_amount"], "0.01");
+    assert_eq!(sol["max_trade_amount"], "0.02");
 }
 
 #[tokio::test]

@@ -180,10 +180,10 @@ pub struct AssetResponse {
     pub mint: MintAddress,
     /// Native token decimals.
     pub decimals: u8,
-    /// Per-asset minimum trade notional in estimated USD.
-    pub min_trade_notional_usd: Decimal,
-    /// Per-asset maximum trade notional in estimated USD.
-    pub max_trade_notional_usd: Decimal,
+    /// Per-asset minimum user-entered trade amount in display units.
+    pub min_trade_amount: Decimal,
+    /// Per-asset maximum user-entered trade amount in display units.
+    pub max_trade_amount: Decimal,
     /// Lower-case aliases accepted by friendly RFQ requests.
     pub aliases: Vec<String>,
     /// Asset class: `native` or `spl`.
@@ -227,6 +227,10 @@ pub struct PairResponse {
     /// Minimum quote notional in estimated USD (the larger of the per-asset
     /// minimums for both legs).
     pub min_quote_notional_usd: Decimal,
+    /// Minimum user-entered input amount in display units.
+    pub min_input_trade_amount: Decimal,
+    /// Maximum user-entered input amount in display units.
+    pub max_input_trade_amount: Decimal,
     /// Default expiry in seconds applied when a request omits `expiry_seconds`.
     pub default_expiry_seconds: u64,
 }

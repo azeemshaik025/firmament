@@ -12,6 +12,12 @@ type Notice = {
   detail?: string;
 };
 
+type TerminalFailure = {
+  kind: 'insufficient_funds' | 'missing_signer' | 'pre_lock_blocker';
+  title: string;
+  detail?: string;
+};
+
 const noticeTimeoutMs: Record<NoticeTone, number> = {
   info: 4_000,
   success: 4_000,
@@ -20,20 +26,10 @@ const noticeTimeoutMs: Record<NoticeTone, number> = {
 };
 
 const fallbackAssets: Asset[] = [
-  { id: 'USDC', symbol: 'USDC', name: 'USD Coin', mint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', decimals: 6, min_trade_notional_usd: '1', max_trade_notional_usd: '2' },
-  { id: 'SOL', symbol: 'SOL', name: 'Solana', mint: 'So11111111111111111111111111111111111111112', decimals: 9, min_trade_notional_usd: '1', max_trade_notional_usd: '2' },
-  { id: 'cbBTC', symbol: 'cbBTC', name: 'Coinbase Wrapped BTC', mint: 'cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij', decimals: 8, min_trade_notional_usd: '1', max_trade_notional_usd: '5' }
+  { id: 'USDC', symbol: 'USDC', name: 'USD Coin', mint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', decimals: 6, min_trade_amount: '1', max_trade_amount: '2' },
+  { id: 'SOL', symbol: 'SOL', name: 'Solana', mint: 'So11111111111111111111111111111111111111112', decimals: 9, min_trade_amount: '0.01', max_trade_amount: '0.02' },
+  { id: 'cbBTC', symbol: 'cbBTC', name: 'Coinbase Wrapped BTC', mint: 'cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij', decimals: 8, min_trade_amount: '0.00001', max_trade_amount: '0.00002' }
 ];
-
-// Conservative fallback USD prices used when the runtime hasn't surfaced a
-// fresh oracle quote yet. The backend is the source of truth — these are only
-// used for client-side range hints to avoid sending an obviously-out-of-range
-// RFQ to the runtime.
-const fallbackUsdPriceBySymbol: Record<string, number> = {
-  USDC: 1,
-  SOL: 150,
-  cbBTC: 60_000
-};
 
 function parseDecimal(value: string | number | undefined): number | null {
   if (value === undefined) return null;
@@ -41,30 +37,19 @@ function parseDecimal(value: string | number | undefined): number | null {
   return Number.isFinite(numeric) ? numeric : null;
 }
 
-function assetUsdPrice(asset: Asset): number | null {
-  const fallback = fallbackUsdPriceBySymbol[asset.symbol] ?? fallbackUsdPriceBySymbol[asset.id];
-  return fallback ?? null;
-}
-
-function inputUsdValue(asset: Asset, amount: string): number | null {
-  const price = assetUsdPrice(asset);
-  const numeric = Number(amount);
-  if (!Number.isFinite(numeric) || price === null) return null;
-  return numeric * price;
-}
-
-function formatUsd(value: number) {
-  if (value < 1) {
-    return `$${value.toFixed(2)}`;
-  }
-  return `$${value.toFixed(value < 100 ? 2 : 0)}`;
+function formatAssetAmount(value: number, asset: Asset) {
+  const precision = Math.min(Math.max(asset.decimals, 2), 8);
+  return value.toLocaleString(undefined, {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: precision
+  });
 }
 
 function formatRangeLabel(asset: Asset): string | null {
-  const min = parseDecimal(asset.min_trade_notional_usd);
-  const max = parseDecimal(asset.max_trade_notional_usd);
+  const min = parseDecimal(asset.min_trade_amount);
+  const max = parseDecimal(asset.max_trade_amount);
   if (min === null || max === null) return null;
-  return `Min ${formatUsd(min)}, Max ${formatUsd(max)}`;
+  return `${formatAssetAmount(min, asset)}-${formatAssetAmount(max, asset)} ${asset.symbol}`;
 }
 
 const defaultSourceSymbol = 'SOL';
@@ -114,8 +99,8 @@ function withFallbackLimits(asset: Asset): Asset {
     ...fallback,
     ...asset,
     name: asset.name ?? fallback.name,
-    min_trade_notional_usd: asset.min_trade_notional_usd ?? fallback.min_trade_notional_usd,
-    max_trade_notional_usd: asset.max_trade_notional_usd ?? fallback.max_trade_notional_usd
+    min_trade_amount: asset.min_trade_amount ?? fallback.min_trade_amount,
+    max_trade_amount: asset.max_trade_amount ?? fallback.max_trade_amount
   };
 }
 
@@ -280,6 +265,10 @@ function readPersistedSwapState(): PersistedSwapState | null {
       window.localStorage.removeItem(swapStateStorageKey);
       return null;
     }
+    if (parsed.quote?.status === 'rejected') {
+      window.localStorage.removeItem(swapStateStorageKey);
+      return null;
+    }
 
     return {
       version: 1,
@@ -313,11 +302,15 @@ function writePersistedSwapState(snapshot: PersistedSwapState | null) {
 }
 
 function walletFailure(error: unknown, fallback: string) {
-  const message = error instanceof Error ? error.message : '';
-  if (message.toLowerCase().includes('reject') || message.toLowerCase().includes('cancel')) {
+  if (isWalletCancellation(error)) {
     return 'Wallet action was cancelled.';
   }
   return fallback;
+}
+
+function isWalletCancellation(error: unknown) {
+  const message = error instanceof Error ? error.message : '';
+  return message.toLowerCase().includes('reject') || message.toLowerCase().includes('cancel');
 }
 
 export function SwapPage() {
@@ -340,6 +333,7 @@ export function SwapPage() {
   const [preimage, setPreimage] = useState<string | null>(restoredSwap?.preimage ?? null);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [terminalFailure, setTerminalFailure] = useState<TerminalFailure | null>(null);
   const noticeTimeoutRef = useRef<number | null>(null);
   const quoteTimerRef = useRef<number | null>(null);
   const quoteRequestSeqRef = useRef(0);
@@ -363,18 +357,18 @@ export function SwapPage() {
     [amount, sourceAsset.decimals]
   );
   const sourceRangeLabel = useMemo(() => formatRangeLabel(sourceAsset), [sourceAsset]);
-  const notionalValidation = useMemo(() => {
+  const amountRangeValidation = useMemo(() => {
     if (amountValidation?.ok !== true) return null;
-    const min = parseDecimal(sourceAsset.min_trade_notional_usd);
-    const max = parseDecimal(sourceAsset.max_trade_notional_usd);
+    const min = parseDecimal(sourceAsset.min_trade_amount);
+    const max = parseDecimal(sourceAsset.max_trade_amount);
     if (min === null && max === null) return null;
-    const usd = inputUsdValue(sourceAsset, amount);
-    if (usd === null) return null;
-    if (min !== null && usd < min) {
-      return { ok: false, message: `Below ${formatUsd(min)} minimum for ${sourceAsset.symbol}.` } as const;
+    const numericAmount = Number(amount);
+    if (!Number.isFinite(numericAmount)) return null;
+    if (min !== null && numericAmount < min) {
+      return { ok: false, message: `Below ${formatAssetAmount(min, sourceAsset)} ${sourceAsset.symbol} minimum.` } as const;
     }
-    if (max !== null && usd > max) {
-      return { ok: false, message: `Above ${formatUsd(max)} maximum for ${sourceAsset.symbol}.` } as const;
+    if (max !== null && numericAmount > max) {
+      return { ok: false, message: `Above ${formatAssetAmount(max, sourceAsset)} ${sourceAsset.symbol} maximum.` } as const;
     }
     return { ok: true } as const;
   }, [amount, amountValidation, sourceAsset]);
@@ -388,36 +382,38 @@ export function SwapPage() {
   );
   const flowLocked = Boolean(settlement || lock || redeem);
   const completedSwap = Boolean(redeem?.settlement_status);
-  const canStartOver = Boolean((quote || settlement) && !lock && !redeem);
-  const notionalOk = notionalValidation?.ok !== false;
+  const terminalStartOver = Boolean(!lock && !redeem && (terminalFailure || quote?.status === 'rejected'));
+  const amountRangeOk = amountRangeValidation?.ok !== false;
   const showSourceRangeError = Boolean(
     sourceRangeLabel &&
     amountValidation?.ok === true &&
-    notionalValidation?.ok === false
+    amountRangeValidation?.ok === false
   );
   const primaryLabel = primaryActionLabel({
     hasWallet: Boolean(walletAddress),
     hasDestination: Boolean(outputAsset),
     amount,
     amountValidation,
-    notionalOk,
+    amountRangeOk,
     quote,
     quoteExpired,
     settlement,
     lock,
     redeem,
+    terminalStartOver,
     busy
   });
   const primaryDisabled = primaryActionDisabled({
     hasWallet: Boolean(walletAddress),
     hasDestination: Boolean(outputAsset),
     amountValidation,
-    notionalOk,
+    amountRangeOk,
     quote,
     quoteExpired,
     settlement,
     lock,
     redeem,
+    terminalStartOver,
     busy
   });
 
@@ -492,6 +488,7 @@ export function SwapPage() {
     setLock(null);
     setRedeem(null);
     setPreimage(null);
+    setTerminalFailure(null);
     setBusy((currentBusy) => (currentBusy === 'quote' ? null : currentBusy));
   }
 
@@ -552,6 +549,11 @@ export function SwapPage() {
       preimage
     );
 
+    if (terminalFailure || quote?.status === 'rejected') {
+      writePersistedSwapState(null);
+      return;
+    }
+
     if (!hasStateToRestore) {
       writePersistedSwapState(null);
       return;
@@ -575,7 +577,7 @@ export function SwapPage() {
       redeem,
       preimage
     });
-  }, [walletAddress, inputMint, outputMint, amount, quote, quoteExpired, settlement, lock, redeem, preimage]);
+  }, [walletAddress, inputMint, outputMint, amount, quote, quoteExpired, settlement, lock, redeem, preimage, terminalFailure]);
 
   useEffect(() => {
     if (!restoredQuoteRefreshRef.current || !walletAddress || !outputAsset || flowLocked) {
@@ -586,9 +588,6 @@ export function SwapPage() {
     if (quote?.status === 'accepted') {
       scheduleQuoteRefresh(quoteExpiryMs(quote) ?? quoteExpirySeconds * 1_000, 'expiry');
       return;
-    }
-    if (quote?.status === 'rejected') {
-      scheduleQuoteRefresh(quoteRetryMs, 'retry');
     }
   }, [walletAddress, outputAsset, flowLocked]);
 
@@ -611,8 +610,8 @@ export function SwapPage() {
     }
 
     // Backend is the source of truth, but skip the round-trip when the input
-    // is obviously outside the per-asset min/max range.
-    if (notionalValidation?.ok === false) {
+    // is obviously outside the per-asset denomination range.
+    if (amountRangeValidation?.ok === false) {
       return undefined;
     }
 
@@ -626,7 +625,7 @@ export function SwapPage() {
         clearQuoteTimer();
       }
     };
-  }, [walletAddress, outputMint, amount, sourceAsset.mint, sourceAsset.decimals, notionalValidation?.ok, flowLocked]);
+  }, [walletAddress, outputMint, amount, sourceAsset.mint, sourceAsset.decimals, amountRangeValidation?.ok, flowLocked]);
 
   function scheduleQuoteRefresh(delayMs: number, reason: 'expiry' | 'retry') {
     clearQuoteTimer();
@@ -706,11 +705,11 @@ export function SwapPage() {
         });
       } else {
         const rejection = quoteRejectionCopy(nextQuote);
-        scheduleQuoteRefresh(quoteRetryMs, 'retry');
+        clearQuoteTimer();
         showNotice({
           tone: 'warn',
           title: rejection.title,
-          detail: `${rejection.detail} It will retry automatically.`
+          detail: rejection.detail
         });
       }
     } catch (error) {
@@ -736,6 +735,7 @@ export function SwapPage() {
   async function startSettlement() {
     if (quote?.status !== 'accepted' || quoteExpired || !publicKey) return;
     clearQuoteTimer();
+    setTerminalFailure(null);
     setBusy('settlement');
     showNotice({ tone: 'info', title: 'Preparing secure settlement', detail: 'Your wallet will be asked to sign the next step.' }, { persist: true });
     try {
@@ -748,7 +748,14 @@ export function SwapPage() {
       }));
       showNotice({ tone: 'success', title: 'Secure settlement ready', detail: 'Your wallet can now lock funds for this swap.' });
     } catch (error) {
-      showNotice({ tone: 'error', title: 'Unable to prepare settlement', detail: error instanceof Error ? error.message : undefined });
+      const failure: TerminalFailure = {
+        kind: 'pre_lock_blocker',
+        title: 'Unable to prepare settlement',
+        detail: error instanceof Error ? error.message : undefined
+      };
+      setTerminalFailure(failure);
+      writePersistedSwapState(null);
+      showNotice({ tone: 'error', title: failure.title, detail: failure.detail });
     } finally {
       setBusy(null);
     }
@@ -766,8 +773,22 @@ export function SwapPage() {
   async function takerLock() {
     if (!settlement?.trade_id || quote?.status !== 'accepted' || !publicKey) return;
     setBusy('lock');
+    setTerminalFailure(null);
     showNotice({ tone: 'info', title: 'Waiting for wallet signature', detail: 'Your wallet will lock funds for the swap.' }, { persist: true });
+    let submittedSignature: string | null = null;
     try {
+      if (!signTransaction) {
+        const failure: TerminalFailure = {
+          kind: 'missing_signer',
+          title: 'Wallet cannot sign transactions',
+          detail: 'Connect a Solana wallet that supports transaction signing.'
+        };
+        setTerminalFailure(failure);
+        writePersistedSwapState(null);
+        showNotice({ tone: 'error', title: failure.title, detail: failure.detail });
+        return;
+      }
+
       const fundingIssue = await walletFundingIssue(
         connection,
         publicKey,
@@ -775,15 +796,34 @@ export function SwapPage() {
         quote.input.amount_raw
       );
       if (fundingIssue) {
-        showNotice({ tone: 'error', ...fundingIssue });
+        const failure: TerminalFailure = {
+          kind: 'insufficient_funds',
+          ...fundingIssue
+        };
+        setTerminalFailure(failure);
+        writePersistedSwapState(null);
+        showNotice({ tone: 'error', title: failure.title, detail: failure.detail });
         return;
       }
 
       const signature = await signAndSubmit(settlement.taker_lock_transaction.transaction_base64);
+      submittedSignature = signature;
       setLock(await api.takerLock(settlement.trade_id, { signature }));
       showNotice({ tone: 'success', title: 'Funds locked', detail: 'Maker liquidity is now being reserved for your swap.' });
     } catch (error) {
-      showNotice({ tone: 'error', title: walletFailure(error, 'Unable to lock funds.') });
+      const title = walletFailure(error, 'Unable to lock funds.');
+      if (!submittedSignature && !isWalletCancellation(error)) {
+        const failure: TerminalFailure = {
+          kind: 'pre_lock_blocker',
+          title,
+          detail: error instanceof Error ? error.message : undefined
+        };
+        setTerminalFailure(failure);
+        writePersistedSwapState(null);
+        showNotice({ tone: 'error', title: failure.title, detail: failure.detail });
+        return;
+      }
+      showNotice({ tone: 'error', title });
     } finally {
       setBusy(null);
     }
@@ -812,6 +852,7 @@ export function SwapPage() {
 
   async function handlePrimaryAction() {
     if (redeem?.settlement_status) return startNewSwap();
+    if (terminalStartOver) return startOverSwap();
     if (!walletAddress) return connectWallet();
     if (quote?.status === 'accepted' && !quoteExpired && !settlement) return startSettlement();
     if (settlement?.trade_id && !lock) return takerLock();
@@ -824,8 +865,8 @@ export function SwapPage() {
       showNotice({ tone: 'error', title: amountValidation.message });
       return undefined;
     }
-    if (notionalValidation?.ok === false) {
-      showNotice({ tone: 'error', title: notionalValidation.message });
+    if (amountRangeValidation?.ok === false) {
+      showNotice({ tone: 'error', title: amountRangeValidation.message });
     }
     return undefined;
   }
@@ -908,24 +949,18 @@ export function SwapPage() {
           {!outputAsset && <p className="locked-note">Choose a receive asset.</p>}
           {outputAsset && amountValidation?.ok === false && <p className="field-error">{amountValidation.message}</p>}
           {quoteRejection && <p className="field-error">{quoteRejection.detail}</p>}
+          {terminalFailure && !lock && !redeem && (
+            <p className="field-error">{terminalFailure.detail ?? terminalFailure.title}</p>
+          )}
 
           <button
-            className={completedSwap ? 'primary-swap-button primary-swap-button-reset' : 'primary-swap-button'}
+            className={completedSwap || terminalStartOver ? 'primary-swap-button primary-swap-button-reset' : 'primary-swap-button'}
             disabled={primaryDisabled}
           >
             {primaryLabel}
           </button>
 
-          {canStartOver && (
-            <div className="swap-recovery">
-              <span>Need to change details?</span>
-              <button type="button" className="secondary-swap-button" onClick={startOverSwap}>
-                Start over
-              </button>
-            </div>
-          )}
-
-          {quoteAccepted && (
+          {quoteAccepted && !terminalStartOver && (
             <div className={quoteExpired ? 'quote-summary quote-summary-expired' : 'quote-summary'}>
               <span>{quoteExpired ? 'Refreshing expired quote' : 'Rate reserved until'}</span>
               <strong>{formatExpiry(quote.expires_at)}</strong>
@@ -952,24 +987,26 @@ function primaryActionLabel({
   hasDestination,
   amount,
   amountValidation,
-  notionalOk,
+  amountRangeOk,
   quote,
   quoteExpired,
   settlement,
   lock,
   redeem,
+  terminalStartOver,
   busy
 }: {
   hasWallet: boolean;
   hasDestination: boolean;
   amount: string;
   amountValidation: { ok: true; raw: number } | { ok: false; message: string } | null;
-  notionalOk: boolean;
+  amountRangeOk: boolean;
   quote: RfqResponse | null;
   quoteExpired: boolean;
   settlement: WalletSettlementResponse | null;
   lock: TradeStepResponse | null;
   redeem: TradeStepResponse | null;
+  terminalStartOver: boolean;
   busy: string | null;
 }) {
   if (busy === 'quote') return 'Finding quote...';
@@ -977,16 +1014,16 @@ function primaryActionLabel({
   if (busy === 'lock') return 'Waiting for wallet...';
   if (busy === 'redeem') return 'Completing swap...';
   if (redeem?.settlement_status) return 'Start new swap';
+  if (terminalStartOver) return 'Start over';
   if (!hasWallet) return 'Connect wallet';
   if (lock?.settlement_status) return 'Complete swap';
   if (settlement?.trade_id) return 'Lock funds';
   if (!hasDestination) return 'Choose receive asset';
   if (!amount.trim()) return 'Enter amount';
   if (amountValidation?.ok === false) return 'Fix amount';
-  if (!notionalOk) return 'Adjust amount';
+  if (!amountRangeOk) return 'Adjust amount';
   if (quote?.status === 'accepted' && quoteExpired) return 'Refreshing quote...';
   if (quote?.status === 'accepted') return 'Continue';
-  if (quote?.status === 'rejected') return 'Retrying quote...';
   return 'Quote updates automatically';
 }
 
@@ -994,31 +1031,34 @@ function primaryActionDisabled({
   hasWallet,
   hasDestination,
   amountValidation,
-  notionalOk,
+  amountRangeOk,
   quote,
   quoteExpired,
   settlement,
   lock,
   redeem,
+  terminalStartOver,
   busy
 }: {
   hasWallet: boolean;
   hasDestination: boolean;
   amountValidation: { ok: true; raw: number } | { ok: false; message: string } | null;
-  notionalOk: boolean;
+  amountRangeOk: boolean;
   quote: RfqResponse | null;
   quoteExpired: boolean;
   settlement: WalletSettlementResponse | null;
   lock: TradeStepResponse | null;
   redeem: TradeStepResponse | null;
+  terminalStartOver: boolean;
   busy: string | null;
 }) {
   if (Boolean(busy)) return true;
   if (redeem?.settlement_status) return false;
+  if (terminalStartOver) return false;
   if (!hasWallet) return false;
   if (lock?.settlement_status || settlement?.trade_id) return false;
   if (quote?.status === 'accepted' && !quoteExpired) return false;
-  if (!hasDestination || amountValidation?.ok !== true || !notionalOk) return true;
+  if (!hasDestination || amountValidation?.ok !== true || !amountRangeOk) return true;
   return true;
 }
 

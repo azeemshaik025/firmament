@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Firmament Backend API
-  version: 0.1.2
+  version: 0.1.3
   summary: Public backend routes for Firmament swaps and runtime proof.
   description: |
     Firmament is a Solana RFQ maker backend for managed liquidity demos.
@@ -45,7 +45,7 @@ paths:
                   value:
                     status: ok
                     service: firmament
-                    version: 0.1.2
+                    version: 0.1.3
   /v1/assets:
     get:
       tags: [Assets]
@@ -485,6 +485,8 @@ components:
         - symbol
         - mint
         - decimals
+        - min_trade_amount
+        - max_trade_amount
         - aliases
         - kind
         - network
@@ -505,9 +507,9 @@ components:
           minimum: 0
           maximum: 18
           example: 6
-        min_trade_notional_usd:
+        min_trade_amount:
           $ref: "#/components/schemas/DecimalString"
-        max_trade_notional_usd:
+        max_trade_amount:
           $ref: "#/components/schemas/DecimalString"
         aliases:
           type: array
@@ -555,6 +557,8 @@ components:
         - output_decimals
         - max_quote_notional_usd
         - min_quote_notional_usd
+        - min_input_trade_amount
+        - max_input_trade_amount
         - default_expiry_seconds
       properties:
         input_asset:
@@ -578,6 +582,10 @@ components:
         max_quote_notional_usd:
           $ref: "#/components/schemas/DecimalString"
         min_quote_notional_usd:
+          $ref: "#/components/schemas/DecimalString"
+        min_input_trade_amount:
+          $ref: "#/components/schemas/DecimalString"
+        max_input_trade_amount:
           $ref: "#/components/schemas/DecimalString"
         default_expiry_seconds:
           type: integer
@@ -1258,6 +1266,10 @@ components:
         - unsupported_asset
         - amount_too_small
         - max_notional_exceeded
+        - below_asset_min_notional
+        - above_asset_max_notional
+        - below_asset_min_amount
+        - above_asset_max_amount
         - cumulative_cap_exceeded
         - inventory_below_quoteable_threshold
         - exposure_limit_exceeded
