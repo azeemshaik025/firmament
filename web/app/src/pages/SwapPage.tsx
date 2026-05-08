@@ -81,6 +81,26 @@ function assetBySymbol(assets: Asset[], symbol: string) {
   return assets.find((asset) => asset.symbol === symbol || asset.id === symbol);
 }
 
+function fallbackAssetFor(asset: Asset) {
+  return fallbackAssets.find((fallback) => (
+    fallback.mint === asset.mint ||
+    fallback.symbol === asset.symbol ||
+    fallback.id === asset.id
+  ));
+}
+
+function withFallbackLimits(asset: Asset): Asset {
+  const fallback = fallbackAssetFor(asset);
+  if (!fallback) return asset;
+  return {
+    ...fallback,
+    ...asset,
+    name: asset.name ?? fallback.name,
+    min_trade_notional_usd: asset.min_trade_notional_usd ?? fallback.min_trade_notional_usd,
+    max_trade_notional_usd: asset.max_trade_notional_usd ?? fallback.max_trade_notional_usd
+  };
+}
+
 function parseAmountRaw(amount: string, decimals: number): { ok: true; raw: number } | { ok: false; message: string } {
   const value = amount.trim();
   if (!/^\d+(\.\d+)?$/.test(value)) {
@@ -218,6 +238,11 @@ export function SwapPage() {
     : null;
   const flowLocked = Boolean(settlement || lock || redeem);
   const notionalOk = notionalValidation?.ok !== false;
+  const showSourceRangeError = Boolean(
+    sourceRangeLabel &&
+    amountValidation?.ok === true &&
+    notionalValidation?.ok === false
+  );
   const primaryLabel = primaryActionLabel({
     hasWallet: Boolean(walletAddress),
     hasDestination: Boolean(outputAsset),
@@ -272,15 +297,16 @@ export function SwapPage() {
     api.assets()
       .then((nextAssets) => {
         if (Array.isArray(nextAssets) && nextAssets.length > 0) {
-          const nextSource = assetBySymbol(nextAssets, defaultSourceSymbol) ?? assetBySymbol(fallbackAssets, defaultSourceSymbol) ?? fallbackAssets[0];
-          setAssets(nextAssets);
+          const nextAssetsWithLimits = nextAssets.map(withFallbackLimits);
+          const nextSource = assetBySymbol(nextAssetsWithLimits, defaultSourceSymbol) ?? assetBySymbol(fallbackAssets, defaultSourceSymbol) ?? fallbackAssets[0];
+          setAssets(nextAssetsWithLimits);
           setInputMint((currentMint) => (
-            nextAssets.some((asset) => asset.mint === currentMint)
+            nextAssetsWithLimits.some((asset) => asset.mint === currentMint)
               ? currentMint
               : nextSource.mint
           ));
           setOutputMint((currentMint) => (
-            nextAssets.some((asset) => asset.mint === currentMint && asset.mint !== nextSource.mint)
+            nextAssetsWithLimits.some((asset) => asset.mint === currentMint && asset.mint !== nextSource.mint)
               ? currentMint
               : ''
           ));
@@ -570,8 +596,8 @@ export function SwapPage() {
             onAssetChange={selectInput}
           />
 
-          {sourceRangeLabel && (
-            <p className="field-hint">
+          {showSourceRangeError && (
+            <p className="field-error">
               {sourceAsset.symbol} trade range: {sourceRangeLabel}
             </p>
           )}
@@ -606,9 +632,6 @@ export function SwapPage() {
 
           {!outputAsset && <p className="locked-note">Choose a receive asset.</p>}
           {outputAsset && amountValidation?.ok === false && <p className="field-error">{amountValidation.message}</p>}
-          {outputAsset && amountValidation?.ok === true && notionalValidation?.ok === false && (
-            <p className="field-error">{notionalValidation.message}</p>
-          )}
           {quote?.status === 'rejected' && <p className="field-error">No liquidity sources found</p>}
 
           <button className="primary-swap-button" disabled={primaryDisabled}>
