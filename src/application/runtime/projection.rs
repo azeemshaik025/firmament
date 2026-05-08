@@ -146,6 +146,10 @@ impl RuntimeState {
             RuntimeEvent::Gateway(event) => self.apply_gateway_event(event),
             RuntimeEvent::Risk(event) => self.apply_risk_event(event),
             RuntimeEvent::Inventory(event) => self.apply_inventory_event(event),
+            RuntimeEvent::Reconciliation(_) => {
+                // Reconciliation events are observational; the recent_events
+                // buffer below preserves them for the operator API.
+            }
             RuntimeEvent::System(event) => self.apply_system_event(event),
         }
     }

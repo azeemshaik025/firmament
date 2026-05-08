@@ -1036,6 +1036,16 @@ impl LedgerEventConsumer<'_> {
                         .to_owned(),
                 );
             }
+            RuntimeEvent::Reconciliation(_) => {
+                // Reconciliation worker writes its own balanced ledger
+                // transactions directly via SqliteLedgerRepository. The event
+                // itself is observational and does not produce ledger
+                // movements through this consumer.
+                summary.ignored.push(
+                    "reconciliation event is observational; adjustments are posted directly by the worker"
+                        .to_owned(),
+                );
+            }
             RuntimeEvent::System(_) => {
                 summary
                     .ignored
