@@ -4,6 +4,14 @@
   "outputDirectory": "out",
   "rewrites": [
     {
+      "source": "/docs",
+      "destination": "/docs.html"
+    },
+    {
+      "source": "/docs/",
+      "destination": "/docs.html"
+    },
+    {
       "source": "/app",
       "destination": "https://firmament-app.vercel.app/app"
     },
