@@ -1,8 +1,8 @@
 import { FormEvent, KeyboardEvent as ReactKeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useConnection, useWallet } from '@solana/wallet-adapter-react';
 import { useWalletModal } from '@solana/wallet-adapter-react-ui';
-import { Transaction } from '@solana/web3.js';
-import { api, Asset, RfqResponse, TradeStepResponse, WalletSettlementResponse } from '../api';
+import { PublicKey, Transaction, type Connection } from '@solana/web3.js';
+import { api, Asset, RfqRejectedResponse, RfqResponse, TradeStepResponse, WalletSettlementResponse } from '../api';
 
 type NoticeTone = 'info' | 'success' | 'warn' | 'error';
 
@@ -73,6 +73,7 @@ const quoteRetryMs = 5 * 60 * 1_000;
 const quoteInputDebounceMs = 600;
 const swapStateStorageKey = 'firmament.swap.v1';
 const swapStateMaxAgeMs = 12 * 60 * 60 * 1_000;
+const nativeSolMint = 'So11111111111111111111111111111111111111112';
 const assetLogoUrls: Record<string, string> = {
   sol: 'https://garden.imgix.net/chain_images/solana.png',
   usdc: 'https://garden.imgix.net/token-images/usdc.svg',
@@ -147,6 +148,13 @@ function formatRawAmount(raw: number, decimals: number) {
   return fraction ? `${whole}.${fraction}` : whole;
 }
 
+function formatRawBigInt(raw: bigint, decimals: number) {
+  const rawText = raw.toString().padStart(decimals + 1, '0');
+  const whole = rawText.slice(0, -decimals) || '0';
+  const fraction = rawText.slice(-decimals).replace(/0+$/, '');
+  return fraction ? `${whole}.${fraction}` : whole;
+}
+
 function bytesToHex(bytes: Uint8Array) {
   return [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('');
 }
@@ -189,6 +197,50 @@ function friendlyQuoteError(error: unknown) {
   return {
     title: 'No liquidity sources found',
     detail: 'Try a smaller amount or a different pair.'
+  };
+}
+
+function quoteRejectionCopy(rejection: RfqRejectedResponse) {
+  const title = rejection.message?.replace(/\.$/, '') || 'Quote rejected';
+  const detail = rejection.risk_check_details.find((item) => item.trim().length > 0)
+    ?? rejection.suggested_action
+    ?? 'The runtime rejected this quote.';
+  return { title, detail };
+}
+
+function isNativeAsset(asset: Asset) {
+  return asset.kind === 'native' || asset.mint === nativeSolMint;
+}
+
+async function walletBalanceRaw(connection: Connection, wallet: PublicKey, asset: Asset) {
+  if (isNativeAsset(asset)) {
+    return BigInt(await connection.getBalance(wallet, 'confirmed'));
+  }
+
+  const accounts = await connection.getParsedTokenAccountsByOwner(
+    wallet,
+    { mint: new PublicKey(asset.mint) },
+    'confirmed'
+  );
+  return accounts.value.reduce((total, { account }) => {
+    const amount = account.data.parsed.info.tokenAmount.amount;
+    return total + BigInt(typeof amount === 'string' ? amount : '0');
+  }, 0n);
+}
+
+async function walletFundingIssue(
+  connection: Connection,
+  wallet: PublicKey,
+  asset: Asset,
+  requiredRaw: string
+) {
+  const required = BigInt(requiredRaw);
+  const available = await walletBalanceRaw(connection, wallet, asset);
+  if (available >= required) return null;
+
+  return {
+    title: `Insufficient ${asset.symbol} balance`,
+    detail: `Wallet has ${formatRawBigInt(available, asset.decimals)} ${asset.symbol}; this quote needs ${formatRawBigInt(required, asset.decimals)} ${asset.symbol}.`
   };
 }
 
@@ -330,6 +382,10 @@ export function SwapPage() {
   const receiveAmount = quoteAccepted && outputAsset
     ? (quote.output?.amount ?? formatRawAmount(quote.quoted_output_amount_raw, outputAsset.decimals))
     : null;
+  const quoteRejection = useMemo(
+    () => (quote?.status === 'rejected' ? quoteRejectionCopy(quote) : null),
+    [quote]
+  );
   const flowLocked = Boolean(settlement || lock || redeem);
   const notionalOk = notionalValidation?.ok !== false;
   const showSourceRangeError = Boolean(
@@ -631,11 +687,12 @@ export function SwapPage() {
           detail: `Fresh ${sourceAsset.symbol}->${outputAsset.symbol} terms expire at ${formatExpiry(nextQuote.expires_at)}.`
         });
       } else {
+        const rejection = quoteRejectionCopy(nextQuote);
         scheduleQuoteRefresh(quoteRetryMs, 'retry');
         showNotice({
           tone: 'warn',
-          title: 'No liquidity sources found',
-          detail: 'Try a smaller amount or a different pair. It will retry automatically.'
+          title: rejection.title,
+          detail: `${rejection.detail} It will retry automatically.`
         });
       }
     } catch (error) {
@@ -689,10 +746,21 @@ export function SwapPage() {
   }
 
   async function takerLock() {
-    if (!settlement?.trade_id) return;
+    if (!settlement?.trade_id || quote?.status !== 'accepted' || !publicKey) return;
     setBusy('lock');
     showNotice({ tone: 'info', title: 'Waiting for wallet signature', detail: 'Your wallet will lock funds for the swap.' }, { persist: true });
     try {
+      const fundingIssue = await walletFundingIssue(
+        connection,
+        publicKey,
+        sourceAsset,
+        quote.input.amount_raw
+      );
+      if (fundingIssue) {
+        showNotice({ tone: 'error', ...fundingIssue });
+        return;
+      }
+
       const signature = await signAndSubmit(settlement.taker_lock_transaction.transaction_base64);
       setLock(await api.takerLock(settlement.trade_id, { signature }));
       showNotice({ tone: 'success', title: 'Funds locked', detail: 'Maker liquidity is now being reserved for your swap.' });
@@ -820,7 +888,7 @@ export function SwapPage() {
 
           {!outputAsset && <p className="locked-note">Choose a receive asset.</p>}
           {outputAsset && amountValidation?.ok === false && <p className="field-error">{amountValidation.message}</p>}
-          {quote?.status === 'rejected' && <p className="field-error">No liquidity sources found</p>}
+          {quoteRejection && <p className="field-error">{quoteRejection.detail}</p>}
 
           <button className="primary-swap-button" disabled={primaryDisabled}>
             {primaryLabel}

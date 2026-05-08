@@ -1236,6 +1236,60 @@ async fn rfq_accepts_when_both_sides_within_per_asset_range() {
     }
 }
 
+#[tokio::test]
+async fn runtime_rfq_accepts_direct_non_usdc_pair_after_fetching_usd_prices() {
+    let price_provider = FakePriceProvider {
+        prices: Arc::new(HashMap::from([
+            (AssetPair::new(cbbtc(), sol()), Decimal::new(900, 0)),
+            (AssetPair::new(cbbtc(), usdc()), Decimal::from(80_000)),
+            (AssetPair::new(sol(), usdc()), Decimal::from(90)),
+        ])),
+    };
+    let inventory = balance_snapshot(vec![
+        TokenAmount::new(usdc(), AmountRaw::new(10_000_000)),
+        TokenAmount::new(sol(), AmountRaw::new(100_000_000)),
+        TokenAmount::new(cbbtc(), AmountRaw::new(10_000)),
+    ]);
+
+    let persistence = Arc::new(
+        RuntimePersistence::open_in_memory(AssetRegistry::default()).expect("persistence"),
+    );
+    seed_working_custody(&persistence, &usdc(), 10_000_000);
+    seed_working_custody(&persistence, &sol(), 100_000_000);
+    seed_working_custody(&persistence, &cbbtc(), 10_000);
+
+    let orchestrator = persistent_harness_with_config(
+        AppConfig::default(),
+        price_provider,
+        FakeHtlcClient::default(),
+        FakeSwapExecutor::default(),
+        FakeGatewayClient::default(),
+        FakeBalanceReader::new(vec![inventory.clone(), inventory]),
+        RuntimeOrchestratorOptions::default(),
+        Arc::clone(&persistence),
+    )
+    .await;
+
+    let response = orchestrator
+        .request_rfq(rfq_with(
+            MintAddress::new(PER_ASSET_CBBTC_MINT),
+            sol_mint(),
+            2_000,
+        ))
+        .await
+        .expect("request direct non-USDC quote");
+
+    match response {
+        RfqResponse::Accepted(quote) => {
+            assert_eq!(quote.pair, AssetPair::new(cbbtc(), sol()));
+            assert_eq!(quote.input_amount.amount_raw, AmountRaw::new(2_000));
+        }
+        RfqResponse::Rejected(rejection) => {
+            panic!("expected Accepted direct non-USDC quote, got {rejection:?}")
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct FakePriceProvider {
     prices: Arc<HashMap<AssetPair, Decimal>>,

@@ -2,6 +2,7 @@
 
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use time::OffsetDateTime;
 
 use crate::config::{AppConfig, AssetConfig};
@@ -105,6 +106,25 @@ impl RfqContext {
             inventory,
             default_expiry_seconds: config.assets.policy.default_quote_expiry_seconds,
         }
+    }
+
+    /// Build an RFQ context with a runtime-populated USD price table for
+    /// direct non-USDC pairs such as SOL<->cbBTC.
+    #[must_use]
+    pub fn from_config_with_usd_prices(
+        config: &AppConfig,
+        inventory: InventorySnapshot,
+        asset_usd_prices: impl IntoIterator<Item = (AssetId, Decimal)>,
+    ) -> Self {
+        let mut context = Self::from_config(config, inventory);
+        let mut prices = BTreeMap::from([(AssetId::from("USDC"), Decimal::ONE)]);
+        prices.extend(
+            asset_usd_prices
+                .into_iter()
+                .filter(|(_, price)| *price > Decimal::ZERO),
+        );
+        context.risk_policy.asset_usd_prices = prices.into_iter().collect();
+        context
     }
 }
 
@@ -657,12 +677,20 @@ mod tests {
         AssetId::from("SOL")
     }
 
+    fn cbbtc() -> AssetId {
+        AssetId::from("cbBTC")
+    }
+
     fn usdc_mint() -> MintAddress {
         MintAddress::new("USDC_MINT")
     }
 
     fn sol_mint() -> MintAddress {
         MintAddress::new("SOL_MINT")
+    }
+
+    fn cbbtc_mint() -> MintAddress {
+        MintAddress::new("CBBTC_MINT")
     }
 
     fn taker() -> WalletAddress {
@@ -750,6 +778,16 @@ mod tests {
         }
     }
 
+    fn cbbtc_to_sol_rfq(amount: u64) -> RfqRequest {
+        RfqRequest {
+            input_mint: cbbtc_mint(),
+            output_mint: sol_mint(),
+            input_amount_raw: AmountRaw::new(amount),
+            taker_wallet: taker(),
+            expiry_seconds: None,
+        }
+    }
+
     #[derive(Debug, Clone)]
     struct FakePriceProvider {
         price: ReferencePrice,
@@ -773,6 +811,66 @@ mod tests {
                 output_per_input: Decimal::new(1, 2),
                 observed_at,
             },
+        }
+    }
+
+    fn cbbtc_sol_price(observed_at: OffsetDateTime) -> FakePriceProvider {
+        FakePriceProvider {
+            price: ReferencePrice {
+                pair: AssetPair::new(cbbtc(), sol()),
+                output_per_input: Decimal::new(900, 0),
+                observed_at,
+            },
+        }
+    }
+
+    fn direct_non_usdc_context() -> RfqContext {
+        let inventory = InventorySnapshot {
+            balances: vec![
+                TokenAmount::new(cbbtc(), AmountRaw::new(10_000)),
+                TokenAmount::new(sol(), AmountRaw::new(100_000_000)),
+            ],
+            targets: vec![
+                TokenAmount::new(cbbtc(), AmountRaw::new(10_000)),
+                TokenAmount::new(sol(), AmountRaw::new(100_000_000)),
+            ],
+            observed_at: now(),
+        };
+        RfqContext {
+            assets: vec![
+                asset(cbbtc(), cbbtc_mint(), 8, 1_000),
+                asset(sol(), sol_mint(), 9, 1_000_000),
+            ],
+            quote_config: QuoteEngineConfig {
+                base_spread_bps: 30,
+                fee_bps: 5,
+                min_profit_bps: 20,
+                max_inventory_skew_bps: 50,
+            },
+            risk_policy: RiskPolicy {
+                supported_pairs: vec![AssetPair::new(cbbtc(), sol())],
+                allowlisted_takers: vec![taker()],
+                require_taker_allowlist: false,
+                max_quote_notional_usd: Some(Decimal::new(2, 0)),
+                max_price_staleness_seconds: 20,
+                quoteable_thresholds: vec![
+                    TokenAmount::new(cbbtc(), AmountRaw::new(1_000)),
+                    TokenAmount::new(sol(), AmountRaw::new(1_000_000)),
+                ],
+                exposure_limits_usd: vec![
+                    (cbbtc(), Decimal::new(5, 0)),
+                    (sol(), Decimal::new(5, 0)),
+                ],
+                current_exposure_usd: vec![(cbbtc(), Decimal::ZERO), (sol(), Decimal::ZERO)],
+                native_sol_gas_buffer_raw: AmountRaw::new(20_000_000),
+                asset_usd_prices: vec![
+                    (usdc(), Decimal::ONE),
+                    (cbbtc(), Decimal::new(80_000, 0)),
+                    (sol(), Decimal::new(90, 0)),
+                ],
+            },
+            inventory,
+            default_expiry_seconds: 45,
         }
     }
 
@@ -803,6 +901,29 @@ mod tests {
             }
             RfqResponse::Rejected(rejection) => {
                 panic!("expected accepted quote, got {rejection:?}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn rfq_accepts_direct_non_usdc_pair_with_usd_prices() {
+        let outcome = request_quote(
+            cbbtc_to_sol_rfq(2_000),
+            &direct_non_usdc_context(),
+            &cbbtc_sol_price(now()),
+            RuntimeRunId::generate(),
+            now(),
+        )
+        .await;
+
+        match outcome.response {
+            RfqResponse::Accepted(quote) => {
+                assert_eq!(quote.pair, AssetPair::new(cbbtc(), sol()));
+                assert_eq!(quote.input_amount.amount_raw, AmountRaw::new(2_000));
+                assert!(quote.output_amount.amount_raw.as_u64() > 17_000_000);
+            }
+            RfqResponse::Rejected(rejection) => {
+                panic!("expected accepted direct non-USDC quote, got {rejection:?}");
             }
         }
     }

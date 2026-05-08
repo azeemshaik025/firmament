@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Firmament Backend API
-  version: 0.1.1
+  version: 0.1.2
   summary: Public backend routes for Firmament swaps and runtime proof.
   description: |
     Firmament is a Solana RFQ maker backend for managed liquidity demos.
@@ -45,7 +45,7 @@ paths:
                   value:
                     status: ok
                     service: firmament
-                    version: 0.1.1
+                    version: 0.1.2
   /v1/assets:
     get:
       tags: [Assets]

@@ -26,6 +26,7 @@ use crate::application::rfq::{
     request_quote,
 };
 use crate::config::AppConfig;
+use crate::config::AssetConfig;
 use crate::domain::assets::AssetRegistry;
 use crate::domain::events::{
     EventMetadata, GatewayEvent, InventoryEvent, QuoteEvent, RuntimeEvent, SettlementEvent,
@@ -790,7 +791,12 @@ impl RuntimeOrchestrator {
         // inventory + Gateway-derived supply.
         self.augment_inventory_with_gateway_supply(&request, &mut inventory)
             .await?;
-        let context = RfqContext::from_config(self.app_state.config(), inventory);
+        let asset_usd_prices = self.usd_prices_for_rfq(&request).await?;
+        let context = RfqContext::from_config_with_usd_prices(
+            self.app_state.config(),
+            inventory,
+            asset_usd_prices,
+        );
         let outcome = request_quote(
             request,
             &context,
@@ -828,6 +834,67 @@ impl RuntimeOrchestrator {
         }
 
         Ok(response)
+    }
+
+    async fn usd_prices_for_rfq(&self, request: &RfqRequest) -> AppResult<Vec<(AssetId, Decimal)>> {
+        let mut prices = self.usd_prices.read().await.clone();
+        prices.insert(AssetId::from("USDC"), Decimal::ONE);
+
+        let assets = &self.app_state.config().assets.supported;
+        let input_asset = assets
+            .iter()
+            .find(|asset| asset.enabled && asset.mint == request.input_mint);
+        let output_asset = assets
+            .iter()
+            .find(|asset| asset.enabled && asset.mint == request.output_mint);
+
+        if let Some(asset) = input_asset {
+            self.ensure_usd_price(&mut prices, asset).await;
+        }
+        if let Some(asset) = output_asset {
+            self.ensure_usd_price(&mut prices, asset).await;
+        }
+
+        let mut stored_prices = self.usd_prices.write().await;
+        for (asset, price) in prices {
+            stored_prices.insert(asset, price);
+        }
+        Ok(stored_prices
+            .iter()
+            .map(|(asset, price)| (asset.clone(), *price))
+            .collect())
+    }
+
+    async fn ensure_usd_price(&self, prices: &mut BTreeMap<AssetId, Decimal>, asset: &AssetConfig) {
+        let usdc = AssetId::from("USDC");
+        if asset.id == usdc || prices.contains_key(&asset.id) {
+            return;
+        }
+
+        let asset_to_usdc = crate::domain::types::AssetPair::new(asset.id.clone(), usdc.clone());
+        if let Ok(price) = self
+            .adapters
+            .price_provider
+            .reference_price(asset_to_usdc)
+            .await
+        {
+            if price.output_per_input > Decimal::ZERO {
+                prices.insert(asset.id.clone(), price.output_per_input);
+                return;
+            }
+        }
+
+        let usdc_to_asset = crate::domain::types::AssetPair::new(usdc, asset.id.clone());
+        if let Ok(price) = self
+            .adapters
+            .price_provider
+            .reference_price(usdc_to_asset)
+            .await
+            && price.output_per_input > Decimal::ZERO
+            && let Some(inverse) = Decimal::ONE.checked_div(price.output_per_input)
+        {
+            prices.insert(asset.id.clone(), inverse);
+        }
     }
 
     /// Resolve the [`ExecutionPath`] for an accepted quote. Walks the same

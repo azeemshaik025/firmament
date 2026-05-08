@@ -22,7 +22,8 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository_owner }}/firmament-solver
-  IMAGE_TAG: amd64-v0.1.1
+  IMAGE_TAG: v0.1.2
+  IMAGE_TAG_AMD64: amd64-v0.1.2
 
 jobs:
   build-and-push:
@@ -51,4 +52,6 @@ jobs:
           platforms: linux/amd64
           push: true
           provenance: false
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG_AMD64 }}
