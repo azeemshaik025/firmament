@@ -280,6 +280,15 @@ pub enum GatewayEvent {
         /// Gateway receipt.
         receipt: GatewayReceipt,
     },
+    /// Gateway refill failed after the runtime opened pending state.
+    RefillFailed {
+        /// Event metadata.
+        metadata: EventMetadata,
+        /// Amount to return from pending Gateway deposit to Gateway.
+        amount: TokenAmount,
+        /// Operator-facing reason.
+        reason: String,
+    },
     /// Excess working USDC deposit was submitted to Solana Gateway.
     DepositSubmitted {
         /// Event metadata.

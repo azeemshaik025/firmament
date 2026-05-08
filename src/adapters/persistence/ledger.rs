@@ -992,6 +992,27 @@ impl LedgerEventConsumer<'_> {
                         .build_at(metadata.occurred_at)?,
                 );
             }
+            RuntimeEvent::Gateway(GatewayEvent::RefillFailed {
+                metadata, amount, ..
+            }) => {
+                transactions.push(
+                    LedgerTransactionBuilder::new("gateway_refill_failed", metadata.event_id)
+                        .description("Gateway refill failed and pending was unwound")
+                        .idempotency_key(format!(
+                            "ledger:event:{}:gateway_refill_failed",
+                            metadata.event_id
+                        ))
+                        .debit(
+                            LedgerAccountId::gateway(amount.asset.clone()),
+                            amount.amount_raw,
+                        )
+                        .credit(
+                            LedgerAccountId::pending_gateway_deposit(amount.asset.clone()),
+                            amount.amount_raw,
+                        )
+                        .build_at(metadata.occurred_at)?,
+                );
+            }
             RuntimeEvent::Gateway(GatewayEvent::DepositSubmitted {
                 metadata, amount, ..
             }) => {
@@ -1815,6 +1836,44 @@ mod tests {
                 .account_balance(&LedgerAccountId::gateway(usdc()))
                 .unwrap(),
             -2_000_000
+        );
+    }
+
+    #[test]
+    fn ledger_gateway_refill_failure_unwinds_pending_and_gateway() {
+        let db = test_db();
+        let consumer = LedgerEventConsumer::new(&db);
+        let repository = SqliteLedgerRepository::new(&db);
+        let run_id = RuntimeRunId::generate();
+        let amount = TokenAmount::new(usdc(), AmountRaw::new(1_300_000));
+
+        let requested = RuntimeEvent::Gateway(GatewayEvent::RefillRequested {
+            metadata: EventMetadata::new(run_id),
+            amount: amount.clone(),
+        });
+        let failed = RuntimeEvent::Gateway(GatewayEvent::RefillFailed {
+            metadata: EventMetadata::new(run_id),
+            amount,
+            reason: "circle gateway rejected refill".to_owned(),
+        });
+
+        assert_eq!(
+            consumer.consume(&requested).unwrap().inserted_transactions,
+            1
+        );
+        assert_eq!(consumer.consume(&failed).unwrap().inserted_transactions, 1);
+
+        assert_eq!(
+            repository
+                .account_balance(&LedgerAccountId::pending_gateway_deposit(usdc()))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            repository
+                .account_balance(&LedgerAccountId::gateway(usdc()))
+                .unwrap(),
+            0
         );
     }
 

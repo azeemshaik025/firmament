@@ -3617,8 +3617,10 @@ async fn native_top_up_failure_in_gateway_skips_swap() {
     let events = orchestrator.runtime().recent_events(None).await;
     assert!(events.iter().any(|event| matches!(
         event,
-        RuntimeEvent::Gateway(GatewayEvent::Failed { reason, .. })
-            if reason.contains("fake gateway refill failed")
+        RuntimeEvent::Gateway(GatewayEvent::RefillFailed { amount, reason, .. })
+            if amount.asset == usdc()
+                && amount.amount_raw == AmountRaw::new(1_000_000)
+                && reason.contains("fake gateway refill failed")
     )));
 }
 

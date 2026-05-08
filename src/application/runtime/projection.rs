@@ -237,6 +237,7 @@ impl RuntimeState {
             GatewayEvent::BalanceChecked { .. } => "checked",
             GatewayEvent::RefillRequested { .. } => "refill_requested",
             GatewayEvent::RefillCompleted { .. } => "refill_completed",
+            GatewayEvent::RefillFailed { .. } => "refill_failed",
             GatewayEvent::DepositSubmitted { .. } => "deposit_submitted",
             GatewayEvent::DepositConfirmed { .. } => "deposit_confirmed",
             GatewayEvent::DepositFailed { .. } => "deposit_failed",

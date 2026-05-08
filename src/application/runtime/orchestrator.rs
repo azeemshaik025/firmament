@@ -2242,8 +2242,9 @@ impl RuntimeOrchestrator {
                 Ok(true)
             }
             Err(error) => {
-                self.publish(RuntimeEvent::Gateway(GatewayEvent::Failed {
+                self.publish(RuntimeEvent::Gateway(GatewayEvent::RefillFailed {
                     metadata: EventMetadata::new(self.app_state.run_id()),
+                    amount: plan.request.amount,
                     reason: error.to_string(),
                 }))
                 .await?;
