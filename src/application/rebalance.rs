@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use rust_decimal::Decimal;
 use time::{Duration, OffsetDateTime};
 
-use crate::config::AppConfig;
+use crate::config::{AppConfig, GatewayConfig};
 use crate::domain::events::{EventMetadata, SwapEvent};
 use crate::domain::inventory::{
     InventoryPolicy, InventorySnapshot, raw_to_units, units_to_raw_floor,
@@ -24,6 +24,8 @@ pub enum AutomationActionKind {
     Rebalance,
     /// Circle Gateway USDC refill.
     GatewayRefill,
+    /// Circle Gateway USDC deposit from excess working custody.
+    GatewayDeposit,
     /// Jupiter USDC to SOL native top-up.
     NativeSolTopUp,
 }
@@ -182,6 +184,13 @@ pub struct GatewayRefillPlan {
     pub request: GatewayRefillRequest,
     /// Estimated USD notional.
     pub estimated_notional_usd: Decimal,
+}
+
+/// Planned Circle Gateway excess deposit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExcessDepositPlan {
+    /// Raw USDC amount to move from working custody into Gateway.
+    pub amount_raw: AmountRaw,
 }
 
 /// Rebalance thresholds and stable asset ids.
@@ -403,6 +412,34 @@ pub fn decide_gateway_refill(
             destination: WalletRole::Maker,
         },
         estimated_notional_usd: target_notional,
+    })
+}
+
+/// Decide whether excess working USDC should be deposited into Gateway.
+#[must_use]
+pub fn decide_excess_deposit(
+    snapshot: &InventorySnapshot,
+    config: &GatewayConfig,
+) -> Option<ExcessDepositPlan> {
+    if !config.enabled {
+        return None;
+    }
+
+    let usdc = AssetId::from("USDC");
+    let working_usdc = snapshot.raw_balance(&usdc);
+    if working_usdc.as_u64() <= config.usdc_excess_deposit_threshold_raw.as_u64() {
+        return None;
+    }
+
+    let excess = working_usdc
+        .as_u64()
+        .saturating_sub(config.usdc_excess_deposit_target_raw.as_u64());
+    if excess == 0 {
+        return None;
+    }
+
+    Some(ExcessDepositPlan {
+        amount_raw: AmountRaw::new(excess),
     })
 }
 
@@ -855,6 +892,43 @@ mod tests {
                 reason: DecisionBlockReason::NoDrift
             }
         );
+    }
+
+    #[test]
+    fn excess_deposit_decision_drains_working_usdc_to_target() {
+        let mut config = AppConfig::default();
+        config.gateway.usdc_excess_deposit_threshold_raw = AmountRaw::new(12_000_000);
+        config.gateway.usdc_excess_deposit_target_raw = AmountRaw::new(10_000_000);
+
+        let plan = decide_excess_deposit(
+            &snapshot(vec![
+                TokenAmount::new(asset("USDC"), AmountRaw::new(15_000_000)),
+                TokenAmount::new(asset("SOL"), AmountRaw::new(100_000_000)),
+                TokenAmount::new(asset("cbBTC"), AmountRaw::new(0)),
+            ]),
+            &config.gateway,
+        )
+        .expect("excess deposit should be planned");
+
+        assert_eq!(plan.amount_raw, AmountRaw::new(5_000_000));
+    }
+
+    #[test]
+    fn excess_deposit_decision_skips_at_or_below_threshold() {
+        let mut config = AppConfig::default();
+        config.gateway.usdc_excess_deposit_threshold_raw = AmountRaw::new(12_000_000);
+        config.gateway.usdc_excess_deposit_target_raw = AmountRaw::new(10_000_000);
+
+        let plan = decide_excess_deposit(
+            &snapshot(vec![
+                TokenAmount::new(asset("USDC"), AmountRaw::new(12_000_000)),
+                TokenAmount::new(asset("SOL"), AmountRaw::new(100_000_000)),
+                TokenAmount::new(asset("cbBTC"), AmountRaw::new(0)),
+            ]),
+            &config.gateway,
+        );
+
+        assert!(plan.is_none());
     }
 
     #[derive(Default)]

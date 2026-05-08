@@ -992,6 +992,67 @@ impl LedgerEventConsumer<'_> {
                         .build_at(metadata.occurred_at)?,
                 );
             }
+            RuntimeEvent::Gateway(GatewayEvent::DepositSubmitted {
+                metadata, amount, ..
+            }) => {
+                transactions.push(
+                    LedgerTransactionBuilder::new("excess_deposit_submitted", metadata.event_id)
+                        .description("excess working custody deposited to Gateway")
+                        .idempotency_key(format!(
+                            "ledger:event:{}:excess_deposit_submitted",
+                            metadata.event_id
+                        ))
+                        .debit(
+                            LedgerAccountId::pending_gateway_deposit(amount.asset.clone()),
+                            amount.amount_raw,
+                        )
+                        .credit(
+                            LedgerAccountId::working(amount.asset.clone()),
+                            amount.amount_raw,
+                        )
+                        .build_at(metadata.occurred_at)?,
+                );
+            }
+            RuntimeEvent::Gateway(GatewayEvent::DepositConfirmed { metadata, receipt }) => {
+                transactions.push(
+                    LedgerTransactionBuilder::new("excess_deposit_confirmed", metadata.event_id)
+                        .description("excess Gateway deposit confirmed")
+                        .idempotency_key(format!(
+                            "ledger:event:{}:excess_deposit_confirmed",
+                            metadata.event_id
+                        ))
+                        .debit(
+                            LedgerAccountId::gateway(receipt.amount.asset.clone()),
+                            receipt.amount.amount_raw,
+                        )
+                        .credit(
+                            LedgerAccountId::pending_gateway_deposit(receipt.amount.asset.clone()),
+                            receipt.amount.amount_raw,
+                        )
+                        .build_at(metadata.occurred_at)?,
+                );
+            }
+            RuntimeEvent::Gateway(GatewayEvent::DepositFailed {
+                metadata, amount, ..
+            }) => {
+                transactions.push(
+                    LedgerTransactionBuilder::new("excess_deposit_failed", metadata.event_id)
+                        .description("excess Gateway deposit failed and pending was unwound")
+                        .idempotency_key(format!(
+                            "ledger:event:{}:excess_deposit_failed",
+                            metadata.event_id
+                        ))
+                        .debit(
+                            LedgerAccountId::working(amount.asset.clone()),
+                            amount.amount_raw,
+                        )
+                        .credit(
+                            LedgerAccountId::pending_gateway_deposit(amount.asset.clone()),
+                            amount.amount_raw,
+                        )
+                        .build_at(metadata.occurred_at)?,
+                );
+            }
             RuntimeEvent::Swap(SwapEvent::Executed { metadata, receipt }) => {
                 if let Some(output_amount) = &receipt.output_amount {
                     transactions.push(

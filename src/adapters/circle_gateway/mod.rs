@@ -389,6 +389,8 @@ pub struct CircleGatewayClientConfig {
     pub program_ids: GatewayProgramIds,
     /// Optional live Solana submitter for prepared `gatewayMint` instructions.
     pub mint_submitter: Option<GatewayMintSubmitter>,
+    /// Optional live Solana submitter for Gateway Wallet deposits.
+    pub deposit_submitter: Option<GatewayDepositSubmitter>,
 }
 
 impl CircleGatewayClientConfig {
@@ -413,6 +415,7 @@ impl CircleGatewayClientConfig {
             transfer_status_poll_interval: DEFAULT_TRANSFER_STATUS_POLL_INTERVAL,
             program_ids: GatewayProgramIds::mainnet()?,
             mint_submitter: None,
+            deposit_submitter: None,
         })
     }
 }
@@ -723,6 +726,45 @@ impl GatewayClient for CircleGatewayClient {
             provider_transfer_id: plan.provider_transfer_id,
             signature: Some(signature),
         })
+    }
+
+    async fn deposit(&self, amount_raw: AmountRaw) -> Result<GatewayReceipt, AppError> {
+        let submitter =
+            self.config.deposit_submitter.as_ref().ok_or_else(|| {
+                AppError::unsupported("Gateway deposit submission is not configured")
+            })?;
+        let usdc = AssetId::from(USDC_ASSET_ID);
+        let before = self.balance(usdc.clone()).await?.amount.amount_raw.as_u64();
+        let signature = submitter
+            .submit(
+                &self.config.destination_recipient_token_account,
+                amount_raw.as_u64(),
+            )
+            .await?;
+        let target = before.saturating_add(amount_raw.as_u64());
+        let started = Instant::now();
+
+        loop {
+            let observed = self.balance(usdc.clone()).await?;
+            if observed.amount.amount_raw.as_u64() >= target {
+                return Ok(GatewayReceipt {
+                    amount: TokenAmount::new(usdc, amount_raw),
+                    provider_transfer_id: observed.provider_transfer_id,
+                    signature: Some(signature),
+                });
+            }
+
+            if started.elapsed() >= self.config.transfer_status_timeout {
+                return Err(AppError::external_service(
+                    "circle_gateway",
+                    format!(
+                        "Gateway deposit did not appear in provider balance before timeout; signature={signature}"
+                    ),
+                ));
+            }
+
+            tokio::time::sleep(self.config.transfer_status_poll_interval).await;
+        }
     }
 }
 

@@ -87,6 +87,9 @@ pub trait RfqApiService: Send + Sync {
 
     /// Trigger an operator-requested Gateway refill check.
     async fn trigger_gateway_refill_check(&self) -> Result<(), ApiError>;
+
+    /// Trigger an operator-requested excess Gateway deposit check.
+    async fn trigger_gateway_deposit_check(&self) -> Result<(), ApiError>;
 }
 
 /// Build a read-only router for a bootstrapped runtime projection. Mutating RFQ
@@ -164,6 +167,10 @@ fn build_router(context: Arc<ApiContext>) -> Router {
         .route(
             "/v1/admin/gateway/refill/check",
             post(post_admin_gateway_refill_check),
+        )
+        .route(
+            "/v1/admin/gateway/deposit/check",
+            post(post_admin_gateway_deposit_check),
         )
         .with_state(context)
 }
@@ -321,6 +328,15 @@ impl RfqApiService for DisabledRfqApiService {
     }
 
     async fn trigger_gateway_refill_check(&self) -> Result<(), ApiError> {
+        Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "orchestrator_unavailable",
+            self.message.as_ref(),
+            Vec::new(),
+        ))
+    }
+
+    async fn trigger_gateway_deposit_check(&self) -> Result<(), ApiError> {
         Err(ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "orchestrator_unavailable",
@@ -507,6 +523,14 @@ impl RfqApiService for OrchestratorRfqApiService {
         self.orchestrator
             .trigger_operator_automation_check("gateway")
             .await
+            .map_err(ApiError::from_app_error)
+    }
+
+    async fn trigger_gateway_deposit_check(&self) -> Result<(), ApiError> {
+        self.orchestrator
+            .run_excess_deposit_check()
+            .await
+            .map(|_| ())
             .map_err(ApiError::from_app_error)
     }
 }
@@ -849,6 +873,15 @@ async fn post_admin_gateway_refill_check(
 ) -> Result<StatusCode, ApiError> {
     require_admin_session(&headers, &context.config)?;
     context.service.trigger_gateway_refill_check().await?;
+    Ok(StatusCode::ACCEPTED)
+}
+
+async fn post_admin_gateway_deposit_check(
+    State(context): State<Arc<ApiContext>>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    require_admin_session(&headers, &context.config)?;
+    context.service.trigger_gateway_deposit_check().await?;
     Ok(StatusCode::ACCEPTED)
 }
 

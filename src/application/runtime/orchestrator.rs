@@ -17,9 +17,9 @@ use crate::adapters::persistence::pnl::{PnlCategory, PnlEstimate, PnlPriceBook, 
 use crate::adapters::solana::htlc::{generate_secret, hash_secret};
 use crate::application::rebalance::{
     ActionKey, AutomationActionKind, AutomationLimits, AutomationState, DecisionBlockReason,
-    GatewayRefillDecision, GatewayRefillPlan, PlannedSwap, RebalanceDecision, RebalancePolicy,
-    decide_gateway_refill, decide_inventory_rebalance, decide_native_sol_top_up,
-    submit_gateway_refill, submit_planned_swap,
+    ExcessDepositPlan, GatewayRefillDecision, GatewayRefillPlan, PlannedSwap, RebalanceDecision,
+    RebalancePolicy, decide_excess_deposit, decide_gateway_refill, decide_inventory_rebalance,
+    decide_native_sol_top_up, submit_gateway_refill, submit_planned_swap,
 };
 use crate::application::rfq::{
     FirmQuote, QuoteAcceptance, RfqContext, RfqRequest, RfqResponse, accept_quote_for_settlement,
@@ -279,6 +279,8 @@ pub struct AutomationRunSummary {
     pub completed_swaps: usize,
     /// Number of Gateway refills completed.
     pub completed_gateway_refills: usize,
+    /// Number of Gateway excess deposits completed.
+    pub completed_gateway_deposits: usize,
     /// Stable block reasons emitted by decision functions.
     pub blocked_reasons: Vec<DecisionBlockReason>,
 }
@@ -1862,6 +1864,24 @@ impl RuntimeOrchestrator {
         Ok(summary)
     }
 
+    /// Run one Gateway excess deposit worker tick.
+    ///
+    /// # Errors
+    ///
+    /// Returns balance-reader or projection errors. Gateway adapter failures
+    /// are emitted as runtime events and summarized.
+    pub async fn run_excess_deposit_check(&self) -> AppResult<AutomationRunSummary> {
+        let _guard = self.automation_lock.lock().await;
+        let (inventory, inventory_policy) = self.refresh_automation_inventory().await?;
+        let mut summary = AutomationRunSummary {
+            inventory_refreshed: true,
+            ..AutomationRunSummary::default()
+        };
+        self.run_excess_deposit(&inventory, &inventory_policy, &mut summary)
+            .await?;
+        Ok(summary)
+    }
+
     /// Run one native SOL top-up worker tick.
     ///
     /// # Errors
@@ -2081,6 +2101,24 @@ impl RuntimeOrchestrator {
         Ok(())
     }
 
+    async fn run_excess_deposit(
+        &self,
+        inventory: &ValuedInventorySnapshot,
+        _inventory_policy: &InventoryPolicy,
+        summary: &mut AutomationRunSummary,
+    ) -> AppResult<()> {
+        let Some(plan) = decide_excess_deposit(inventory, &self.app_state.config().gateway) else {
+            summary.blocked_reasons.push(DecisionBlockReason::NoDrift);
+            return Ok(());
+        };
+
+        if self.submit_gateway_deposit(plan).await? {
+            summary.completed_gateway_deposits += 1;
+        }
+
+        Ok(())
+    }
+
     async fn submit_swap_plan(
         &self,
         plan: PlannedSwap,
@@ -2156,6 +2194,49 @@ impl RuntimeOrchestrator {
             Err(error) => {
                 self.publish(RuntimeEvent::Gateway(GatewayEvent::Failed {
                     metadata: EventMetadata::new(self.app_state.run_id()),
+                    reason: error.to_string(),
+                }))
+                .await?;
+                Ok(false)
+            }
+        }
+    }
+
+    async fn submit_gateway_deposit(&self, plan: ExcessDepositPlan) -> AppResult<bool> {
+        let usdc = AssetId::from("USDC");
+        let amount = TokenAmount::new(usdc.clone(), plan.amount_raw);
+        let key = ActionKey {
+            kind: AutomationActionKind::GatewayDeposit,
+            source_asset: usdc.clone(),
+            dest_asset: usdc,
+        };
+        self.mark_action_in_flight(key.clone()).await;
+        self.publish(RuntimeEvent::Gateway(GatewayEvent::DepositSubmitted {
+            metadata: EventMetadata::new(self.app_state.run_id()),
+            amount: amount.clone(),
+            signature: None,
+        }))
+        .await?;
+
+        let receipt = self.adapters.gateway_client.deposit(plan.amount_raw).await;
+        self.clear_action_in_flight(&key).await;
+
+        match receipt {
+            Ok(receipt) => {
+                self.record_completed_action(&key, Decimal::ZERO, false)
+                    .await;
+                self.publish(RuntimeEvent::Gateway(GatewayEvent::DepositConfirmed {
+                    metadata: EventMetadata::new(self.app_state.run_id()),
+                    receipt,
+                }))
+                .await?;
+                Ok(true)
+            }
+            Err(error) => {
+                self.publish(RuntimeEvent::Gateway(GatewayEvent::DepositFailed {
+                    metadata: EventMetadata::new(self.app_state.run_id()),
+                    amount,
+                    signature: None,
                     reason: error.to_string(),
                 }))
                 .await?;

@@ -17,7 +17,7 @@ use rust_decimal::Decimal;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use time::OffsetDateTime;
+use time::{Duration, OffsetDateTime};
 use tower::ServiceExt;
 
 /// Relax per-asset notional limits to a wide test range so legacy API tests
@@ -63,7 +63,7 @@ async fn test_orchestrator_router() -> axum::Router {
             price_provider: Arc::new(FakePriceProvider::default()),
             htlc_client: Arc::new(FakeHtlcClient::default()),
             swap_executor: Arc::new(FakeSwapExecutor),
-            gateway_client: Arc::new(FakeGatewayClient),
+            gateway_client: Arc::new(FakeGatewayClient::default()),
             balance_reader: Arc::new(FakeBalanceReader::new(vec![
                 quote_inventory(),
                 post_settlement_inventory(),
@@ -433,7 +433,7 @@ async fn test_orchestrator_with_persistence() -> (axum::Router, Arc<RuntimePersi
             price_provider: Arc::new(FakePriceProvider::default()),
             htlc_client: Arc::new(FakeHtlcClient::default()),
             swap_executor: Arc::new(FakeSwapExecutor),
-            gateway_client: Arc::new(FakeGatewayClient),
+            gateway_client: Arc::new(FakeGatewayClient::default()),
             balance_reader: Arc::new(FakeBalanceReader::new(vec![
                 quote_inventory(),
                 post_settlement_inventory(),
@@ -444,6 +444,82 @@ async fn test_orchestrator_with_persistence() -> (axum::Router, Arc<RuntimePersi
     );
     let router = api::router_with_orchestrator(Arc::new(orchestrator));
     (router, persistence)
+}
+
+fn excess_deposit_config() -> AppConfig {
+    let mut config = relaxed_default_config();
+    config.gateway.usdc_excess_deposit_threshold_raw = AmountRaw::new(12_000_000);
+    config.gateway.usdc_excess_deposit_target_raw = AmountRaw::new(10_000_000);
+    config
+}
+
+#[allow(unsafe_code)]
+fn admin_cookie_header() -> String {
+    let secret = "test-admin-session-secret";
+    // SAFETY: this test suite uses a stable, non-secret value for the admin
+    // session secret. No other test in this crate mutates the same env var.
+    unsafe {
+        std::env::set_var(
+            firmament::config::FIRMAMENT_ADMIN_SESSION_SECRET_ENV,
+            secret,
+        );
+    }
+    let cookie = api::auth::sign_admin_session_cookie(
+        "admin",
+        OffsetDateTime::now_utc() + Duration::minutes(5),
+        secret.as_bytes(),
+    )
+    .expect("admin cookie");
+    format!("firmament_admin={cookie}")
+}
+
+#[tokio::test]
+async fn admin_excess_deposit_endpoint_runs_decision() {
+    let app_state = bootstrap(excess_deposit_config())
+        .await
+        .expect("bootstrap state");
+    let persistence = Arc::new(
+        RuntimePersistence::open_in_memory(firmament::assets::AssetRegistry::default())
+            .expect("persistence"),
+    );
+    seed_working_custody(&persistence, AssetId::from("USDC"), 15_000_000);
+    let gateway = FakeGatewayClient::default();
+    let orchestrator = RuntimeOrchestrator::new_with_persistence(
+        app_state,
+        RuntimeAdapters {
+            price_provider: Arc::new(FakePriceProvider::default()),
+            htlc_client: Arc::new(FakeHtlcClient::default()),
+            swap_executor: Arc::new(FakeSwapExecutor),
+            gateway_client: Arc::new(gateway.clone()),
+            balance_reader: Arc::new(FakeBalanceReader::new(vec![BalanceSnapshot {
+                wallet: WalletRole::Maker,
+                balances: vec![
+                    TokenAmount::new(AssetId::from("USDC"), AmountRaw::new(15_000_000)),
+                    TokenAmount::new(AssetId::from("SOL"), AmountRaw::new(100_000_000)),
+                    TokenAmount::new(AssetId::from("cbBTC"), AmountRaw::new(0)),
+                ],
+                observed_at: OffsetDateTime::now_utc(),
+            }])),
+        },
+        persistence,
+        RuntimeOrchestratorOptions::default(),
+    );
+    let app = api::router_with_orchestrator(Arc::new(orchestrator));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v1/admin/gateway/deposit/check")
+                .header(header::COOKIE, admin_cookie_header())
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(gateway.deposit_count(), 1);
 }
 
 #[tokio::test]
@@ -1622,7 +1698,15 @@ impl SwapExecutor for FakeSwapExecutor {
 }
 
 #[derive(Debug, Clone, Default)]
-struct FakeGatewayClient;
+struct FakeGatewayClient {
+    deposits: Arc<Mutex<Vec<AmountRaw>>>,
+}
+
+impl FakeGatewayClient {
+    fn deposit_count(&self) -> usize {
+        self.deposits.lock().expect("gateway deposit lock").len()
+    }
+}
 
 #[async_trait]
 impl GatewayClient for FakeGatewayClient {
@@ -1642,6 +1726,18 @@ impl GatewayClient for FakeGatewayClient {
             amount: request.amount,
             provider_transfer_id: Some("gateway-transfer".to_owned()),
             signature: Some(TxSignature::new("gateway-sig")),
+        })
+    }
+
+    async fn deposit(&self, amount_raw: AmountRaw) -> Result<GatewayReceipt, firmament::AppError> {
+        self.deposits
+            .lock()
+            .expect("gateway deposit lock")
+            .push(amount_raw);
+        Ok(GatewayReceipt {
+            amount: TokenAmount::new(AssetId::from("USDC"), amount_raw),
+            provider_transfer_id: Some("gateway-deposit".to_owned()),
+            signature: Some(TxSignature::new("gateway-deposit-sig")),
         })
     }
 }

@@ -9,7 +9,8 @@ use solana_sdk::signature::{Keypair, Signer};
 use time::OffsetDateTime;
 
 use crate::adapters::circle_gateway::{
-    CircleGatewayClient, CircleGatewayClientConfig, GatewayMintSubmitter, USDC_MINT,
+    CircleGatewayClient, CircleGatewayClientConfig, GatewayDepositSubmitter, GatewayMintSubmitter,
+    USDC_MINT,
 };
 use crate::adapters::jupiter::{JupiterClient, JupiterClientConfig, JupiterWallet};
 use crate::adapters::persistence::ledger::{LedgerAccountId, LedgerTransactionBuilder};
@@ -309,7 +310,12 @@ fn build_gateway_client(
         Some(signing_key),
         config.gateway.max_refill_fee_raw.as_u64(),
     )?;
-    gateway_config.mint_submitter = Some(GatewayMintSubmitter::new(rpc_client, maker_keypair));
+    gateway_config.mint_submitter = Some(GatewayMintSubmitter::new(
+        Arc::clone(&rpc_client),
+        Arc::clone(&maker_keypair),
+    ));
+    gateway_config.deposit_submitter =
+        Some(GatewayDepositSubmitter::new(rpc_client, maker_keypair));
 
     CircleGatewayClient::new(gateway_config).map_err(AppError::from)
 }

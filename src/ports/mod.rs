@@ -4,7 +4,7 @@ use async_trait::async_trait;
 
 use crate::domain::events::RuntimeEvent;
 use crate::domain::types::{
-    AssetId, AssetPair, BalanceSnapshot, ExternalHtlcInitiation, GatewayReceipt,
+    AmountRaw, AssetId, AssetPair, BalanceSnapshot, ExternalHtlcInitiation, GatewayReceipt,
     GatewayRefillRequest, HtlcInitiation, HtlcReceipt, LedgerMovement, ReferencePrice,
     SettlementStatus, SwapQuote, SwapReceipt, SwapRequest, TradeId, TxSignature,
     UnsignedWalletTransaction, WalletAddress, WalletRole,
@@ -196,6 +196,19 @@ pub trait GatewayClient: Send + Sync {
         &self,
         request: GatewayRefillRequest,
     ) -> Result<GatewayReceipt, AppError>;
+
+    /// Deposit excess working USDC into Circle Gateway.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the Solana Gateway deposit transaction fails or
+    /// Gateway cannot confirm the resulting balance.
+    async fn deposit(&self, amount_raw: AmountRaw) -> Result<GatewayReceipt, AppError> {
+        let _ = amount_raw;
+        Err(AppError::unsupported(
+            "Gateway deposit is not supported by this adapter",
+        ))
+    }
 }
 
 /// Reads token balances for configured runtime wallets.

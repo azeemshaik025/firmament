@@ -71,6 +71,8 @@ quote_timeout_millis = 2_000
 enabled = true
 usdc_refill_threshold_raw = 3_000_000
 usdc_refill_target_raw = 10_000_000
+usdc_excess_deposit_threshold_raw = 12_000_000
+usdc_excess_deposit_target_raw = 10_000_000
 max_refill_notional_usd = "2"
 max_refill_fee_raw = 250_000
 
@@ -113,3 +115,4 @@ enabled = true
 rebalance_interval_seconds = 60
 gateway_refill_interval_seconds = 30
 native_top_up_interval_seconds = 60
+excess_deposit_interval_seconds = 60

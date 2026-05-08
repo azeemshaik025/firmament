@@ -280,6 +280,33 @@ pub enum GatewayEvent {
         /// Gateway receipt.
         receipt: GatewayReceipt,
     },
+    /// Excess working USDC deposit was submitted to Solana Gateway.
+    DepositSubmitted {
+        /// Event metadata.
+        metadata: EventMetadata,
+        /// Amount moved out of working custody.
+        amount: TokenAmount,
+        /// On-chain Gateway deposit signature, when known at submit time.
+        signature: Option<TxSignature>,
+    },
+    /// Excess working USDC deposit is reflected in Gateway.
+    DepositConfirmed {
+        /// Event metadata.
+        metadata: EventMetadata,
+        /// Gateway receipt.
+        receipt: GatewayReceipt,
+    },
+    /// Excess working USDC deposit failed after the runtime opened pending state.
+    DepositFailed {
+        /// Event metadata.
+        metadata: EventMetadata,
+        /// Amount to return from pending Gateway deposit to working custody.
+        amount: TokenAmount,
+        /// On-chain Gateway deposit signature, when known.
+        signature: Option<TxSignature>,
+        /// Operator-facing reason.
+        reason: String,
+    },
     /// Trade-correlated Gateway burn intent submitted. Drives a compound
     /// ledger movement `gateway → gateway_reserved` (reservation) followed
     /// immediately by `gateway_reserved → trading` (burn) — same back-to-back
@@ -517,6 +544,8 @@ pub enum AutomationKind {
     Rebalance,
     /// Circle Gateway USDC refill worker.
     GatewayRefill,
+    /// Working USDC excess deposit worker.
+    ExcessDeposit,
     /// Native SOL gas top-up worker.
     NativeTopUp,
 }
@@ -533,6 +562,8 @@ pub enum AutomationOutcome {
         completed_swaps: usize,
         /// Number of Gateway refills submitted.
         completed_gateway_refills: usize,
+        /// Number of Gateway excess deposits submitted.
+        completed_gateway_deposits: usize,
     },
     /// The tick failed during automation execution.
     Failed {

@@ -140,6 +140,14 @@ impl AppConfig {
             ));
         }
 
+        if self.gateway.usdc_excess_deposit_target_raw.as_u64()
+            > self.gateway.usdc_excess_deposit_threshold_raw.as_u64()
+        {
+            return Err(AppError::validation(
+                "gateway.usdc_excess_deposit_target_raw must not exceed gateway.usdc_excess_deposit_threshold_raw",
+            ));
+        }
+
         if self.runtime.event_capacity == 0 {
             return Err(AppError::validation(
                 "runtime.event_capacity must be greater than zero",
@@ -550,6 +558,10 @@ pub struct GatewayConfig {
     pub usdc_refill_threshold_raw: AmountRaw,
     /// Refill target in raw USDC units.
     pub usdc_refill_target_raw: AmountRaw,
+    /// Working-custody USDC threshold above which excess is deposited to Gateway.
+    pub usdc_excess_deposit_threshold_raw: AmountRaw,
+    /// Working-custody USDC floor retained after an excess deposit.
+    pub usdc_excess_deposit_target_raw: AmountRaw,
     /// Maximum refill notional in estimated USD.
     pub max_refill_notional_usd: Decimal,
     /// Maximum Circle Gateway transfer fee in raw USDC units.
@@ -562,6 +574,8 @@ impl Default for GatewayConfig {
             enabled: true,
             usdc_refill_threshold_raw: AmountRaw::new(3_000_000),
             usdc_refill_target_raw: AmountRaw::new(10_000_000),
+            usdc_excess_deposit_threshold_raw: AmountRaw::new(12_000_000),
+            usdc_excess_deposit_target_raw: AmountRaw::new(10_000_000),
             max_refill_notional_usd: Decimal::new(2, 0),
             max_refill_fee_raw: AmountRaw::new(250_000),
         }
@@ -676,6 +690,8 @@ pub struct AutomationConfig {
     pub gateway_refill_interval_seconds: u64,
     /// Native SOL top-up loop cadence in seconds.
     pub native_top_up_interval_seconds: u64,
+    /// Excess working USDC deposit loop cadence in seconds.
+    pub excess_deposit_interval_seconds: u64,
 }
 
 impl Default for AutomationConfig {
@@ -685,6 +701,7 @@ impl Default for AutomationConfig {
             rebalance_interval_seconds: 60,
             gateway_refill_interval_seconds: 30,
             native_top_up_interval_seconds: 60,
+            excess_deposit_interval_seconds: 60,
         }
     }
 }

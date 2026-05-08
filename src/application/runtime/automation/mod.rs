@@ -10,6 +10,7 @@
 //!
 //! Default-off in config; production opts in via `[runtime.automation]`.
 
+mod excess_deposit_loop;
 mod gateway_refill_loop;
 mod native_top_up_loop;
 mod rebalance_loop;
@@ -43,8 +44,13 @@ pub fn spawn_workers(
         Arc::clone(&shutdown),
     ));
     tokio::spawn(native_top_up_loop::run_loop(
-        orchestrator,
+        Arc::clone(&orchestrator),
         config.native_top_up_interval_seconds,
+        Arc::clone(&shutdown),
+    ));
+    tokio::spawn(excess_deposit_loop::run_loop(
+        orchestrator,
+        config.excess_deposit_interval_seconds,
         shutdown,
     ));
 }
@@ -54,12 +60,16 @@ pub fn spawn_workers(
 pub(crate) fn outcome_from_result(result: &AppResult<AutomationRunSummary>) -> AutomationOutcome {
     match result {
         Ok(summary) => {
-            if summary.completed_swaps == 0 && summary.completed_gateway_refills == 0 {
+            if summary.completed_swaps == 0
+                && summary.completed_gateway_refills == 0
+                && summary.completed_gateway_deposits == 0
+            {
                 AutomationOutcome::NoActionNeeded
             } else {
                 AutomationOutcome::Submitted {
                     completed_swaps: summary.completed_swaps,
                     completed_gateway_refills: summary.completed_gateway_refills,
+                    completed_gateway_deposits: summary.completed_gateway_deposits,
                 }
             }
         }

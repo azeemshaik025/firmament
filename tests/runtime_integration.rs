@@ -1488,6 +1488,8 @@ impl SwapExecutor for FakeSwapExecutor {
 struct FakeGatewayClient {
     refills: Arc<Mutex<Vec<GatewayRefillRequest>>>,
     fail_refill: Arc<Mutex<bool>>,
+    deposits: Arc<Mutex<Vec<AmountRaw>>>,
+    fail_deposit: Arc<Mutex<bool>>,
 }
 
 impl FakeGatewayClient {
@@ -1502,6 +1504,21 @@ impl FakeGatewayClient {
     fn with_refill_failure() -> Self {
         Self {
             fail_refill: Arc::new(Mutex::new(true)),
+            ..Self::default()
+        }
+    }
+
+    fn deposit_count(&self) -> usize {
+        self.deposits.lock().expect("gateway deposit lock").len()
+    }
+
+    fn deposit_amounts(&self) -> Vec<AmountRaw> {
+        self.deposits.lock().expect("gateway deposit lock").clone()
+    }
+
+    fn with_deposit_failure() -> Self {
+        Self {
+            fail_deposit: Arc::new(Mutex::new(true)),
             ..Self::default()
         }
     }
@@ -1535,6 +1552,24 @@ impl GatewayClient for FakeGatewayClient {
             amount: request.amount,
             provider_transfer_id: Some("gateway-transfer".to_owned()),
             signature: Some(TxSignature::new("gateway-sig")),
+        })
+    }
+
+    async fn deposit(&self, amount_raw: AmountRaw) -> Result<GatewayReceipt, AppError> {
+        self.deposits
+            .lock()
+            .expect("gateway deposit lock")
+            .push(amount_raw);
+        if *self.fail_deposit.lock().expect("gateway deposit fail lock") {
+            return Err(AppError::external_service(
+                "circle_gateway",
+                "fake gateway deposit failed",
+            ));
+        }
+        Ok(GatewayReceipt {
+            amount: TokenAmount::new(usdc(), amount_raw),
+            provider_transfer_id: Some("gateway-deposit".to_owned()),
+            signature: Some(TxSignature::new("gateway-deposit-sig")),
         })
     }
 }
@@ -3047,6 +3082,7 @@ fn automation_enabled_config() -> AppConfig {
     config.runtime.automation.rebalance_interval_seconds = 1;
     config.runtime.automation.gateway_refill_interval_seconds = 1;
     config.runtime.automation.native_top_up_interval_seconds = 1;
+    config.runtime.automation.excess_deposit_interval_seconds = 1;
     config
 }
 
@@ -3116,6 +3152,147 @@ fn native_top_up_low_sol_inventory() -> BalanceSnapshot {
     ])
 }
 
+fn excess_deposit_config() -> AppConfig {
+    let mut config = relaxed_default_config();
+    config.gateway.usdc_excess_deposit_threshold_raw = AmountRaw::new(12_000_000);
+    config.gateway.usdc_excess_deposit_target_raw = AmountRaw::new(10_000_000);
+    config
+}
+
+fn excess_working_usdc_inventory() -> BalanceSnapshot {
+    balance_snapshot(vec![
+        TokenAmount::new(usdc(), AmountRaw::new(15_000_000)),
+        TokenAmount::new(sol(), AmountRaw::new(100_000_000)),
+        TokenAmount::new(cbbtc(), AmountRaw::new(0)),
+    ])
+}
+
+#[tokio::test]
+async fn excess_deposit_fires_when_working_usdc_above_threshold() {
+    let gateway = FakeGatewayClient::default();
+    let orchestrator = persistent_harness_with_config(
+        excess_deposit_config(),
+        FakePriceProvider::default(),
+        FakeHtlcClient::default(),
+        FakeSwapExecutor::default(),
+        gateway.clone(),
+        FakeBalanceReader::new(vec![excess_working_usdc_inventory()]),
+        RuntimeOrchestratorOptions::default(),
+        Arc::new(
+            RuntimePersistence::open_in_memory(AssetRegistry::default()).expect("persistence"),
+        ),
+    )
+    .await;
+
+    let summary = orchestrator
+        .run_excess_deposit_check()
+        .await
+        .expect("excess deposit check");
+
+    assert_eq!(summary.completed_gateway_deposits, 1);
+    assert_eq!(gateway.deposit_count(), 1);
+    assert_eq!(gateway.deposit_amounts(), vec![AmountRaw::new(5_000_000)]);
+
+    let events = orchestrator.runtime().recent_events(None).await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        RuntimeEvent::Gateway(GatewayEvent::DepositSubmitted { .. })
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        RuntimeEvent::Gateway(GatewayEvent::DepositConfirmed { .. })
+    )));
+}
+
+#[tokio::test]
+async fn excess_deposit_emits_full_ledger_lifecycle() {
+    let persistence = Arc::new(
+        RuntimePersistence::open_in_memory(AssetRegistry::default()).expect("persistence"),
+    );
+    seed_working_custody(&persistence, &usdc(), 15_000_000);
+    let orchestrator = persistent_harness_with_config(
+        excess_deposit_config(),
+        FakePriceProvider::default(),
+        FakeHtlcClient::default(),
+        FakeSwapExecutor::default(),
+        FakeGatewayClient::default(),
+        FakeBalanceReader::new(vec![excess_working_usdc_inventory()]),
+        RuntimeOrchestratorOptions::default(),
+        Arc::clone(&persistence),
+    )
+    .await;
+
+    orchestrator
+        .run_excess_deposit_check()
+        .await
+        .expect("excess deposit check");
+
+    assert_eq!(
+        persistence
+            .account_balance(&LedgerAccountId::working(usdc()))
+            .expect("working balance"),
+        10_000_000
+    );
+    assert_eq!(
+        persistence
+            .account_balance(&LedgerAccountId::pending_gateway_deposit(usdc()))
+            .expect("pending gateway balance"),
+        0
+    );
+    assert_eq!(
+        persistence
+            .account_balance(&LedgerAccountId::gateway(usdc()))
+            .expect("gateway balance"),
+        5_000_000
+    );
+}
+
+#[tokio::test]
+async fn excess_deposit_failure_unwinds_pending() {
+    let persistence = Arc::new(
+        RuntimePersistence::open_in_memory(AssetRegistry::default()).expect("persistence"),
+    );
+    seed_working_custody(&persistence, &usdc(), 15_000_000);
+    let gateway = FakeGatewayClient::with_deposit_failure();
+    let orchestrator = persistent_harness_with_config(
+        excess_deposit_config(),
+        FakePriceProvider::default(),
+        FakeHtlcClient::default(),
+        FakeSwapExecutor::default(),
+        gateway.clone(),
+        FakeBalanceReader::new(vec![excess_working_usdc_inventory()]),
+        RuntimeOrchestratorOptions::default(),
+        Arc::clone(&persistence),
+    )
+    .await;
+
+    let summary = orchestrator
+        .run_excess_deposit_check()
+        .await
+        .expect("excess deposit check records failure without failing tick");
+
+    assert_eq!(summary.completed_gateway_deposits, 0);
+    assert_eq!(gateway.deposit_count(), 1);
+    assert_eq!(
+        persistence
+            .account_balance(&LedgerAccountId::working(usdc()))
+            .expect("working balance"),
+        15_000_000
+    );
+    assert_eq!(
+        persistence
+            .account_balance(&LedgerAccountId::pending_gateway_deposit(usdc()))
+            .expect("pending gateway balance"),
+        0
+    );
+
+    let events = orchestrator.runtime().recent_events(None).await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        RuntimeEvent::Gateway(GatewayEvent::DepositFailed { .. })
+    )));
+}
+
 #[tokio::test]
 async fn rebalance_worker_fires_periodically_when_enabled() {
     let swap = FakeSwapExecutor::default();
@@ -3169,6 +3346,38 @@ async fn rebalance_worker_fires_periodically_when_enabled() {
         swap.executed_count() >= 1,
         "expected swap executor to be called at least once"
     );
+}
+
+#[tokio::test]
+async fn excess_deposit_worker_fires_when_working_usdc_above_threshold() {
+    let gateway = FakeGatewayClient::default();
+    let (orchestrator, shutdown) = automation_harness(
+        automation_enabled_config(),
+        FakePriceProvider::default(),
+        FakeHtlcClient::default(),
+        FakeSwapExecutor::default(),
+        gateway.clone(),
+        FakeBalanceReader::new(vec![excess_working_usdc_inventory()]),
+    )
+    .await;
+
+    tokio::time::sleep(std::time::Duration::from_millis(2_500)).await;
+    shutdown.notify_waiters();
+
+    assert!(
+        gateway.deposit_count() >= 1,
+        "expected excess deposit worker to call Gateway deposit"
+    );
+
+    let events = orchestrator.runtime().recent_events(None).await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        RuntimeEvent::Automation(AutomationEvent::Tick {
+            kind: AutomationKind::ExcessDeposit,
+            outcome: AutomationOutcome::Submitted { .. },
+            ..
+        })
+    )));
 }
 
 #[tokio::test]
