@@ -204,3 +204,51 @@ fn protocol_worker_scope_separates_maker_and_demo_wallet_requirements() {
         &[WalletRole::Maker, WalletRole::Taker]
     );
 }
+
+#[test]
+fn config_default_reconciliation_uses_design_doc_values() {
+    let config = AppConfig::default();
+    let recon = &config.reconciliation;
+    assert_eq!(recon.interval_seconds, 10);
+    assert_eq!(recon.consecutive_ticks_for_adjustment, 3);
+    assert!(recon.emit_event_on_skip);
+    assert_eq!(recon.dust.get("USDC").copied(), Some(10_000));
+    assert_eq!(recon.dust.get("SOL").copied(), Some(100_000));
+    assert_eq!(recon.dust.get("cbBTC").copied(), Some(100));
+}
+
+#[test]
+fn config_example_reconciliation_section_matches_defaults() {
+    let config = example_config();
+    let recon = &config.reconciliation;
+    assert_eq!(recon.interval_seconds, 10);
+    assert_eq!(recon.consecutive_ticks_for_adjustment, 3);
+    assert!(recon.emit_event_on_skip);
+    assert_eq!(recon.dust.get("USDC").copied(), Some(10_000));
+    assert_eq!(recon.dust.get("SOL").copied(), Some(100_000));
+    assert_eq!(recon.dust.get("cbBTC").copied(), Some(100));
+}
+
+#[test]
+fn config_without_reconciliation_section_falls_back_to_defaults() {
+    // Stripping the [reconciliation] section entirely must keep the worker
+    // operable on safe defaults — operators should not need to hand-write
+    // the section.
+    let toml_without_section = r#"
+[runtime]
+event_capacity = 64
+        "#;
+    let settings = ::config::Config::builder()
+        .add_source(::config::File::from_str(
+            toml_without_section,
+            FileFormat::Toml,
+        ))
+        .build()
+        .expect("build minimal config");
+    let config: AppConfig = settings.try_deserialize().expect("deserialize");
+    assert_eq!(config.reconciliation.interval_seconds, 10);
+    assert_eq!(config.reconciliation.consecutive_ticks_for_adjustment, 3);
+    assert!(config.reconciliation.emit_event_on_skip);
+    // Default dust map still applies.
+    assert_eq!(config.reconciliation.dust.get("USDC").copied(), Some(10_000));
+}

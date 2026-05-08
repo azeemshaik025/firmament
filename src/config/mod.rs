@@ -586,6 +586,11 @@ impl Default for RuntimeConfig {
 }
 
 /// Always-on reconciliation worker settings.
+///
+/// Dust thresholds are stored as `u64` because the `config` crate's TOML
+/// deserializer does not support `u128`. Solana SPL token mints cap raw
+/// amounts at `u64::MAX`, so this is sufficient for every asset Firmament
+/// currently quotes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 #[serde(deny_unknown_fields)]
@@ -600,7 +605,7 @@ pub struct ReconciliationConfig {
     pub emit_event_on_skip: bool,
     /// Per-asset dust threshold (raw native units). Drifts at or below the
     /// dust threshold are ignored.
-    pub dust: HashMap<String, u128>,
+    pub dust: HashMap<String, u64>,
 }
 
 impl Default for ReconciliationConfig {

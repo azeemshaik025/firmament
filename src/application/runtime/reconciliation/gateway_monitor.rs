@@ -50,7 +50,7 @@ impl GatewayMonitor {
         let dust_per_asset = config
             .dust
             .iter()
-            .map(|(asset, value)| (AssetId::from(asset.as_str()), *value))
+            .map(|(asset, value)| (AssetId::from(asset.as_str()), u128::from(*value)))
             .collect();
         Self {
             windows: HashMap::new(),
