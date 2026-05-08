@@ -961,4 +961,3 @@ fn ledger_summary_to_api(
         net_usdc_estimate: summary.net_usdc_estimate,
     }
 }
-
