@@ -34,8 +34,9 @@ use crate::domain::inventory::{InventoryPolicy, InventorySnapshot as ValuedInven
 use crate::domain::quote_engine::InventorySnapshot as QuoteInventorySnapshot;
 use crate::domain::settlement::{SettlementTerms, TwoSidedSettlement};
 use crate::domain::types::{
-    AmountRaw, AssetId, BalanceSnapshot, ExternalHtlcInitiation, QuoteId, SettlementStatus,
-    TokenAmount, TradeId, TxSignature, UnsignedWalletTransaction, WalletAddress, WalletRole,
+    AmountRaw, AssetId, BalanceSnapshot, ExecutionPath, ExternalHtlcInitiation, QuoteId,
+    SettlementStatus, TokenAmount, TradeId, TxSignature, UnsignedWalletTransaction, WalletAddress,
+    WalletRole,
 };
 use crate::error::{AppError, AppResult};
 use crate::ports::{BalanceReader, GatewayClient, HtlcClient, PriceProvider, SwapExecutor};
@@ -118,6 +119,8 @@ pub struct RuntimeTrade {
     pub input_amount: TokenAmount,
     /// Maker output amount.
     pub output_amount: TokenAmount,
+    /// Resolved execution path. In-memory only — not persisted across restart.
+    pub execution_path: ExecutionPath,
 }
 
 /// Response returned when a browser-wallet settlement is started.
@@ -481,18 +484,26 @@ impl RuntimeOrchestrator {
         )
         .await;
 
-        let response = outcome.response;
+        let mut response = outcome.response;
         for event in outcome.events {
             self.publish(event).await?;
         }
 
-        if let RfqResponse::Accepted(quote) = &response {
+        if let RfqResponse::Accepted(quote) = &mut response {
             self.record_usd_price(&quote.reference_price).await;
             self.publish(RuntimeEvent::Swap(SwapEvent::PriceObserved {
                 metadata: EventMetadata::new(self.app_state.run_id()),
                 price: quote.reference_price.clone(),
             }))
             .await?;
+            // Resolve the execution path before storing. The default from
+            // `request_quote` is `InventoryToInventory`; when persistence is
+            // wired and the working_custody for the output asset cannot cover
+            // the requested output but free Gateway USDC can, switch to
+            // `GatewayToDex`. Insufficient liquidity here would have already
+            // been caught by the inventory gate; we only differentiate the two
+            // accepted paths.
+            quote.execution_path = self.resolve_execution_path(quote).await?;
             self.quotes
                 .write()
                 .await
@@ -501,6 +512,81 @@ impl RuntimeOrchestrator {
         }
 
         Ok(response)
+    }
+
+    /// Resolve the [`ExecutionPath`] for an accepted quote. Walks the same
+    /// rules as [`crate::application::rfq::select_execution_path`] using the
+    /// ledger's working_custody and FREE Gateway balance.
+    ///
+    /// When no persistence is wired (legacy harness tests) the path defaults
+    /// to `InventoryToInventory` — the existing behaviour before this method
+    /// existed.
+    async fn resolve_execution_path(&self, quote: &FirmQuote) -> AppResult<ExecutionPath> {
+        let Some(persistence) = self.persistence.as_ref() else {
+            return Ok(ExecutionPath::InventoryToInventory);
+        };
+
+        let output_asset = &quote.output_amount.asset;
+        let requested = quote.output_amount.amount_raw.as_u64();
+        let working = persistence.working_custody_balance(output_asset)?.as_u64();
+
+        if working >= requested {
+            return Ok(ExecutionPath::InventoryToInventory);
+        }
+
+        // Translate FREE Gateway USDC into the output asset's raw units.
+        let usdc = AssetId::from("USDC");
+        let free_gateway_usdc = persistence.gateway_free_balance(&usdc)?;
+        if free_gateway_usdc.is_zero() {
+            // Inventory gate would normally have rejected the quote, but
+            // request_quote ran against the augmented inventory so we may end
+            // up here. Default to inventory and let downstream lifecycle
+            // surface any shortfall via failure events.
+            return Ok(ExecutionPath::InventoryToInventory);
+        }
+        let gateway_equivalent = if output_asset == &usdc {
+            free_gateway_usdc.as_u64()
+        } else {
+            let usdc_decimals = self
+                .app_state
+                .config()
+                .assets
+                .supported
+                .iter()
+                .find(|asset| asset.enabled && asset.id == usdc)
+                .map_or(6, |asset| asset.decimals);
+            let output_decimals = self
+                .app_state
+                .config()
+                .assets
+                .supported
+                .iter()
+                .find(|asset| asset.enabled && asset.id == *output_asset)
+                .map_or(
+                    quote.reference_price.pair.output.as_str().len() as u8,
+                    |asset| asset.decimals,
+                );
+            let pair = crate::domain::types::AssetPair::new(usdc.clone(), output_asset.clone());
+            let Ok(reference_price) = self.adapters.price_provider.reference_price(pair).await
+            else {
+                return Ok(ExecutionPath::InventoryToInventory);
+            };
+            convert_usdc_to_asset_raw(
+                free_gateway_usdc,
+                usdc_decimals,
+                reference_price.output_per_input,
+                output_decimals,
+            )
+        };
+
+        if gateway_equivalent >= requested {
+            Ok(ExecutionPath::GatewayToDex)
+        } else {
+            // Neither strictly covers — but the quote was already accepted by
+            // the augmented gate. Default to inventory to preserve existing
+            // behaviour; the consumer may downstream-fail.
+            Ok(ExecutionPath::InventoryToInventory)
+        }
     }
 
     async fn expire_stored_quotes(&self, now: OffsetDateTime) -> AppResult<()> {
@@ -555,6 +641,7 @@ impl RuntimeOrchestrator {
             tx_signatures,
             input_amount: quote.input_amount.clone(),
             output_amount: quote.output_amount.clone(),
+            execution_path: quote.execution_path,
         };
         self.trades.write().await.insert(trade_id, trade.clone());
 
@@ -733,7 +820,9 @@ impl RuntimeOrchestrator {
         // The browser-driven path posts the signed taker tx via
         // `record_external_initiate`, which already confirms the signature
         // before returning, so for v1 we treat the submission as confirmed.
-        let confirmation = state.settlement.confirm_taker_lock(self.app_state.run_id())?;
+        let confirmation = state
+            .settlement
+            .confirm_taker_lock(self.app_state.run_id())?;
         self.publish(RuntimeEvent::Settlement(confirmation.event))
             .await?;
 
@@ -755,7 +844,9 @@ impl RuntimeOrchestrator {
         // TODO(v0.2): wire real confirmation polling for the wallet flow.
         // The maker leg uses `initiate_with_external_redeemer` which submits
         // and signs locally; for v1 we treat the submission as confirmed.
-        let confirmation = state.settlement.confirm_maker_lock(self.app_state.run_id())?;
+        let confirmation = state
+            .settlement
+            .confirm_maker_lock(self.app_state.run_id())?;
         self.publish(RuntimeEvent::Settlement(confirmation.event))
             .await?;
 
@@ -842,8 +933,9 @@ impl RuntimeOrchestrator {
             trade_id,
             settlement_status: SettlementStatus::Redeemed,
             tx_signatures: state.tx_signatures.clone(),
-            input_amount: state.quote.input_amount,
-            output_amount: state.quote.output_amount,
+            input_amount: state.quote.input_amount.clone(),
+            output_amount: state.quote.output_amount.clone(),
+            execution_path: state.quote.execution_path,
         };
         self.trades.write().await.insert(trade_id, trade.clone());
         self.wallet_settlements.write().await.remove(&trade_id);
@@ -1019,6 +1111,23 @@ impl RuntimeOrchestrator {
     /// Return a stored trade record.
     pub async fn trade(&self, trade_id: TradeId) -> Option<RuntimeTrade> {
         self.trades.read().await.get(&trade_id).cloned()
+    }
+
+    /// Return the resolved [`ExecutionPath`] for a known trade. Wallet-flow
+    /// trades not yet inserted into the trades map (still in
+    /// `wallet_settlements`) are also covered.
+    ///
+    /// In-memory only — restarts wipe this. v0.2 follow-up adds durable trade
+    /// persistence.
+    pub async fn trade_path(&self, trade_id: TradeId) -> Option<ExecutionPath> {
+        if let Some(trade) = self.trades.read().await.get(&trade_id) {
+            return Some(trade.execution_path);
+        }
+        self.wallet_settlements
+            .read()
+            .await
+            .get(&trade_id)
+            .map(|state| state.quote.execution_path)
     }
 
     /// Return the latest durable ledger/P&L summary.
@@ -1355,6 +1464,7 @@ impl RuntimeOrchestrator {
             tx_signatures: tx_signatures.to_vec(),
             input_amount: quote.input_amount.clone(),
             output_amount: quote.output_amount.clone(),
+            execution_path: quote.execution_path,
         };
         self.trades
             .write()
@@ -1534,11 +1644,7 @@ impl RuntimeOrchestrator {
                 .find(|asset| asset.enabled && asset.id == usdc)
                 .map_or(6, |asset| asset.decimals);
             let pair = crate::domain::types::AssetPair::new(usdc.clone(), output_asset.id.clone());
-            let Ok(reference_price) = self
-                .adapters
-                .price_provider
-                .reference_price(pair)
-                .await
+            let Ok(reference_price) = self.adapters.price_provider.reference_price(pair).await
             else {
                 // No price route from USDC to the output asset. The Gateway
                 // path requires a feasible Jupiter route in the live runtime;
@@ -1565,7 +1671,10 @@ impl RuntimeOrchestrator {
             .iter_mut()
             .find(|amount| amount.asset == output_asset.id)
         {
-            let combined = entry.amount_raw.as_u64().saturating_add(synthetic_output_raw);
+            let combined = entry
+                .amount_raw
+                .as_u64()
+                .saturating_add(synthetic_output_raw);
             entry.amount_raw = AmountRaw::new(combined);
         } else {
             inventory.balances.push(TokenAmount::new(

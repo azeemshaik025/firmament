@@ -13,8 +13,8 @@ use crate::domain::quote_engine::{
 };
 use crate::domain::risk::{RiskEvaluationInput, RiskPolicy, evaluate_pre_quote};
 use crate::domain::types::{
-    AmountRaw, AssetPair, MintAddress, QuoteId, ReferencePrice, RejectionReason, RiskDecision,
-    RuntimeRunId, TokenAmount, TradeId, WalletAddress,
+    AmountRaw, AssetPair, ExecutionPath, MintAddress, QuoteId, ReferencePrice, RejectionReason,
+    RiskDecision, RuntimeRunId, TokenAmount, TradeId, WalletAddress,
 };
 use crate::ports::PriceProvider;
 
@@ -144,6 +144,8 @@ pub struct FirmQuote {
     pub risk_decision: RiskDecision,
     /// Settlement terms for later HTLC flow.
     pub htlc_terms: HtlcAcceptanceTerms,
+    /// How the maker plans to source the output (inventory vs Gateway-backed).
+    pub execution_path: ExecutionPath,
 }
 
 /// Structured quote rejection.
@@ -344,11 +346,50 @@ pub async fn request_quote<P: PriceProvider + ?Sized>(
             maker_pay: quote.output_amount,
             expires_at,
         },
+        // Default. The orchestrator overrides this with the resolved path
+        // (`InventoryToInventory` vs `GatewayToDex`) once it knows whether
+        // the requested output is covered by working_custody alone.
+        execution_path: ExecutionPath::InventoryToInventory,
     };
 
     RfqOutcome {
         response: RfqResponse::Accepted(Box::new(firm_quote)),
         events,
+    }
+}
+
+/// Outcome of `select_execution_path`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionPathSelection {
+    /// A path was resolved.
+    Path(ExecutionPath),
+    /// Neither inventory nor Gateway-backed supply covers the output amount.
+    InsufficientLiquidity,
+}
+
+/// Resolve which execution path can fund the maker output for a quote.
+///
+/// Rules (matches design § 2 / Worktree C T-C1):
+/// 1. If `working_custody_output_raw >= requested_output_raw` → [`ExecutionPath::InventoryToInventory`].
+/// 2. Else if `gateway_free_output_equivalent_raw >= requested_output_raw` → [`ExecutionPath::GatewayToDex`].
+/// 3. Else [`ExecutionPathSelection::InsufficientLiquidity`].
+///
+/// `gateway_free_output_equivalent_raw` is the FREE Gateway USDC
+/// (`gateway − sum(gateway_reserved)`) translated into the output asset's
+/// raw units via the reference price. Callers performing the conversion
+/// should clamp to zero on overflow.
+#[must_use]
+pub fn select_execution_path(
+    working_custody_output_raw: u64,
+    requested_output_raw: u64,
+    gateway_free_output_equivalent_raw: u64,
+) -> ExecutionPathSelection {
+    if working_custody_output_raw >= requested_output_raw {
+        ExecutionPathSelection::Path(ExecutionPath::InventoryToInventory)
+    } else if gateway_free_output_equivalent_raw >= requested_output_raw {
+        ExecutionPathSelection::Path(ExecutionPath::GatewayToDex)
+    } else {
+        ExecutionPathSelection::InsufficientLiquidity
     }
 }
 
@@ -784,6 +825,30 @@ mod tests {
     }
 
     #[test]
+    fn select_execution_path_prefers_inventory_when_custody_covers() {
+        assert_eq!(
+            select_execution_path(1_000_000_000, 500_000_000, 0),
+            ExecutionPathSelection::Path(ExecutionPath::InventoryToInventory)
+        );
+    }
+
+    #[test]
+    fn select_execution_path_falls_back_to_gateway_when_custody_short() {
+        assert_eq!(
+            select_execution_path(0, 500_000_000, 600_000_000),
+            ExecutionPathSelection::Path(ExecutionPath::GatewayToDex)
+        );
+    }
+
+    #[test]
+    fn select_execution_path_rejects_when_neither_covers() {
+        assert_eq!(
+            select_execution_path(0, 500_000_000, 100_000_000),
+            ExecutionPathSelection::InsufficientLiquidity
+        );
+    }
+
+    #[test]
     fn rfq_expired_quote_cannot_be_accepted_for_settlement() {
         let reference_price = ReferencePrice {
             pair: AssetPair::new(usdc(), sol()),
@@ -814,6 +879,7 @@ mod tests {
                 maker_pay: TokenAmount::new(sol(), AmountRaw::new(9_965_000)),
                 expires_at: now() - time::Duration::seconds(1),
             },
+            execution_path: ExecutionPath::InventoryToInventory,
         };
 
         let acceptance = accept_quote_for_settlement(&quote, RuntimeRunId::generate(), now());

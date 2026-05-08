@@ -514,3 +514,24 @@ pub enum LedgerEntryCategory {
     /// P&L estimate movement.
     ProfitAndLoss,
 }
+
+/// How the runtime intends to source the maker output for a quote/trade.
+///
+/// Determined at quote-issue time and attached to the in-memory `Quote` and
+/// `RuntimeTrade`. Used by the `LedgerEventConsumer` to branch lifecycle
+/// movements between the inventory-only path and the Gateway-backed path
+/// (which involves Gateway burn/mint and, for non-USDC outputs, a Jupiter
+/// swap).
+///
+/// This is in-memory only — trades are not yet persisted across restart, so
+/// the path is recovered only for the lifetime of the runtime process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionPath {
+    /// Maker working_custody covers the requested output. No Gateway or DEX
+    /// activity is needed for the lifecycle.
+    InventoryToInventory,
+    /// Maker pulls USDC from the Circle Gateway and (when output is not USDC)
+    /// swaps it on Jupiter into the target asset before the maker leg.
+    GatewayToDex,
+}

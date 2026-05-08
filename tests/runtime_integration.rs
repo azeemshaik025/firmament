@@ -15,10 +15,10 @@ use firmament::runtime::{
 };
 use firmament::settlement::SettlementLeg;
 use firmament::types::{
-    AmountRaw, AssetId, AssetPair, BalanceSnapshot, GatewayReceipt, GatewayRefillRequest,
-    HtlcInitiation, HtlcReceipt, MintAddress, QuoteId, ReferencePrice, RejectionReason,
-    SettlementStatus, SwapQuote, SwapReceipt, SwapRequest, TokenAmount, TradeId, TxSignature,
-    WalletAddress, WalletRole,
+    AmountRaw, AssetId, AssetPair, BalanceSnapshot, ExecutionPath, GatewayReceipt,
+    GatewayRefillRequest, HtlcInitiation, HtlcReceipt, MintAddress, QuoteId, ReferencePrice,
+    RejectionReason, SettlementStatus, SwapQuote, SwapReceipt, SwapRequest, TokenAmount, TradeId,
+    TxSignature, WalletAddress, WalletRole,
 };
 use firmament::{AppConfig, AppError, bootstrap};
 use rust_decimal::Decimal;
@@ -907,6 +907,108 @@ async fn rfq_gateway_quoteability_uses_ledger_minus_reserved() {
             panic!("expected Gateway-path rejection at 700 USDC, got Accepted: {quote:?}")
         }
     }
+}
+
+#[tokio::test]
+async fn quote_records_inventory_to_inventory_path_when_custody_covers() {
+    // working_custody:SOL covers a small RFQ output → quote should resolve to
+    // ExecutionPath::InventoryToInventory.
+    let persistence = Arc::new(
+        RuntimePersistence::open_in_memory(AssetRegistry::default()).expect("persistence"),
+    );
+    seed_working_custody(&persistence, &sol(), 200_000_000);
+    seed_working_custody(&persistence, &usdc(), 10_000_000);
+
+    let orchestrator = persistent_harness_with_persistence(
+        FakePriceProvider::default(),
+        FakeHtlcClient::default(),
+        FakeSwapExecutor::default(),
+        FakeGatewayClient::default(),
+        FakeBalanceReader::new(vec![quote_inventory(), quote_inventory()]),
+        RuntimeOrchestratorOptions::default(),
+        Arc::clone(&persistence),
+    )
+    .await;
+
+    let response = orchestrator
+        .request_rfq(rfq(100_000))
+        .await
+        .expect("request quote");
+    let quote = match response {
+        RfqResponse::Accepted(quote) => quote,
+        RfqResponse::Rejected(rejection) => panic!("expected accepted: {rejection:?}"),
+    };
+    assert_eq!(
+        quote.execution_path,
+        ExecutionPath::InventoryToInventory,
+        "expected InventoryToInventory when working_custody covers, got {:?}",
+        quote.execution_path,
+    );
+}
+
+#[tokio::test]
+async fn quote_records_gateway_to_dex_path_when_only_gateway_covers() {
+    // working_custody:SOL = 0; gateway:USDC seeded with enough free supply to
+    // cover the requested SOL output. Quote should resolve to
+    // ExecutionPath::GatewayToDex.
+    let mut config = AppConfig::default();
+    config.risk.max_quote_notional_usd = Decimal::from(1_000);
+    config.risk.max_trade_notional_usd = Decimal::from(1_000);
+    config.risk.max_daily_notional_usd = Decimal::from(10_000);
+    config.risk.max_non_stable_asset_notional_usd = Decimal::from(1_000);
+
+    // SOL = $200 reference: 1 USDC = 0.005 SOL.
+    let price_provider = FakePriceProvider {
+        prices: Arc::new(HashMap::from([
+            (AssetPair::new(usdc(), sol()), Decimal::new(5, 3)),
+            (AssetPair::new(sol(), usdc()), Decimal::from(200)),
+        ])),
+    };
+
+    let zero_sol_inventory = balance_snapshot(vec![
+        TokenAmount::new(usdc(), AmountRaw::new(0)),
+        TokenAmount::new(sol(), AmountRaw::new(0)),
+        TokenAmount::new(cbbtc(), AmountRaw::new(0)),
+    ]);
+
+    let persistence = Arc::new(
+        RuntimePersistence::open_in_memory(AssetRegistry::default()).expect("persistence"),
+    );
+    // working_custody:SOL = 0; USDC seeded enough for the request input balance
+    // and for the quoteable threshold to consider the input asset present.
+    seed_working_custody(&persistence, &usdc(), 1_000_000_000);
+    // Free Gateway USDC = 1_000_000_000 (= 1000 USDC = 5 SOL synthetic supply).
+    seed_gateway_balance(&persistence, &usdc(), 1_000_000_000);
+
+    let orchestrator = persistent_harness_with_config(
+        config,
+        price_provider,
+        FakeHtlcClient::default(),
+        FakeSwapExecutor::default(),
+        FakeGatewayClient::default(),
+        FakeBalanceReader::new(vec![zero_sol_inventory.clone(), zero_sol_inventory]),
+        RuntimeOrchestratorOptions::default(),
+        Arc::clone(&persistence),
+    )
+    .await;
+
+    // Request 200 USDC input → 1.0 SOL output (well within the 5 SOL synthetic
+    // supply). Working custody for SOL is empty so this must select the
+    // Gateway path.
+    let response = orchestrator
+        .request_rfq(rfq(200_000_000))
+        .await
+        .expect("request quote");
+    let quote = match response {
+        RfqResponse::Accepted(quote) => quote,
+        RfqResponse::Rejected(rejection) => panic!("expected accepted: {rejection:?}"),
+    };
+    assert_eq!(
+        quote.execution_path,
+        ExecutionPath::GatewayToDex,
+        "expected GatewayToDex when only gateway covers, got {:?}",
+        quote.execution_path,
+    );
 }
 
 #[derive(Debug, Clone)]
