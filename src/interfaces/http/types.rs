@@ -363,39 +363,7 @@ pub struct TradeAmount {
     pub display_amount: String,
 }
 
-/// One trade-bound transaction signature with kind discriminator.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TradeSignature {
-    /// Stable kind discriminator for downstream UI rendering.
-    pub kind: TradeSignatureKind,
-    /// Solana signature string.
-    pub signature: String,
-}
-
-/// Stable discriminator for trade-bound signatures. Background rebalance
-/// signatures are never reported here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TradeSignatureKind {
-    /// Taker leg HTLC submitted/confirmed.
-    TakerLock,
-    /// Taker leg HTLC redeemed by the maker.
-    TakerRedeem,
-    /// Taker leg HTLC refunded.
-    TakerRefund,
-    /// Maker leg HTLC submitted/confirmed.
-    MakerLock,
-    /// Maker leg HTLC redeemed by the taker.
-    MakerRedeem,
-    /// Maker leg HTLC refunded.
-    MakerRefund,
-    /// Gateway burn intent.
-    GatewayBurn,
-    /// Gateway mint receipt.
-    GatewayMint,
-    /// Jupiter swap submitted as part of a Gateway-to-DEX trade leg.
-    JupiterSwap,
-}
+pub use crate::application::runtime::{TradeSignature, TradeSignatureKind};
 
 /// Stable JSON error envelope used by API routes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

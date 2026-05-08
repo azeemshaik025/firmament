@@ -11,8 +11,13 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::adapters::persistence::ledger::LedgerAccountType;
+use crate::application::runtime::RuntimeTrade;
+use crate::domain::assets::AssetRegistry;
+use crate::domain::types::SettlementStatus;
 
-use super::types::{LedgerBalanceEntry, LedgerSnapshotResponse};
+use super::types::{
+    LedgerBalanceEntry, LedgerSnapshotResponse, TradeAmount, TradeSummary, TradesResponse,
+};
 use super::{ApiContext, ApiError};
 
 /// Liveness check.
@@ -97,6 +102,93 @@ pub(crate) async fn get_ledger(
         entry_count: snapshot.entry_count,
         balances,
     }))
+}
+
+/// Query parameters for `GET /v1/runtime/trades`.
+#[derive(Debug, Default, Deserialize)]
+pub struct TradesQuery {
+    /// Number of trades to return. Default 10. Hard cap 100. Out-of-range
+    /// or zero returns 400.
+    pub limit: Option<u32>,
+}
+
+/// `GET /v1/runtime/trades?limit=<n>`.
+///
+/// Returns the most recent in-memory trades, newest first. Default limit
+/// is 10 and the hard cap is 100. `total_count` and `successful_count`
+/// describe the entire in-memory trade map; `successful_count` counts
+/// trades whose settlement status is `redeemed`.
+pub(crate) async fn get_trades(
+    State(context): State<Arc<ApiContext>>,
+    Query(query): Query<TradesQuery>,
+) -> Result<Json<TradesResponse>, ApiError> {
+    let limit = query.limit.unwrap_or(10);
+    if limit == 0 || limit > 100 {
+        return Err(ApiError::bad_request(
+            "invalid_limit",
+            format!("limit must be 1..=100, got {limit}"),
+        ));
+    }
+
+    let orchestrator = context.orchestrator.as_ref().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "trades_unavailable",
+            "runtime orchestrator is not attached to this API router",
+            Vec::new(),
+        )
+    })?;
+
+    let registry = orchestrator.asset_registry();
+    let (total_count, successful_count) = orchestrator.trade_counts().await;
+    let recent = orchestrator.recent_trades(limit as usize).await;
+    let trades = recent
+        .into_iter()
+        .map(|trade| trade_to_summary(&trade, &registry))
+        .collect();
+
+    Ok(Json(TradesResponse {
+        total_count: total_count as u64,
+        successful_count: successful_count as u64,
+        trades,
+    }))
+}
+
+fn trade_to_summary(trade: &RuntimeTrade, registry: &AssetRegistry) -> TradeSummary {
+    TradeSummary {
+        trade_id: trade.trade_id.to_string(),
+        quote_id: trade.quote_id.to_string(),
+        settlement_status: settlement_status_str(trade.settlement_status).to_owned(),
+        input: amount_to_summary(&trade.input_amount, registry),
+        output: amount_to_summary(&trade.output_amount, registry),
+        tx_signatures: trade.tx_signature_kinds.clone(),
+    }
+}
+
+fn amount_to_summary(
+    amount: &crate::domain::types::TokenAmount,
+    registry: &AssetRegistry,
+) -> TradeAmount {
+    let decimals = registry
+        .asset(&amount.asset)
+        .map_or(0, |metadata| metadata.decimals);
+    let raw = i128::from(amount.amount_raw.as_u64());
+    TradeAmount {
+        asset: amount.asset.as_str().to_owned(),
+        amount_raw: raw.to_string(),
+        decimals,
+        display_amount: format_signed_decimal(raw, decimals),
+    }
+}
+
+fn settlement_status_str(status: SettlementStatus) -> &'static str {
+    match status {
+        SettlementStatus::Pending => "pending",
+        SettlementStatus::Initiated => "initiated",
+        SettlementStatus::Redeemed => "redeemed",
+        SettlementStatus::Refunded => "refunded",
+        SettlementStatus::Failed => "failed",
+    }
 }
 
 /// Format a signed `i128` raw amount with `decimals` fractional digits using

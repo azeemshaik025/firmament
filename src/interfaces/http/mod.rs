@@ -131,6 +131,7 @@ fn build_router(context: Arc<ApiContext>) -> Router {
     Router::new()
         .route("/health", get(runtime_read::get_health))
         .route("/v1/runtime/ledger", get(runtime_read::get_ledger))
+        .route("/v1/runtime/trades", get(runtime_read::get_trades))
         .route("/v1/rfq", post(post_rfq))
         .route("/v1/quotes/{quote_id}/accept", post(post_quote_accept))
         .route(

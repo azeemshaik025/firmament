@@ -11,8 +11,8 @@ pub use bootstrap::{
 pub use orchestrator::{
     AutomationRunSummary, LedgerReadSnapshot, RuntimeAdapters, RuntimeLedgerSummary,
     RuntimeOrchestrator, RuntimeOrchestratorOptions, RuntimePersistence, RuntimeTrade,
-    WalletSettlementStart, WalletTakerLockResult, WalletTakerRedeemPreparation,
-    WalletTakerRedeemResult,
+    TradeSignature, TradeSignatureKind, WalletSettlementStart, WalletTakerLockResult,
+    WalletTakerRedeemPreparation, WalletTakerRedeemResult,
 };
 pub use projection::{
     GatewayProjection, InventoryProjection, PnlProjection, RebalanceProjection, RfqProjection,

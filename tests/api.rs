@@ -364,6 +364,262 @@ async fn ledger_endpoint_rejects_unknown_account_type() {
     );
 }
 
+async fn drive_completed_trade(app: axum::Router) -> serde_json::Value {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v1/rfq")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(rfq_request().to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    let quote_body = response_json(response).await;
+    let quote_id = quote_body["quote_id"].as_str().expect("quote id").to_owned();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/v1/quotes/{quote_id}/wallet-settlement"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "taker_wallet": "DemoTaker111111111111111111111111111111111111",
+                        "secret_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    let settlement_body = response_json(response).await;
+    let trade_id = settlement_body["trade_id"]
+        .as_str()
+        .expect("trade id")
+        .to_owned();
+
+    let lock_signature = "5".repeat(88);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/v1/trades/{trade_id}/taker-lock"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({ "signature": lock_signature }).to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    let _ = response_json(response).await;
+
+    let redeem_signature = "6".repeat(88);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/v1/trades/{trade_id}/taker-redeem"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "preimage": "00".repeat(32),
+                        "signature": redeem_signature
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    response_json(response).await
+}
+
+#[tokio::test]
+async fn trades_endpoint_returns_recent_trades() {
+    let app = test_orchestrator_router().await;
+    let _ = drive_completed_trade(app.clone()).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/runtime/trades")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_json(response).await;
+    assert!(body["total_count"].as_u64().unwrap() >= 1);
+    assert!(body["successful_count"].as_u64().unwrap() >= 1);
+    let trades = body["trades"].as_array().expect("trades array");
+    assert_eq!(trades.len(), 1);
+    assert!(trades[0]["trade_id"].is_string());
+    assert!(trades[0]["quote_id"].is_string());
+    assert_eq!(trades[0]["settlement_status"], "redeemed");
+    assert_eq!(trades[0]["input"]["asset"], "USDC");
+    assert!(trades[0]["input"]["amount_raw"].is_string());
+    assert_eq!(trades[0]["input"]["decimals"].as_u64(), Some(6));
+    assert_eq!(trades[0]["output"]["asset"], "SOL");
+    assert!(trades[0]["output"]["amount_raw"].is_string());
+    assert_eq!(trades[0]["output"]["decimals"].as_u64(), Some(9));
+}
+
+#[tokio::test]
+async fn trades_endpoint_respects_limit_param() {
+    let app = test_orchestrator_router().await;
+    let _ = drive_completed_trade(app.clone()).await;
+    let _ = drive_completed_trade(app.clone()).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/runtime/trades?limit=1")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_json(response).await;
+    assert_eq!(body["trades"].as_array().unwrap().len(), 1);
+    assert!(body["total_count"].as_u64().unwrap() >= 2);
+}
+
+#[tokio::test]
+async fn trades_endpoint_caps_at_100() {
+    let app = test_orchestrator_router().await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/runtime/trades?limit=500")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = response_json(response).await;
+    assert_eq!(body["error"]["code"], "invalid_limit");
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/runtime/trades?limit=0")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = response_json(response).await;
+    assert_eq!(body["error"]["code"], "invalid_limit");
+}
+
+#[tokio::test]
+async fn trades_endpoint_includes_tx_signatures_with_kinds() {
+    let app = test_orchestrator_router().await;
+    let _ = drive_completed_trade(app.clone()).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/runtime/trades")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    let body = response_json(response).await;
+    let signatures = body["trades"][0]["tx_signatures"]
+        .as_array()
+        .expect("tx_signatures");
+    assert!(!signatures.is_empty(), "expected at least one tx signature");
+    let kinds: Vec<&str> = signatures
+        .iter()
+        .map(|s| s["kind"].as_str().expect("kind str"))
+        .collect();
+    let allowed = [
+        "taker_lock",
+        "taker_redeem",
+        "taker_refund",
+        "maker_lock",
+        "maker_redeem",
+        "maker_refund",
+        "gateway_burn",
+        "gateway_mint",
+        "jupiter_swap",
+    ];
+    for kind in &kinds {
+        assert!(
+            allowed.contains(kind),
+            "unexpected tx_signatures.kind '{kind}'"
+        );
+    }
+    assert!(
+        kinds.iter().any(|k| *k == "taker_lock"),
+        "expected taker_lock kind"
+    );
+    assert!(
+        kinds.iter().any(|k| *k == "maker_lock"),
+        "expected maker_lock kind"
+    );
+    assert!(
+        kinds.iter().any(|k| *k == "taker_redeem"),
+        "expected taker_redeem kind"
+    );
+    assert!(
+        kinds.iter().any(|k| *k == "maker_redeem"),
+        "expected maker_redeem kind"
+    );
+    for sig in signatures {
+        assert!(!sig["signature"].as_str().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn trades_endpoint_excludes_rebalance_signatures() {
+    // Background rebalance swaps fire from the post-settlement automation pass
+    // and are not bound to a trade. Verify trade-summary tx_signatures contains
+    // no `jupiter_swap` entries when there is no Gateway-to-DEX execution path.
+    let app = test_orchestrator_router().await;
+    let _ = drive_completed_trade(app.clone()).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/runtime/trades")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    let body = response_json(response).await;
+    let signatures = body["trades"][0]["tx_signatures"]
+        .as_array()
+        .expect("tx_signatures");
+    assert!(
+        signatures
+            .iter()
+            .all(|s| s["kind"].as_str() != Some("jupiter_swap")),
+        "rebalance jupiter_swap signature must not appear on a non-Gateway trade"
+    );
+}
+
 #[tokio::test]
 async fn api_json_error_shape() {
     let app = test_router().await;
@@ -506,6 +762,93 @@ impl HtlcClient for FakeHtlcClient {
         Ok(UnsignedWalletTransaction {
             transaction_base64: "AA==".to_owned(),
             recent_blockhash: "fake-blockhash".to_owned(),
+        })
+    }
+
+    async fn record_external_initiate(
+        &self,
+        request: ExternalHtlcInitiation,
+        signature: TxSignature,
+    ) -> Result<HtlcReceipt, firmament::AppError> {
+        let role_request = HtlcInitiation {
+            trade_id: request.trade_id,
+            funder: WalletRole::Taker,
+            redeemer: WalletRole::Maker,
+            amount: request.amount.clone(),
+            hashlock: request.hashlock,
+            expires_at: request.expires_at,
+        };
+        let mut initiated = self.initiated.lock().expect("htlc lock");
+        initiated.push(role_request);
+        drop(initiated);
+        Ok(HtlcReceipt {
+            trade_id: request.trade_id,
+            leg: SettlementLeg::TakerInput,
+            amount: request.amount,
+            status: SettlementStatus::Initiated,
+            signature: Some(signature),
+        })
+    }
+
+    async fn initiate_with_external_redeemer(
+        &self,
+        request: HtlcInitiation,
+        _redeemer: WalletAddress,
+    ) -> Result<HtlcReceipt, firmament::AppError> {
+        let mut initiated = self.initiated.lock().expect("htlc lock");
+        let leg = fake_leg_for_funder(request.funder);
+        let amount = request.amount.clone();
+        initiated.push(request.clone());
+        Ok(HtlcReceipt {
+            trade_id: request.trade_id,
+            leg,
+            amount,
+            status: SettlementStatus::Initiated,
+            signature: Some(TxSignature::new(format!("init-ext-{}", initiated.len()))),
+        })
+    }
+
+    async fn build_external_redeem(
+        &self,
+        _trade_id: firmament::types::TradeId,
+        _redeemer: WalletAddress,
+        _preimage: String,
+    ) -> Result<UnsignedWalletTransaction, firmament::AppError> {
+        Ok(UnsignedWalletTransaction {
+            transaction_base64: "AA==".to_owned(),
+            recent_blockhash: "fake-blockhash".to_owned(),
+        })
+    }
+
+    async fn record_external_redeem(
+        &self,
+        trade_id: firmament::types::TradeId,
+        signature: TxSignature,
+    ) -> Result<HtlcReceipt, firmament::AppError> {
+        // Mirror real behaviour: this path records the taker's redeem on the
+        // maker-output leg (the maker's HTLC was redeemed BY the taker).
+        let initiated = self.initiated.lock().expect("htlc lock");
+        let init = initiated
+            .iter()
+            .find(|init| init.trade_id == trade_id && init.funder == WalletRole::Maker)
+            .ok_or_else(|| {
+                firmament::AppError::validation(format!(
+                    "fake htlc client: no maker-funded leg for trade {trade_id}"
+                ))
+            })?;
+        let amount = init.amount.clone();
+        drop(initiated);
+        let mut redeemed_legs = self.redeemed_legs.lock().expect("htlc lock");
+        redeemed_legs
+            .entry(trade_id)
+            .or_default()
+            .push(SettlementLeg::MakerOutput);
+        Ok(HtlcReceipt {
+            trade_id,
+            leg: SettlementLeg::MakerOutput,
+            amount,
+            status: SettlementStatus::Redeemed,
+            signature: Some(signature),
         })
     }
 
