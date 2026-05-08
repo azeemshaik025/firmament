@@ -1,10 +1,12 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use firmament::assets::AssetRegistry;
 use firmament::ledger::LedgerAccountId;
 use firmament::rfq::{RfqRequest, RfqResponse};
 use firmament::runtime::TradeSignatureKind;
+use firmament::runtime::reconciliation::ReconciliationWorker;
 use firmament::solana_client::SolanaClient;
 use firmament::types::{AmountRaw, AssetId, MintAddress, SettlementStatus, WalletAddress};
 use firmament::wallets::{LoadedWallet, SOLANA_RPC_URL_ENV};
@@ -129,7 +131,8 @@ async fn ensure_token_account_exists(
 }
 
 /// Live smoke test for Phase 4 Gap 1: forces a Gateway-backed cbBTC RFQ by
-/// draining `working_custody:USDC` to zero before the maker bootstraps. The
+/// reconciling live Gateway USDC into the temp ledger and draining
+/// `working_custody:cbBTC` to zero before the RFQ. The
 /// runtime must select the GatewayToDex execution path, drive the real
 /// `request_refill` and `execute_swap` adapter calls, and produce trade
 /// signatures that include `GatewayBurn`, `GatewayMint`, and `JupiterSwap`
@@ -175,35 +178,63 @@ async fn live_gateway_backed_cbbtc_rfq_skips_without_explicit_opt_in() {
         .await
         .expect("bootstrap demo runtime");
 
-    // Drain working_custody:USDC to zero before the RFQ so the path resolver
-    // MUST select Gateway-backed (no inventory available for the trade).
+    // The RFQ gate intentionally reads Gateway supply from the ledger, so make
+    // the test's temp DB observe the live Circle Gateway balance before asking
+    // for a Gateway-backed path.
+    let mut recon_config = live.orchestrator.config().reconciliation.clone();
+    recon_config.consecutive_ticks_for_adjustment = 1;
+    let mut recon = ReconciliationWorker::new(Arc::clone(&live.orchestrator), recon_config)
+        .expect("build live reconciliation worker");
+    let usdc = AssetId::from("USDC");
+    let gateway_observation = recon
+        .tick_gateway(&usdc)
+        .await
+        .expect("reconcile live Gateway balance");
+    assert!(
+        gateway_observation.on_chain_raw > 0,
+        "live Gateway balance must be positive for Gateway-backed RFQ smoke"
+    );
+
+    // Drain working_custody:cbBTC to zero before the RFQ so the path resolver
+    // MUST select Gateway-backed (no maker output inventory available).
     let persistence = live
         .orchestrator
         .persistence()
         .expect("live runtime has persistence");
-    let usdc = AssetId::from("USDC");
-    let working_usdc = persistence
-        .account_balance(&LedgerAccountId::working(usdc.clone()))
-        .expect("read working USDC balance");
-    if working_usdc > 0 {
-        let raw = u64::try_from(working_usdc).expect("working USDC fits u64");
+    let output_asset = AssetId::from("cbBTC");
+    let working_output = persistence
+        .account_balance(&LedgerAccountId::working(output_asset.clone()))
+        .expect("read working cbBTC balance");
+    if working_output > 0 {
+        let raw = u64::try_from(working_output).expect("working cbBTC fits u64");
         let drain = firmament::ledger::LedgerTransactionBuilder::new(
             "live_gateway_path_drain",
             uuid::Uuid::now_v7(),
         )
-        .description("drain working USDC for live gateway-backed RFQ test")
-        .idempotency_key(format!("live:drain:working_usdc:{}", uuid::Uuid::now_v7()))
+        .description("drain working cbBTC for live gateway-backed RFQ test")
+        .idempotency_key(format!("live:drain:working_cbbtc:{}", uuid::Uuid::now_v7()))
         .debit(
-            LedgerAccountId::external(usdc.clone(), "live_drain"),
+            LedgerAccountId::external(output_asset.clone(), "live_drain"),
             AmountRaw::new(raw),
         )
-        .credit(LedgerAccountId::working(usdc), AmountRaw::new(raw))
+        .credit(
+            LedgerAccountId::working(output_asset.clone()),
+            AmountRaw::new(raw),
+        )
         .build()
         .expect("balanced drain");
         persistence
             .save_ledger_transaction(&drain)
             .expect("save drain transaction");
     }
+    assert_eq!(
+        persistence
+            .working_custody_balance(&output_asset)
+            .expect("read drained cbBTC working balance")
+            .as_u64(),
+        0,
+        "working_custody:cbBTC should be drained before Gateway RFQ"
+    );
 
     let response = live
         .orchestrator
