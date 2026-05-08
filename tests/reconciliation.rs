@@ -205,6 +205,38 @@ async fn build_harness() -> Harness {
     }
 }
 
+fn seed_in_flight_pending_escrow(
+    persistence: &Arc<RuntimePersistence>,
+    asset: &AssetId,
+    amount: u64,
+) {
+    if amount == 0 {
+        return;
+    }
+    let transaction =
+        LedgerTransactionBuilder::new("test_seed_pending_escrow", uuid::Uuid::now_v7())
+            .description("seed pending_escrow for in-flight trade")
+            .idempotency_key(format!(
+                "test:seed:pending_escrow:{}:{}:{}",
+                asset.as_str(),
+                amount,
+                uuid::Uuid::now_v7()
+            ))
+            .debit(
+                LedgerAccountId::pending_escrow(asset.clone()),
+                AmountRaw::new(amount),
+            )
+            .credit(
+                LedgerAccountId::external(asset.clone(), "seed_in_flight"),
+                AmountRaw::new(amount),
+            )
+            .build()
+            .expect("balanced pending_escrow seed");
+    persistence
+        .save_ledger_transaction(&transaction)
+        .expect("save pending_escrow seed");
+}
+
 fn seed_working_custody(persistence: &Arc<RuntimePersistence>, asset: &AssetId, amount: u64) {
     if amount == 0 {
         return;
@@ -319,4 +351,165 @@ async fn recon_wallet_positive_drift_adjusts_after_three_consecutive_ticks() {
         ),
         "expected Adjusted event with key {key}, got {outcome:?}",
     );
+}
+
+#[tokio::test]
+async fn recon_wallet_negative_drift_adjusts() {
+    let harness = build_harness().await;
+
+    seed_working_custody(&harness.persistence, &usdc(), 1_000_000);
+    harness.balance_reader.set(usdc(), 980_000); // drift = -20_000
+    harness.balance_reader.set(sol(), 0);
+    harness.balance_reader.set(cbbtc(), 0);
+
+    let mut worker = build_worker(&harness);
+    for _ in 0..2 {
+        worker.tick_wallet(&usdc()).await.expect("tick");
+    }
+    let final_obs = worker.tick_wallet(&usdc()).await.expect("final tick");
+    let key = match final_obs.outcome {
+        ObservationOutcome::Adjusted { idempotency_key } => idempotency_key,
+        other => panic!("expected Adjusted, got {other:?}"),
+    };
+    assert!(key.starts_with("recon:wallet:USDC:"));
+
+    let working = harness
+        .persistence
+        .account_balance(&LedgerAccountId::working(usdc()))
+        .expect("working");
+    assert_eq!(working, 980_000);
+    let external = harness
+        .persistence
+        .account_balance(&LedgerAccountId::external(usdc(), "reconciliation"))
+        .expect("external");
+    assert_eq!(external, 20_000);
+}
+
+#[tokio::test]
+async fn recon_dust_threshold_skips() {
+    let harness = build_harness().await;
+
+    seed_working_custody(&harness.persistence, &usdc(), 1_000_000);
+    harness.balance_reader.set(usdc(), 1_005_000); // drift = +5_000 (dust=10_000)
+    harness.balance_reader.set(sol(), 0);
+    harness.balance_reader.set(cbbtc(), 0);
+
+    let mut worker = build_worker(&harness);
+    for _ in 0..3 {
+        let observation = worker.tick_wallet(&usdc()).await.expect("tick");
+        assert!(matches!(observation.outcome, ObservationOutcome::WithinDust));
+    }
+
+    // No adjustment occurred — working_custody stays at the seeded value.
+    let working = harness
+        .persistence
+        .account_balance(&LedgerAccountId::working(usdc()))
+        .expect("working");
+    assert_eq!(working, 1_000_000);
+    let external_recon = harness
+        .persistence
+        .account_balance(&LedgerAccountId::external(usdc(), "reconciliation"))
+        .expect("external");
+    assert_eq!(external_recon, 0);
+}
+
+#[tokio::test]
+async fn recon_sign_flip_resets_window() {
+    let harness = build_harness().await;
+
+    seed_working_custody(&harness.persistence, &usdc(), 1_000_000);
+    harness.balance_reader.set(sol(), 0);
+    harness.balance_reader.set(cbbtc(), 0);
+
+    let mut worker = build_worker(&harness);
+
+    harness.balance_reader.set(usdc(), 1_020_000);
+    let obs1 = worker.tick_wallet(&usdc()).await.expect("tick 1");
+    assert!(matches!(
+        obs1.outcome,
+        ObservationOutcome::Building { observations: 1 }
+    ));
+    let obs2 = worker.tick_wallet(&usdc()).await.expect("tick 2");
+    assert!(matches!(
+        obs2.outcome,
+        ObservationOutcome::Building { observations: 2 }
+    ));
+
+    // Sign flip: balance dips below the seeded amount → drift = -20_000.
+    harness.balance_reader.set(usdc(), 980_000);
+    let obs3 = worker.tick_wallet(&usdc()).await.expect("tick 3");
+    assert!(
+        matches!(
+            obs3.outcome,
+            ObservationOutcome::Building { observations: 1 }
+        ),
+        "sign flip must reset to observations=1, got {obs3:?}"
+    );
+
+    let external_recon = harness
+        .persistence
+        .account_balance(&LedgerAccountId::external(usdc(), "reconciliation"))
+        .expect("external");
+    assert_eq!(external_recon, 0);
+}
+
+#[tokio::test]
+async fn recon_in_flight_trade_pauses() {
+    let harness = build_harness().await;
+
+    seed_working_custody(&harness.persistence, &usdc(), 1_000_000);
+    // Active in-flight pending_escrow:USDC entry simulates a trade in flight.
+    seed_in_flight_pending_escrow(&harness.persistence, &usdc(), 50_000);
+    harness.balance_reader.set(usdc(), 1_020_000);
+    harness.balance_reader.set(sol(), 0);
+    harness.balance_reader.set(cbbtc(), 0);
+
+    let mut worker = build_worker(&harness);
+    worker.tick_wallet(&usdc()).await.expect("tick 1");
+    worker.tick_wallet(&usdc()).await.expect("tick 2");
+    let trigger = worker.tick_wallet(&usdc()).await.expect("trigger tick");
+    match trigger.outcome {
+        ObservationOutcome::Skipped { reason } => assert_eq!(reason, "trade_in_flight"),
+        other => panic!("expected Skipped(trade_in_flight), got {other:?}"),
+    }
+
+    let external_recon = harness
+        .persistence
+        .account_balance(&LedgerAccountId::external(usdc(), "reconciliation"))
+        .expect("external");
+    assert_eq!(external_recon, 0);
+
+    let events = recent_recon_events(&harness).await;
+    let last = events.last().expect("recon event present");
+    let ReconciliationEvent::Tick { outcome, .. } = last;
+    assert!(matches!(
+        outcome,
+        ReconciliationOutcome::Skipped { reason } if reason == "trade_in_flight"
+    ));
+}
+
+#[tokio::test]
+async fn recon_emits_event_on_skip() {
+    // Even a within-dust observation must emit a Tick event so operators
+    // can see the worker is alive.
+    let harness = build_harness().await;
+
+    seed_working_custody(&harness.persistence, &usdc(), 1_000_000);
+    harness.balance_reader.set(usdc(), 1_005_000); // within dust
+    harness.balance_reader.set(sol(), 0);
+    harness.balance_reader.set(cbbtc(), 0);
+
+    let mut worker = build_worker(&harness);
+    worker.tick_wallet(&usdc()).await.expect("tick");
+
+    let events = recent_recon_events(&harness).await;
+    let last = events.last().expect("at least one tick event");
+    let ReconciliationEvent::Tick {
+        outcome, scope, ..
+    } = last;
+    assert!(matches!(
+        scope,
+        firmament::events::ReconciliationScope::Wallet
+    ));
+    assert!(matches!(outcome, ReconciliationOutcome::WithinDust));
 }
