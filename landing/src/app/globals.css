@@ -187,6 +187,10 @@ h2 {
   background: var(--surface);
 }
 
+.mobile-nav {
+  display: none;
+}
+
 .nav-action,
 .button {
   display: inline-flex;
@@ -226,6 +230,7 @@ h2 {
 
 .nav-action:focus-visible,
 .site-header a:focus-visible,
+.mobile-nav a:focus-visible,
 .button:focus-visible,
 .demo-selector button:focus-visible {
   outline: 3px solid var(--amber);
@@ -384,6 +389,7 @@ h2 {
 
 .proof-strip span,
 .lane-card span,
+.position-panel span,
 .runtime-panel-label,
 .proof-label,
 .api-item span {
@@ -438,6 +444,7 @@ h2 {
 }
 
 .lane-card,
+.position-panel,
 .runtime-cta-panel,
 .proof-card,
 .api-panel,
@@ -449,7 +456,7 @@ h2 {
 }
 
 .lane-card {
-  min-height: 134px;
+  min-height: 178px;
   padding: 20px;
   background: var(--paper);
   transition:
@@ -458,6 +465,7 @@ h2 {
 }
 
 .lane-card:hover,
+.position-panel:hover,
 .proof-card:hover,
 .flow-step:hover,
 .api-item:hover {
@@ -465,12 +473,72 @@ h2 {
   box-shadow: 8px 8px 0 rgba(28, 32, 43, 0.2);
 }
 
-.lane-card p {
+.lane-card h3 {
   margin: 20px 0 0;
   color: var(--ink);
-  font-size: 1.36rem;
+  font-size: 1.32rem;
   font-weight: 800;
   line-height: 1.12;
+}
+
+.lane-card p {
+  margin: 10px 0 0;
+  color: var(--text);
+  font-size: 0.98rem;
+  font-weight: 650;
+  line-height: 1.35;
+}
+
+.position-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+  gap: 22px;
+  align-items: center;
+  margin-top: 16px;
+  padding: 22px;
+  background:
+    linear-gradient(90deg, rgba(248, 251, 255, 0.08) 1px, transparent 1px),
+    linear-gradient(135deg, rgba(0, 166, 255, 0.18), transparent 48%),
+    var(--ink);
+  background-size: 18px 100%, auto, auto;
+  color: var(--surface);
+  transition:
+    transform 180ms var(--ease),
+    box-shadow 180ms var(--ease);
+}
+
+.position-panel span {
+  color: var(--cyan);
+}
+
+.position-panel h3 {
+  max-width: 520px;
+  margin: 14px 0 0;
+  color: #fff;
+  font-size: 1.96rem;
+  font-weight: 850;
+  line-height: 1.04;
+}
+
+.position-panel ul {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.position-panel li {
+  min-height: 46px;
+  padding: 12px 14px;
+  border: 2px solid var(--surface);
+  border-radius: var(--radius-sm);
+  background: rgba(248, 251, 255, 0.1);
+  box-shadow: 3px 3px 0 rgba(248, 251, 255, 0.12);
+  color: #fff;
+  font-family: var(--font-mono);
+  font-size: var(--text-label);
+  font-weight: 850;
 }
 
 .runtime-layout {
@@ -1022,9 +1090,47 @@ h2 {
     display: none;
   }
 
+  .mobile-nav {
+    position: fixed;
+    top: 88px;
+    left: 50%;
+    z-index: 39;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 4px;
+    width: min(560px, calc(100% - 28px));
+    padding: 4px;
+    border: 3px solid var(--ink);
+    border-radius: var(--radius-sm);
+    background: rgba(248, 251, 255, 0.96);
+    box-shadow: 4px 4px 0 var(--ink);
+    transform: translateX(-50%);
+    backdrop-filter: blur(12px);
+  }
+
+  .mobile-nav a {
+    display: inline-flex;
+    min-height: 36px;
+    align-items: center;
+    justify-content: center;
+    border: 2px solid transparent;
+    border-radius: var(--radius-sm);
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: var(--text-label);
+    font-weight: 900;
+    text-transform: uppercase;
+  }
+
+  .mobile-nav a:hover {
+    border-color: var(--ink);
+    background: var(--surface);
+  }
+
   .hero,
   .runtime-layout,
   .api-panel,
+  .position-panel,
   .footer-content {
     grid-template-columns: 1fr;
   }
@@ -1035,7 +1141,12 @@ h2 {
 
   .hero {
     min-height: auto;
-    padding-top: 118px;
+    padding-top: 158px;
+  }
+
+  .section,
+  .demo-section {
+    scroll-margin-top: 152px;
   }
 
   .proof-strip,
@@ -1121,7 +1232,7 @@ h2 {
 
   .hero {
     gap: 26px;
-    padding-top: 92px;
+    padding-top: 142px;
     padding-bottom: 18px;
   }
 
@@ -1209,6 +1320,20 @@ h2 {
 
   .lane-card {
     min-height: 118px;
+  }
+
+  .position-panel {
+    gap: 18px;
+    padding: 20px;
+  }
+
+  .position-panel h3 {
+    font-size: 1.65rem;
+  }
+
+  .mobile-nav {
+    top: 74px;
+    width: calc(100% - 20px);
   }
 
   .terminal-row {

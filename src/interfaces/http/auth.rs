@@ -5,6 +5,7 @@
 //! primitives that can be wired into HTTP middleware later.
 
 use std::collections::HashMap;
+use std::hash::BuildHasher;
 
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use base64::Engine as _;
@@ -119,7 +120,7 @@ fn looks_like_entry_boundary(value: &str) -> bool {
 pub fn verify_admin_password(
     username: &str,
     password: &str,
-    hashes: &HashMap<String, String>,
+    hashes: &HashMap<String, String, impl BuildHasher>,
 ) -> AppResult<bool> {
     let Some(hash) = hashes.get(username) else {
         return Ok(false);

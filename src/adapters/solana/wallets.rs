@@ -75,7 +75,7 @@ impl LoadedWallet {
         Self::from_role_env(WalletRole::Maker)
     }
 
-    /// Load the taker/app wallet from fixed taker env vars.
+    /// Load the optional legacy local-signing taker wallet from fixed taker env vars.
     ///
     /// # Errors
     ///
@@ -193,17 +193,17 @@ impl fmt::Debug for LoadedWallet {
     }
 }
 
-/// Maker/operator and taker/app wallets used by the demo.
+/// Maker/operator and optional legacy local-signing taker wallets.
 #[derive(Debug)]
 pub struct DemoWallets {
     /// Maker/operator wallet that owns working liquidity.
     pub maker: LoadedWallet,
-    /// Taker/app wallet used for settlement demos.
+    /// Optional local-signing taker wallet used by legacy settlement tests.
     pub taker: LoadedWallet,
 }
 
 impl DemoWallets {
-    /// Load both demo wallets from fixed environment-backed sources.
+    /// Load both local-signing demo wallets from fixed environment-backed sources.
     ///
     /// # Errors
     ///

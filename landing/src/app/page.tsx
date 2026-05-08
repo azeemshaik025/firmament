@@ -52,16 +52,25 @@ const runtimeBlocks = [
 const productLanes = [
   {
     label: "Apps",
-    copy: "Embed governed liquidity.",
+    title: "Embed firm liquidity",
+    copy: "Serve governed quotes without routing users away from your product.",
   },
   {
     label: "Treasuries",
-    copy: "Control inventory flow.",
+    title: "Control the book",
+    copy: "Keep supported assets moving inside policy, inventory, and risk limits.",
   },
   {
     label: "Builders",
-    copy: "Use a small HTTP API.",
+    title: "Ship with a small API",
+    copy: "Request RFQs, settle accepted flow, and inspect runtime state.",
   },
+];
+
+const positionReasons = [
+  "Quote from inventory you control",
+  "Reject unsafe flow before settlement",
+  "Record every movement in the ledger",
 ];
 
 const runtimeSignals = [
@@ -114,6 +123,11 @@ export default function Home() {
           Launch app
         </a>
       </header>
+      <nav className="mobile-nav" aria-label="Mobile sections">
+        <a href="#product">Product</a>
+        <a href="#runtime">Runtime</a>
+        <a href="#api">API</a>
+      </nav>
 
       <section className="hero" aria-labelledby="hero-title">
         <div className="hero-copy">
@@ -182,9 +196,21 @@ export default function Home() {
           {productLanes.map((lane) => (
             <article className="lane-card" key={lane.label}>
               <span>{lane.label}</span>
+              <h3>{lane.title}</h3>
               <p>{lane.copy}</p>
             </article>
           ))}
+        </div>
+        <div className="position-panel" aria-label="Why Firmament is different">
+          <div>
+            <span>Why it matters</span>
+            <h3>Most products can route a swap. Few can run a book.</h3>
+          </div>
+          <ul>
+            {positionReasons.map((reason) => (
+              <li key={reason}>{reason}</li>
+            ))}
+          </ul>
         </div>
       </section>
 

@@ -1,6 +1,6 @@
 [http]
 bind_address = "127.0.0.1"
-port = 8080
+port = 5050
 
 [solana]
 cluster = "mainnet-beta"
@@ -71,7 +71,7 @@ max_refill_fee_raw = 250_000
 [runtime]
 event_capacity = 256
 scaffold_hold_millis = 0
-# `cargo run --release` starts the maker API runtime.
+# `cargo run` starts the maker API runtime.
 enable_protocol_workers = false
 database_path = "runtime.sqlite"
 

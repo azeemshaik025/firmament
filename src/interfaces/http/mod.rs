@@ -13,12 +13,11 @@ use axum::body::Body;
 use axum::extract::rejection::{JsonRejection, PathRejection};
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use tokio::net::TcpListener;
-use tower_http::services::ServeDir;
 use tracing::info;
 
 use crate::application::rfq;
@@ -159,11 +158,6 @@ fn build_router(context: Arc<ApiContext>) -> Router {
             "/v1/admin/gateway/refill/check",
             post(post_admin_gateway_refill_check),
         )
-        .nest_service("/assets", ServeDir::new("web/landing/dist/assets"))
-        .nest_service("/app/assets", ServeDir::new("web/app/dist/assets"))
-        .route("/", get(serve_landing_index))
-        .route("/app", get(serve_app_index))
-        .route("/app/{*path}", get(serve_app_index))
         .with_state(context)
 }
 
@@ -712,14 +706,6 @@ async fn post_admin_gateway_refill_check(
     Ok(StatusCode::ACCEPTED)
 }
 
-async fn serve_landing_index() -> Html<String> {
-    Html(index_or_fallback("web/landing/dist/index.html", landing_fallback_html()).await)
-}
-
-async fn serve_app_index() -> Html<String> {
-    Html(index_or_fallback("web/app/dist/index.html", app_fallback_html()).await)
-}
-
 fn admin_password_hashes() -> Result<std::collections::HashMap<String, String>, ApiError> {
     let raw = env::var(FIRMAMENT_ADMIN_PASSWORD_HASHES_ENV).map_err(|_| {
         ApiError::new(
@@ -802,34 +788,6 @@ fn session_cookie_header(
         "{ADMIN_COOKIE_NAME}={value}; HttpOnly; SameSite=Lax; Path=/; Max-Age={max_age_seconds}{secure_attr}"
     ))
     .map_err(|error| ApiError::bad_request("invalid_cookie", error.to_string()))
-}
-
-async fn index_or_fallback(path: &str, fallback: String) -> String {
-    tokio::fs::read_to_string(path).await.unwrap_or(fallback)
-}
-
-fn landing_fallback_html() -> String {
-    r#"<!doctype html>
-<html lang="en">
-  <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Firmament</title></head>
-  <body style="font-family:ui-sans-serif,system-ui;background:#f4efe3;color:#201b14;padding:48px">
-    <h1>Firmament backend is running.</h1>
-    <p>Build <code>web/landing</code> to serve the production landing page, or open <a href="/app">/app</a>.</p>
-  </body>
-</html>"#
-        .to_owned()
-}
-
-fn app_fallback_html() -> String {
-    r#"<!doctype html>
-<html lang="en">
-  <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Firmament App</title></head>
-  <body style="font-family:ui-sans-serif,system-ui;background:#09110e;color:#eff7df;padding:48px">
-    <h1>Firmament web app is not built yet.</h1>
-    <p>Run the Vite build in <code>web/app</code>, then refresh this route.</p>
-  </body>
-</html>"#
-        .to_owned()
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
@@ -1003,3 +961,4 @@ fn ledger_summary_to_api(
         net_usdc_estimate: summary.net_usdc_estimate,
     }
 }
+

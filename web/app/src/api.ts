@@ -83,9 +83,13 @@ export type RuntimeEventsResponse = {
 
 export type LedgerAccountType =
   | 'working_custody'
+  | 'reserved'
+  | 'pending_dex_spend'
+  | 'receivable'
   | 'htlc_escrow'
   | 'pending_escrow'
   | 'gateway'
+  | 'gateway_reserved'
   | 'pending_gateway_deposit'
   | 'rebalance'
   | 'fees'
@@ -107,13 +111,36 @@ export type RuntimeLedgerResponse = {
   balances: RuntimeLedgerBalance[];
 };
 
+export type TradeSignatureKind =
+  | 'taker_lock'
+  | 'taker_redeem'
+  | 'taker_refund'
+  | 'maker_lock'
+  | 'maker_redeem'
+  | 'maker_refund'
+  | 'gateway_burn'
+  | 'gateway_mint'
+  | 'jupiter_swap';
+
+export type TradeSignature = {
+  kind: TradeSignatureKind;
+  signature: string;
+};
+
+export type TradeAmount = {
+  asset: string;
+  amount_raw: string;
+  decimals: number;
+  display_amount: string;
+};
+
 export type RuntimeTrade = {
   trade_id: string;
   quote_id: string;
   settlement_status: string;
-  input?: TokenAmount;
-  output?: TokenAmount;
-  tx_signatures: string[];
+  input: TradeAmount;
+  output: TradeAmount;
+  tx_signatures: TradeSignature[];
 };
 
 export type RuntimeTradesResponse = {
