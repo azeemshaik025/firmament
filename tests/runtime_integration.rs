@@ -2102,3 +2102,236 @@ async fn settlement_gateway_sol_path_emits_jupiter_spend_sequence() {
     let report = repository.integrity_report().expect("integrity report");
     assert!(report.healthy, "ledger should balance: {report:?}");
 }
+
+#[tokio::test]
+async fn settlement_gateway_failure_releases_reservation() {
+    // Drives the consumer through a successful BurnIntentSubmitted (which
+    // moves gateway -> trading via the back-to-back reserve+burn) and then a
+    // BurnFailed: the latter must reverse trading -> gateway so the maker's
+    // gateway balance ends up at the original seed value.
+    let db = Db::open_in_memory().expect("open in-memory db");
+    let consumer = LedgerEventConsumer::new(&db);
+    let repository = SqliteLedgerRepository::new(&db);
+
+    let trade_id = TradeId::generate();
+    let run = run_id();
+    let gateway_amount: u64 = 1_000_000_000;
+    let burn_amount: u64 = 250_000_000;
+
+    let seed = firmament::ledger::LedgerTransactionBuilder::new(
+        "test_seed_gateway_burn",
+        trade_id.as_uuid(),
+    )
+    .description("seed gateway USDC for burn-failure test")
+    .idempotency_key(format!("seed:{trade_id}:gateway_burn_failure"))
+    .debit(
+        LedgerAccountId::gateway(usdc()),
+        AmountRaw::new(gateway_amount),
+    )
+    .credit(
+        LedgerAccountId::external(usdc(), "seed_gateway"),
+        AmountRaw::new(gateway_amount),
+    )
+    .build()
+    .expect("balanced gateway seed");
+    repository.save_transaction(&seed).expect("save seed");
+
+    consumer
+        .consume(&RuntimeEvent::Gateway(GatewayEvent::BurnIntentSubmitted {
+            metadata: EventMetadata::new(run),
+            trade_id,
+            amount: TokenAmount::new(usdc(), AmountRaw::new(burn_amount)),
+        }))
+        .expect("burn intent submitted");
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::trading(usdc()))
+            .expect("trading after burn"),
+        i128::from(burn_amount)
+    );
+
+    consumer
+        .consume(&RuntimeEvent::Gateway(GatewayEvent::BurnFailed {
+            metadata: EventMetadata::new(run),
+            trade_id,
+            amount: TokenAmount::new(usdc(), AmountRaw::new(burn_amount)),
+            reason: "gateway adapter timeout".to_owned(),
+        }))
+        .expect("burn failed");
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::trading(usdc()))
+            .expect("trading after burn failure"),
+        0
+    );
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::gateway(usdc()))
+            .expect("gateway after burn failure"),
+        i128::from(gateway_amount),
+        "gateway balance should be fully released back"
+    );
+}
+
+#[tokio::test]
+async fn settlement_jupiter_failure_unwinds_pending_dex_spend() {
+    // Drives TradeSwapSubmitted (working_custody -> pending_dex_spend) and
+    // then TradeSwapFailed: the latter must reverse pending_dex_spend ->
+    // working_custody.
+    let db = Db::open_in_memory().expect("open in-memory db");
+    let consumer = LedgerEventConsumer::new(&db);
+    let repository = SqliteLedgerRepository::new(&db);
+
+    let trade_id = TradeId::generate();
+    let run = run_id();
+    let usdc_amount: u64 = 300_000_000;
+
+    let seed = firmament::ledger::LedgerTransactionBuilder::new(
+        "test_seed_swap_failure",
+        trade_id.as_uuid(),
+    )
+    .description("seed working USDC for swap-failure test")
+    .idempotency_key(format!("seed:{trade_id}:swap_failure"))
+    .debit(
+        LedgerAccountId::working(usdc()),
+        AmountRaw::new(usdc_amount),
+    )
+    .credit(
+        LedgerAccountId::external(usdc(), "seed"),
+        AmountRaw::new(usdc_amount),
+    )
+    .build()
+    .expect("balanced seed");
+    repository.save_transaction(&seed).expect("save seed");
+
+    consumer
+        .consume(&RuntimeEvent::Swap(SwapEvent::TradeSwapSubmitted {
+            metadata: EventMetadata::new(run),
+            trade_id,
+            input_amount: TokenAmount::new(usdc(), AmountRaw::new(usdc_amount)),
+        }))
+        .expect("trade swap submitted");
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::pending_dex_spend(
+                usdc(),
+                trade_id.to_string()
+            ))
+            .expect("pending_dex_spend after submit"),
+        i128::from(usdc_amount)
+    );
+
+    consumer
+        .consume(&RuntimeEvent::Swap(SwapEvent::TradeSwapFailed {
+            metadata: EventMetadata::new(run),
+            trade_id,
+            input_amount: TokenAmount::new(usdc(), AmountRaw::new(usdc_amount)),
+            reason: "jupiter route stale".to_owned(),
+        }))
+        .expect("trade swap failed");
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::pending_dex_spend(
+                usdc(),
+                trade_id.to_string()
+            ))
+            .expect("pending_dex_spend after failure"),
+        0
+    );
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::working(usdc()))
+            .expect("working USDC after failure"),
+        i128::from(usdc_amount),
+        "working_custody should be fully restored"
+    );
+}
+
+#[tokio::test]
+async fn settlement_repricing_failure_skips_reservation() {
+    // Drive the orchestrator with a quote that expires before acceptance.
+    // The accept path must:
+    //   1. Not move working_custody -> reserved (no Submitted{MakerOutput} fires).
+    //   2. Emit a Settlement::Failed with reason "repricing_failed".
+    //   3. Record a RuntimeTrade in Failed state for operator visibility.
+    let persistence = Arc::new(
+        RuntimePersistence::open_in_memory(AssetRegistry::default()).expect("persistence"),
+    );
+    seed_working_custody(&persistence, &sol(), 200_000_000);
+    seed_working_custody(&persistence, &usdc(), 10_000_000);
+
+    let orchestrator = persistent_harness_with_persistence(
+        FakePriceProvider::default(),
+        FakeHtlcClient::default(),
+        FakeSwapExecutor::default(),
+        FakeGatewayClient::default(),
+        FakeBalanceReader::new(vec![quote_inventory(), quote_inventory()]),
+        RuntimeOrchestratorOptions::default(),
+        Arc::clone(&persistence),
+    )
+    .await;
+
+    let mut request = rfq(100_000);
+    request.expiry_seconds = Some(1);
+    let response = orchestrator
+        .request_rfq(request)
+        .await
+        .expect("request quote");
+    let quote = match response {
+        RfqResponse::Accepted(quote) => quote,
+        RfqResponse::Rejected(rejection) => panic!("expected accepted: {rejection:?}"),
+    };
+    let quote_id = quote.quote_id;
+
+    // Wait past the quote expiry so accept_quote enters the Expired branch.
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+
+    let error = orchestrator
+        .accept_quote(quote_id)
+        .await
+        .expect_err("expired quote acceptance should fail");
+    assert!(error.to_string().contains("expired"));
+
+    // The expiry handler emits a Settlement::Failed with reason
+    // "repricing_failed" — find it in the runtime event stream.
+    let events = orchestrator.runtime().recent_events(None).await;
+    let saw_repricing_failed = events.iter().any(|event| {
+        matches!(
+            event,
+            RuntimeEvent::Settlement(SettlementEvent::Failed { reason, .. })
+                if reason == "repricing_failed"
+        )
+    });
+    assert!(
+        saw_repricing_failed,
+        "expected Settlement::Failed reason=repricing_failed in events: {events:#?}"
+    );
+
+    let trade_id = events
+        .iter()
+        .find_map(|event| match event {
+            RuntimeEvent::Settlement(SettlementEvent::Failed {
+                trade_id, reason, ..
+            }) if reason == "repricing_failed" => Some(*trade_id),
+            _ => None,
+        })
+        .expect("repricing_failed event carries trade_id");
+
+    let runtime_trade = orchestrator
+        .trade(trade_id)
+        .await
+        .expect("expired-quote trade recorded for visibility");
+    assert_eq!(runtime_trade.settlement_status, SettlementStatus::Failed);
+
+    // No Submitted settlement events should have fired (those carry the
+    // working_custody -> reserved compound move on the maker leg).
+    assert!(
+        events.iter().all(|event| {
+            !matches!(
+                event,
+                RuntimeEvent::Settlement(SettlementEvent::Submitted { .. })
+            )
+        }),
+        "no Submitted settlement events should fire on repricing failure"
+    );
+}

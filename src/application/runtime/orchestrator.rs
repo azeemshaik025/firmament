@@ -677,6 +677,27 @@ impl RuntimeOrchestrator {
             }
             QuoteAcceptance::Expired { decision: _, event } => {
                 self.publish(event).await?;
+                // Emit a settlement failure event so downstream consumers can
+                // observe the repricing-failed outcome under a stable reason
+                // string; record a Failed RuntimeTrade so operator views can
+                // surface the cancelled trade alongside successful ones.
+                let trade_id = TradeId::generate();
+                self.publish(RuntimeEvent::Settlement(SettlementEvent::Failed {
+                    metadata: EventMetadata::new(self.app_state.run_id()),
+                    trade_id,
+                    reason: "repricing_failed".to_owned(),
+                }))
+                .await?;
+                let trade = RuntimeTrade {
+                    quote_id: quote.quote_id,
+                    trade_id,
+                    settlement_status: SettlementStatus::Failed,
+                    tx_signatures: Vec::new(),
+                    input_amount: quote.input_amount.clone(),
+                    output_amount: quote.output_amount.clone(),
+                    execution_path: quote.execution_path,
+                };
+                self.trades.write().await.insert(trade_id, trade);
                 Err(AppError::validation(format!(
                     "quote {} expired",
                     quote.quote_id
