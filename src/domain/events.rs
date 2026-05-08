@@ -5,7 +5,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::domain::types::{
-    AssetPair, BalanceSnapshot, GatewayReceipt, HtlcReceipt, QuoteId, ReferencePrice,
+    AssetId, AssetPair, BalanceSnapshot, GatewayReceipt, HtlcReceipt, QuoteId, ReferencePrice,
     RejectionReason, RiskDecision, RuntimeRunId, SettlementStatus, SwapQuote, SwapReceipt,
     TokenAmount, TradeId, TxSignature, WalletAddress,
 };
@@ -49,6 +49,8 @@ pub enum RuntimeEvent {
     Risk(RiskEvent),
     /// Inventory projection event.
     Inventory(InventoryEvent),
+    /// Reconciliation observation tick (always emitted, even on skip).
+    Reconciliation(ReconciliationEvent),
     /// Runtime system event.
     System(SystemEvent),
 }
@@ -333,5 +335,70 @@ pub enum SystemEvent {
         trade_id: Option<TradeId>,
         /// Solana signature.
         signature: TxSignature,
+    },
+}
+
+/// Always-on reconciliation worker observation event.
+///
+/// Emitted once per asset+scope per tick — even when the observed drift is
+/// within dust or a guard skips the adjustment. Operator visibility comes
+/// from `/v1/runtime/events`; the `outcome` discriminates whether the tick
+/// posted a ledger adjustment.
+///
+/// Amounts are stringly-encoded to keep the event JSON-serializable across
+/// the API boundary without introducing a `BigUint` dependency.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ReconciliationEvent {
+    /// One reconciliation tick observation.
+    Tick {
+        /// Event metadata.
+        metadata: EventMetadata,
+        /// Asset that was observed.
+        asset: AssetId,
+        /// Whether the wallet or Gateway scope was reconciled.
+        scope: ReconciliationScope,
+        /// On-chain (or Gateway-reported) raw token amount, stringly-encoded.
+        on_chain_raw: String,
+        /// Expected raw token amount derived from the ledger, stringly-encoded.
+        expected_raw: String,
+        /// Signed drift `on_chain - expected`, stringly-encoded.
+        drift_raw: String,
+        /// Outcome of the tick.
+        outcome: ReconciliationOutcome,
+    },
+}
+
+/// Scope for a reconciliation tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReconciliationScope {
+    /// Solana working-custody wallet reconciliation.
+    Wallet,
+    /// Circle Gateway balance reconciliation.
+    Gateway,
+}
+
+/// Outcome of a reconciliation tick.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ReconciliationOutcome {
+    /// Drift was within the configured per-asset dust threshold.
+    WithinDust,
+    /// Drift was above dust but the consecutive-observation window has not
+    /// yet been satisfied.
+    Building {
+        /// How many consecutive same-sign observations have been recorded.
+        observations: u8,
+    },
+    /// Drift triggered a balanced ledger adjustment.
+    Adjusted {
+        /// Idempotency key under which the adjustment was persisted.
+        idempotency_key: String,
+    },
+    /// Drift triggered an adjustment but a hard guard blocked it.
+    Skipped {
+        /// Stable, operator-facing reason.
+        reason: String,
     },
 }

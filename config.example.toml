@@ -79,3 +79,19 @@ database_path = "runtime.sqlite"
 allowed_users = ["admin"]
 session_ttl_seconds = 28800
 cookie_secure = false
+
+[reconciliation]
+# Always-on Solana reconciliation worker. The whole section is optional —
+# safe defaults apply when it is omitted entirely.
+interval_seconds = 10
+consecutive_ticks_for_adjustment = 3
+emit_event_on_skip = true
+
+[reconciliation.dust]
+# Per-asset dust thresholds in raw native units. Drifts at or below these
+# values are ignored; drifts above must be observed
+# `consecutive_ticks_for_adjustment` times in a row before the worker
+# posts a balanced ledger adjustment.
+USDC = 10000
+SOL = 100000
+cbBTC = 100

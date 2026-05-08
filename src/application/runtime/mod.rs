@@ -3,6 +3,7 @@
 mod bootstrap;
 mod orchestrator;
 mod projection;
+pub mod reconciliation;
 
 pub use bootstrap::{
     AppState, LiveRuntime, bootstrap, bootstrap_demo_runtime, bootstrap_live_runtime,

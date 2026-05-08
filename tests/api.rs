@@ -368,9 +368,7 @@ struct FakeHtlcClient {
 fn fake_leg_for_funder(funder: WalletRole) -> SettlementLeg {
     match funder {
         WalletRole::Maker => SettlementLeg::MakerOutput,
-        WalletRole::Taker | WalletRole::Operator | WalletRole::Gateway => {
-            SettlementLeg::TakerInput
-        }
+        WalletRole::Taker | WalletRole::Operator | WalletRole::Gateway => SettlementLeg::TakerInput,
     }
 }
 

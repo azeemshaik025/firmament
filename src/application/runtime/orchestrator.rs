@@ -309,6 +309,130 @@ impl RuntimePersistence {
         SqliteLedgerRepository::new(self.db.as_ref()).save_transaction(transaction)
     }
 
+    /// Read a single ledger account balance. Used by the reconciliation
+    /// worker.
+    ///
+    /// # Errors
+    ///
+    /// Returns persistence errors when the read fails.
+    pub fn account_balance(&self, account: &LedgerAccountId) -> AppResult<i128> {
+        SqliteLedgerRepository::new(self.db.as_ref()).account_balance(account)
+    }
+
+    /// Sum signed balances across every qualifier for `(account_type, asset)`.
+    /// Used by the reconciliation worker for `reserved`, `gateway_reserved`,
+    /// `pending_dex_spend`, `receivable`, etc.
+    ///
+    /// # Errors
+    ///
+    /// Returns persistence errors when the read fails.
+    pub fn aggregate_balance_by_type(
+        &self,
+        account_type: LedgerAccountType,
+        asset: &AssetId,
+    ) -> AppResult<i128> {
+        SqliteLedgerRepository::new(self.db.as_ref()).aggregate_balance_by_type(account_type, asset)
+    }
+
+    /// Visit reconciliation idempotency keys whose stored value starts with
+    /// the supplied prefix. Used by tests to assert restart-time
+    /// idempotency.
+    ///
+    /// # Errors
+    ///
+    /// Returns persistence errors when the read fails.
+    pub fn with_recon_idempotency_keys<R>(
+        &self,
+        prefix: &str,
+        visitor: impl FnOnce(&[String]) -> R,
+    ) -> AppResult<R> {
+        let pattern = format!("{prefix}%");
+        let rows: Vec<String> = self.db.with_connection(|connection| {
+            let mut statement = connection
+                .prepare(
+                    "SELECT idempotency_key FROM ledger_transactions
+                     WHERE idempotency_key LIKE ?1",
+                )
+                .map_err(crate::adapters::persistence::db::sqlite_error)?;
+            let mapped = statement
+                .query_map([&pattern], |row| row.get::<_, String>(0))
+                .map_err(crate::adapters::persistence::db::sqlite_error)?;
+            let mut acc = Vec::new();
+            for row in mapped {
+                acc.push(row.map_err(crate::adapters::persistence::db::sqlite_error)?);
+            }
+            Ok::<_, AppError>(acc)
+        })?;
+        Ok(visitor(&rows))
+    }
+
+    /// Reseed the in-memory daily idempotency-sequence counters from
+    /// persisted reconciliation transactions for the given UTC date.
+    ///
+    /// Idempotency keys are formatted `recon:{scope}:{asset}:{utc_date}:{seq}`.
+    /// On startup the worker invokes this to recover the highest already-used
+    /// sequence per `(scope, asset, date)` so the daily counter does not
+    /// reuse a previously persisted key after a restart.
+    ///
+    /// # Errors
+    ///
+    /// Returns persistence errors when the read fails.
+    pub fn seed_recon_sequences(
+        &self,
+        utc_date: &str,
+        sequences: &mut std::collections::HashMap<(&'static str, AssetId, String), u64>,
+    ) -> AppResult<()> {
+        let prefix_wallet = "recon:wallet:";
+        let prefix_gateway = "recon:gateway:";
+        let pattern = format!("recon:%:%:{utc_date}:%");
+        let rows: Vec<String> = self.db.with_connection(|connection| {
+            let mut statement = connection
+                .prepare(
+                    "SELECT idempotency_key FROM ledger_transactions
+                     WHERE idempotency_key LIKE ?1",
+                )
+                .map_err(crate::adapters::persistence::db::sqlite_error)?;
+            let mapped = statement
+                .query_map([&pattern], |row| row.get::<_, String>(0))
+                .map_err(crate::adapters::persistence::db::sqlite_error)?;
+            let mut acc = Vec::new();
+            for row in mapped {
+                acc.push(row.map_err(crate::adapters::persistence::db::sqlite_error)?);
+            }
+            Ok::<_, AppError>(acc)
+        })?;
+
+        for key in rows {
+            // Format: recon:{scope}:{asset}:{utc_date}:{seq}
+            let scope_label: &'static str = if key.starts_with(prefix_wallet) {
+                "wallet"
+            } else if key.starts_with(prefix_gateway) {
+                "gateway"
+            } else {
+                continue;
+            };
+            let parts: Vec<&str> = key.split(':').collect();
+            if parts.len() != 5 {
+                continue;
+            }
+            // parts: ["recon", scope, asset, utc_date, seq]
+            if parts[3] != utc_date {
+                continue;
+            }
+            let asset = AssetId::from(parts[2]);
+            let Ok(seq) = parts[4].parse::<u64>() else {
+                continue;
+            };
+            let entry = sequences
+                .entry((scope_label, asset, utc_date.to_owned()))
+                .or_insert(0);
+            if seq > *entry {
+                *entry = seq;
+            }
+        }
+        Ok(())
+    }
+
     /// Return the latest P&L projection.
     ///
     /// # Errors
@@ -430,6 +554,42 @@ impl RuntimeOrchestrator {
     #[must_use]
     pub fn runtime(&self) -> RuntimeHandle {
         self.app_state.runtime()
+    }
+
+    /// Return the runtime invocation identifier.
+    #[must_use]
+    pub const fn run_id(&self) -> crate::domain::types::RuntimeRunId {
+        self.app_state.run_id()
+    }
+
+    /// Return the durable persistence handle if one is wired. Used by the
+    /// reconciliation worker to read ledger state and post adjustments
+    /// directly.
+    #[must_use]
+    pub fn persistence_handle(&self) -> Option<Arc<RuntimePersistence>> {
+        self.persistence.clone()
+    }
+
+    /// Read live wallet balances through the configured `BalanceReader` port.
+    ///
+    /// # Errors
+    ///
+    /// Returns adapter errors (RPC, decoding, etc.).
+    pub async fn balances(&self, wallet: WalletRole) -> AppResult<BalanceSnapshot> {
+        self.adapters.balance_reader.balances(wallet).await
+    }
+
+    /// Read the current Gateway balance for an asset through the Gateway
+    /// adapter port. Used by the reconciliation worker.
+    ///
+    /// # Errors
+    ///
+    /// Returns adapter errors (Gateway connectivity, decoding, etc.).
+    pub async fn gateway_balance(
+        &self,
+        asset: AssetId,
+    ) -> AppResult<crate::domain::types::GatewayReceipt> {
+        self.adapters.gateway_client.balance(asset).await
     }
 
     /// Request a firm quote and store it only when risk accepts the RFQ.
@@ -733,7 +893,9 @@ impl RuntimeOrchestrator {
         // The browser-driven path posts the signed taker tx via
         // `record_external_initiate`, which already confirms the signature
         // before returning, so for v1 we treat the submission as confirmed.
-        let confirmation = state.settlement.confirm_taker_lock(self.app_state.run_id())?;
+        let confirmation = state
+            .settlement
+            .confirm_taker_lock(self.app_state.run_id())?;
         self.publish(RuntimeEvent::Settlement(confirmation.event))
             .await?;
 
@@ -755,7 +917,9 @@ impl RuntimeOrchestrator {
         // TODO(v0.2): wire real confirmation polling for the wallet flow.
         // The maker leg uses `initiate_with_external_redeemer` which submits
         // and signs locally; for v1 we treat the submission as confirmed.
-        let confirmation = state.settlement.confirm_maker_lock(self.app_state.run_id())?;
+        let confirmation = state
+            .settlement
+            .confirm_maker_lock(self.app_state.run_id())?;
         self.publish(RuntimeEvent::Settlement(confirmation.event))
             .await?;
 
@@ -1534,11 +1698,7 @@ impl RuntimeOrchestrator {
                 .find(|asset| asset.enabled && asset.id == usdc)
                 .map_or(6, |asset| asset.decimals);
             let pair = crate::domain::types::AssetPair::new(usdc.clone(), output_asset.id.clone());
-            let Ok(reference_price) = self
-                .adapters
-                .price_provider
-                .reference_price(pair)
-                .await
+            let Ok(reference_price) = self.adapters.price_provider.reference_price(pair).await
             else {
                 // No price route from USDC to the output asset. The Gateway
                 // path requires a feasible Jupiter route in the live runtime;
@@ -1565,7 +1725,10 @@ impl RuntimeOrchestrator {
             .iter_mut()
             .find(|amount| amount.asset == output_asset.id)
         {
-            let combined = entry.amount_raw.as_u64().saturating_add(synthetic_output_raw);
+            let combined = entry
+                .amount_raw
+                .as_u64()
+                .saturating_add(synthetic_output_raw);
             entry.amount_raw = AmountRaw::new(combined);
         } else {
             inventory.balances.push(TokenAmount::new(

@@ -98,6 +98,10 @@ pub struct LiveRuntime {
     pub app_state: AppState,
     /// Orchestrator backed by live protocol adapters.
     pub orchestrator: Arc<RuntimeOrchestrator>,
+    /// Shutdown signal honoured by the always-on reconciliation worker
+    /// spawned during assembly. The HTTP server can call
+    /// `shutdown_signal.notify_waiters()` during graceful shutdown.
+    pub shutdown_signal: Arc<tokio::sync::Notify>,
 }
 
 /// Build the maker-only live runtime assembly.
@@ -217,9 +221,25 @@ async fn assemble_live_runtime(
         },
     ));
 
+    // Always-on reconciliation worker. Spawn after the orchestrator is
+    // fully wired so the worker has access to the live BalanceReader,
+    // CircleGatewayClient, and ledger persistence handles. Errors are
+    // logged inside the loop; the spawn itself is detached because the
+    // HTTP server holds the Notify to drive shutdown.
+    let shutdown_signal = Arc::new(tokio::sync::Notify::new());
+    let recon_orchestrator = Arc::clone(&orchestrator);
+    let recon_config = config.reconciliation.clone();
+    let recon_shutdown = Arc::clone(&shutdown_signal);
+    tokio::spawn(super::reconciliation::run_loop(
+        recon_orchestrator,
+        recon_config,
+        recon_shutdown,
+    ));
+
     Ok(LiveRuntime {
         app_state,
         orchestrator,
+        shutdown_signal,
     })
 }
 
