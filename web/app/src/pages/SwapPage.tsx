@@ -387,6 +387,7 @@ export function SwapPage() {
     [quote]
   );
   const flowLocked = Boolean(settlement || lock || redeem);
+  const completedSwap = Boolean(redeem?.settlement_status);
   const notionalOk = notionalValidation?.ok !== false;
   const showSourceRangeError = Boolean(
     sourceRangeLabel &&
@@ -491,6 +492,18 @@ export function SwapPage() {
     setRedeem(null);
     setPreimage(null);
     setBusy((currentBusy) => (currentBusy === 'quote' ? null : currentBusy));
+  }
+
+  function startNewSwap() {
+    resetFlow();
+    setAmount('');
+    setOutputMint('');
+    writePersistedSwapState(null);
+    showNotice({
+      tone: 'success',
+      title: 'New swap ready',
+      detail: 'Pick a receive asset and enter a fresh amount.'
+    });
   }
 
   useEffect(() => {
@@ -793,6 +806,7 @@ export function SwapPage() {
   }
 
   async function handlePrimaryAction() {
+    if (redeem?.settlement_status) return startNewSwap();
     if (!walletAddress) return connectWallet();
     if (quote?.status === 'accepted' && !quoteExpired && !settlement) return startSettlement();
     if (settlement?.trade_id && !lock) return takerLock();
@@ -890,7 +904,10 @@ export function SwapPage() {
           {outputAsset && amountValidation?.ok === false && <p className="field-error">{amountValidation.message}</p>}
           {quoteRejection && <p className="field-error">{quoteRejection.detail}</p>}
 
-          <button className="primary-swap-button" disabled={primaryDisabled}>
+          <button
+            className={completedSwap ? 'primary-swap-button primary-swap-button-reset' : 'primary-swap-button'}
+            disabled={primaryDisabled}
+          >
             {primaryLabel}
           </button>
 
@@ -945,8 +962,8 @@ function primaryActionLabel({
   if (busy === 'settlement') return 'Preparing settlement...';
   if (busy === 'lock') return 'Waiting for wallet...';
   if (busy === 'redeem') return 'Completing swap...';
+  if (redeem?.settlement_status) return 'Start new swap';
   if (!hasWallet) return 'Connect wallet';
-  if (redeem?.settlement_status) return 'Swap complete';
   if (lock?.settlement_status) return 'Complete swap';
   if (settlement?.trade_id) return 'Lock funds';
   if (!hasDestination) return 'Choose receive asset';
@@ -982,9 +999,9 @@ function primaryActionDisabled({
   redeem: TradeStepResponse | null;
   busy: string | null;
 }) {
-  if (!hasWallet) return false;
   if (Boolean(busy)) return true;
-  if (redeem?.settlement_status) return true;
+  if (redeem?.settlement_status) return false;
+  if (!hasWallet) return false;
   if (lock?.settlement_status || settlement?.trade_id) return false;
   if (quote?.status === 'accepted' && !quoteExpired) return false;
   if (!hasDestination || amountValidation?.ok !== true || !notionalOk) return true;

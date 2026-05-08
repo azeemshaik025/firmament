@@ -783,6 +783,10 @@ nav a:focus-visible {
   font-size: 0.92rem;
 }
 
+.primary-swap-button-reset {
+  background: var(--cyan);
+}
+
 .field-error,
 .error-box,
 .locked-note {
