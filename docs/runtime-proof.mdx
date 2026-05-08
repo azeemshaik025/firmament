@@ -1,0 +1,34 @@
+---
+title: "Runtime Proof"
+description: "Public runtime reads exposed by the backend."
+---
+
+# Runtime Proof
+
+Firmament exposes read-only runtime state so reviewers can see what the backend is tracking.
+
+## Inventory
+
+`GET /v1/runtime/state` includes configured quoteable thresholds, observed inventory events, drift status, RFQ counters, Gateway state, and rebalance counters.
+
+## Ledger
+
+`GET /v1/runtime/ledger` returns derived ledger balances. It includes account type, asset, raw balance, decimals, display amount, entry count, and a health flag.
+
+Use `account_type` to filter:
+
+```bash
+curl 'http://127.0.0.1:5050/v1/runtime/ledger?account_type=working_custody'
+```
+
+## Trades
+
+`GET /v1/runtime/trades` returns recent in-memory trade summaries, newest first. It includes total count, successful count, input/output amounts, settlement status, and trade-bound signatures.
+
+Trade summaries are in-memory. A restart clears them.
+
+## Events
+
+`GET /v1/runtime/events` returns recent runtime events. Categories include quote, settlement, swap, Gateway, risk, inventory, reconciliation, and system.
+
+The event stream is an operational trail. It does not expose private keys, wallet secrets, or admin routes.

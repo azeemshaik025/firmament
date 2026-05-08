@@ -1,0 +1,28 @@
+---
+title: "Firmament"
+description: "A Solana RFQ maker backend for managed liquidity demos."
+---
+
+# Firmament
+
+Firmament is a hackathon backend runtime for managed Solana liquidity. It is focused on the maker side: quote decisions, risk checks, wallet settlement state, ledger entries, inventory repair, and public runtime reads.
+
+The web app is a small demo surface. It shows a taker swap flow and a read-only runtime page. The main work lives in the Rust backend.
+
+## What it handles
+
+- firm RFQs for configured USDC, SOL, and cbBTC assets
+- policy rejection when size, pair, wallet, price, or inventory checks fail
+- browser-wallet settlement through Solana HTLC transactions
+- ledger-backed balances and recent trade summaries
+- Jupiter rebalancing and Circle Gateway USDC refill when live workers are configured
+- runtime events for quotes, settlement, inventory, Gateway, swaps, reconciliation, and system status
+
+## What the demo shows
+
+1. A taker requests a quote from `/app`.
+2. The backend accepts or rejects the RFQ.
+3. Accepted quotes move through wallet settlement.
+4. `/app/runtime` shows health, ledger balances, trade counts, and recent runtime state.
+
+Default local config starts the API and runtime projection with protocol workers disabled. Live RFQ and settlement require credentials, funded maker inventory, a verified cbBTC mint, and `runtime.enable_protocol_workers = true`.

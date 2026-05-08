@@ -1021,6 +1021,7 @@ impl LedgerEventConsumer<'_> {
                 metadata,
                 trade_id,
                 amount,
+                ..
             }) => {
                 // Compound move (mirrors Submitted{MakerOutput}): reserve then
                 // burn back-to-back. The reservation lands at zero net balance
@@ -1063,6 +1064,7 @@ impl LedgerEventConsumer<'_> {
                 metadata,
                 trade_id,
                 amount,
+                ..
             }) => {
                 let asset = amount.asset.clone();
                 let raw = amount.amount_raw;
@@ -1150,6 +1152,7 @@ impl LedgerEventConsumer<'_> {
                 metadata,
                 trade_id,
                 input_amount,
+                ..
             }) => {
                 let asset = input_amount.asset.clone();
                 let raw = input_amount.amount_raw;
@@ -1175,6 +1178,7 @@ impl LedgerEventConsumer<'_> {
                 trade_id,
                 input_amount,
                 output_amount,
+                ..
             }) => {
                 // Two distinct movements: input completes (pending_dex_spend
                 // -> trading), output arrives (trading -> working_custody).

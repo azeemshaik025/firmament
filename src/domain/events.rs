@@ -212,6 +212,8 @@ pub enum SwapEvent {
         trade_id: TradeId,
         /// Asset/amount debited from working custody.
         input_amount: TokenAmount,
+        /// On-chain Jupiter swap signature, when the adapter returned one.
+        signature: Option<TxSignature>,
     },
     /// Trade-correlated Jupiter swap was confirmed on chain. Carries both
     /// sides so the ledger can move `pending_dex_spend → trading` (input)
@@ -225,6 +227,8 @@ pub enum SwapEvent {
         input_amount: TokenAmount,
         /// Asset/amount that arrived in working custody.
         output_amount: TokenAmount,
+        /// On-chain Jupiter swap signature, when the adapter returned one.
+        signature: Option<TxSignature>,
     },
     /// Trade-correlated Jupiter swap failed after it had been submitted —
     /// unwind `pending_dex_spend → working_custody`.
@@ -287,6 +291,8 @@ pub enum GatewayEvent {
         trade_id: TradeId,
         /// USDC amount being burned for the trade.
         amount: TokenAmount,
+        /// On-chain Gateway burn signature, when the adapter returned one.
+        signature: Option<TxSignature>,
     },
     /// Trade-correlated Gateway mint confirmed. Moves `trading → working_custody`
     /// for the USDC asset.
@@ -297,6 +303,8 @@ pub enum GatewayEvent {
         trade_id: TradeId,
         /// USDC amount minted for the trade.
         amount: TokenAmount,
+        /// On-chain Gateway mint signature, when the adapter returned one.
+        signature: Option<TxSignature>,
     },
     /// Trade-correlated Gateway burn failed after the reservation landed —
     /// release `gateway_reserved → gateway`.

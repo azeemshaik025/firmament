@@ -1,0 +1,39 @@
+.git
+.gitignore
+.dockerignore
+
+# Rust build output
+target/
+
+# Frontend dependencies and generated output
+node_modules/
+web/**/node_modules/
+web/**/dist/
+landing/node_modules/
+landing/.next/
+*.tsbuildinfo
+.vite/
+
+# Local runtime state and secrets
+.env
+.env.*
+!.env.example
+config.toml
+runtime.sqlite
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# Local-only support and demo artifacts
+agent-context/
+agent-prompts/
+demo-evidence/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/

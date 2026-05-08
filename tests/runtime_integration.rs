@@ -1979,6 +1979,7 @@ async fn settlement_gateway_usdc_path_emits_full_ledger_sequence() {
             metadata: EventMetadata::new(run),
             trade_id,
             amount: TokenAmount::new(usdc(), AmountRaw::new(burn_amount)),
+            signature: None,
         }))
         .expect("burn intent submitted");
     assert_eq!(
@@ -2010,6 +2011,7 @@ async fn settlement_gateway_usdc_path_emits_full_ledger_sequence() {
             metadata: EventMetadata::new(run),
             trade_id,
             amount: TokenAmount::new(usdc(), AmountRaw::new(burn_amount)),
+            signature: None,
         }))
         .expect("mint confirmed");
     assert_eq!(
@@ -2187,6 +2189,7 @@ async fn settlement_gateway_sol_path_emits_jupiter_spend_sequence() {
             metadata: EventMetadata::new(run),
             trade_id,
             amount: TokenAmount::new(usdc(), AmountRaw::new(usdc_swap_amount)),
+            signature: None,
         }))
         .expect("burn intent submitted");
 
@@ -2196,6 +2199,7 @@ async fn settlement_gateway_sol_path_emits_jupiter_spend_sequence() {
             metadata: EventMetadata::new(run),
             trade_id,
             amount: TokenAmount::new(usdc(), AmountRaw::new(usdc_swap_amount)),
+            signature: None,
         }))
         .expect("mint confirmed");
     assert_eq!(
@@ -2211,6 +2215,7 @@ async fn settlement_gateway_sol_path_emits_jupiter_spend_sequence() {
             metadata: EventMetadata::new(run),
             trade_id,
             input_amount: TokenAmount::new(usdc(), AmountRaw::new(usdc_swap_amount)),
+            signature: None,
         }))
         .expect("trade swap submitted");
     assert_eq!(
@@ -2236,6 +2241,7 @@ async fn settlement_gateway_sol_path_emits_jupiter_spend_sequence() {
             trade_id,
             input_amount: TokenAmount::new(usdc(), AmountRaw::new(usdc_swap_amount)),
             output_amount: TokenAmount::new(sol(), AmountRaw::new(sol_output_amount)),
+            signature: None,
         }))
         .expect("trade swap confirmed");
     assert_eq!(
@@ -2364,6 +2370,7 @@ async fn settlement_gateway_failure_releases_reservation() {
             metadata: EventMetadata::new(run),
             trade_id,
             amount: TokenAmount::new(usdc(), AmountRaw::new(burn_amount)),
+            signature: None,
         }))
         .expect("burn intent submitted");
     assert_eq!(
@@ -2432,6 +2439,7 @@ async fn settlement_jupiter_failure_unwinds_pending_dex_spend() {
             metadata: EventMetadata::new(run),
             trade_id,
             input_amount: TokenAmount::new(usdc(), AmountRaw::new(usdc_amount)),
+            signature: None,
         }))
         .expect("trade swap submitted");
     assert_eq!(

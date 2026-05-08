@@ -1,0 +1,54 @@
+---
+title: "Live Safety"
+description: "Live Solana configuration and safety gates."
+---
+
+# Live Safety
+
+Live mode signs maker-side actions. Configure it deliberately.
+
+## Worker gate
+
+`runtime.enable_protocol_workers` controls live adapter startup.
+
+Default local config sets it to `false`. In that mode the API and runtime projection start, but live RFQ and settlement actions are unavailable.
+
+Set it to `true` only after credentials, caps, and asset mints are ready.
+
+## Required secrets
+
+Store these in `.env`:
+
+- `SOLANA_RPC_URL`
+- exactly one maker keypair source: `MAKER_PRIVATE_KEY`, `MAKER_KEYPAIR_PATH`, or `MAKER_KEYPAIR_JSON`
+- `JUPITER_API_KEY` when Jupiter is enabled
+- `CIRCLE_GATEWAY_SOLANA_ADDRESS` when Gateway is enabled
+
+Admin auth secrets are separate and are not part of the public API docs.
+
+## Required policy
+
+Store these in `config.toml`:
+
+- supported assets and mint addresses
+- quote expiry and spreads
+- max quote, trade, refill, and daily notionals
+- stale-price limits
+- inventory thresholds
+- Gateway refill thresholds
+- reconciliation dust thresholds
+
+The sample config uses `VERIFY_CBBTC_SOLANA_MINT_BEFORE_LIVE_USE` for cbBTC. Replace it with the verified Solana cbBTC mint before enabling live workers.
+
+## Operating checks
+
+Before and after a live run, inspect:
+
+- `/health`
+- `/v1/assets`
+- `/v1/runtime/state`
+- `/v1/runtime/events`
+- `/v1/runtime/ledger`
+- `/v1/runtime/trades`
+
+Keep live demo caps small. Do not raise caps to force a route through.

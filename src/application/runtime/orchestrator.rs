@@ -1171,10 +1171,16 @@ impl RuntimeOrchestrator {
         self.publish(RuntimeEvent::Settlement(confirmation.event))
             .await?;
 
-        // Gateway-backed paths emit burn/mint (and Jupiter spend slice for
-        // non-USDC outputs) before the maker leg.
-        self.run_gateway_backed_input_slice(&state.quote, trade_id)
-            .await?;
+        // Gateway-backed paths run real burn/mint (and Jupiter spend slice
+        // for non-USDC outputs) before the maker leg, threading on-chain
+        // signatures into the wallet settlement state.
+        self.run_gateway_backed_input_slice(
+            &state.quote,
+            trade_id,
+            &mut state.tx_signatures,
+            &mut state.tx_signature_kinds,
+        )
+        .await?;
 
         let maker_lock = self
             .adapters
@@ -1378,13 +1384,19 @@ impl RuntimeOrchestrator {
         self.publish(RuntimeEvent::Settlement(confirmation.event))
             .await?;
 
-        // For Gateway-backed paths, emit the Gateway burn / mint events (and
-        // when the output is non-USDC, the Jupiter spend slice) before the
-        // maker leg lands, so the consumer sees the full
+        // For Gateway-backed paths, run the real burn/mint adapter calls
+        // (and when the output is non-USDC, the real Jupiter swap) before
+        // the maker leg lands, so the consumer sees the full
         // gateway -> trading -> working_custody chain ahead of
-        // `working_custody -> reserved`.
-        self.run_gateway_backed_input_slice(quote, settlement.terms.trade_id)
-            .await?;
+        // `working_custody -> reserved`. Signatures are threaded into the
+        // trade's signature collectors.
+        self.run_gateway_backed_input_slice(
+            quote,
+            settlement.terms.trade_id,
+            tx_signatures,
+            tx_signature_kinds,
+        )
+        .await?;
 
         let maker_lock = match self
             .adapters
@@ -1433,24 +1445,28 @@ impl RuntimeOrchestrator {
             .await
     }
 
-    /// Emit the Gateway-backed-path lifecycle events that fire between the
-    /// confirmed taker lock and the maker HTLC submission:
+    /// Drive the Gateway-backed-path on-chain effects between the confirmed
+    /// taker lock and the maker HTLC submission, emitting the lifecycle
+    /// events the ledger consumer needs as each adapter call lands:
     ///
-    /// 1. `Gateway::BurnIntentSubmitted` — `gateway -> gateway_reserved -> trading` (USDC).
-    /// 2. `Gateway::MintConfirmed`       — `trading -> working_custody` (USDC).
-    /// 3. (non-USDC outputs) `Swap::TradeSwapSubmitted` — `working_custody -> pending_dex_spend` (USDC).
-    /// 4. (non-USDC outputs) `Swap::TradeSwapConfirmed` — `pending_dex_spend -> trading` (USDC) AND `trading -> working_custody` (target asset).
+    /// 1. `GatewayClient::request_refill` — burn USDC out of Gateway and
+    ///    mint into `working_custody`. Emits
+    ///    `Gateway::BurnIntentSubmitted` then `Gateway::MintConfirmed`. On
+    ///    failure, emits `Gateway::BurnFailed` so the consumer reverses
+    ///    `gateway_reserved → gateway`.
+    /// 2. (non-USDC outputs only) `SwapExecutor::execute_swap` — swap
+    ///    USDC → output asset on Jupiter. Emits `Swap::TradeSwapSubmitted`
+    ///    then `Swap::TradeSwapConfirmed`. On failure post-submit, emits
+    ///    `Swap::TradeSwapFailed` so the consumer reverses
+    ///    `pending_dex_spend → working_custody`.
     ///
     /// Inventory-only paths skip the entire helper.
-    ///
-    /// v1: this synthesizes the events directly. The real Gateway / Jupiter
-    /// adapter calls land on the orchestrator side as a follow-up; the
-    /// lifecycle ledger already reflects the intended state once these events
-    /// are emitted.
     async fn run_gateway_backed_input_slice(
         &self,
         quote: &FirmQuote,
         trade_id: TradeId,
+        tx_signatures: &mut Vec<TxSignature>,
+        tx_signature_kinds: &mut Vec<TradeSignature>,
     ) -> AppResult<()> {
         if quote.execution_path != ExecutionPath::GatewayToDex {
             return Ok(());
@@ -1464,38 +1480,151 @@ impl RuntimeOrchestrator {
             // Non-USDC output: the maker pulls USDC equivalent and swaps it
             // on Jupiter. Use `input_amount` (the taker's input) as a best
             // approximation of the USDC amount the maker needs to source —
-            // for v1, fakes don't model real swap economics so any monotone
-            // mapping suffices to drive the ledger flow.
+            // fakes do not model swap economics so any monotone mapping
+            // works; the real swap receipt's `output_amount` is what the
+            // consumer trusts at confirm time.
             TokenAmount::new(usdc.clone(), quote.input_amount.amount_raw)
         };
+
+        // Step A: Gateway burn → mint.
+        let refill_request = crate::domain::types::GatewayRefillRequest {
+            amount: usdc_amount.clone(),
+            destination: WalletRole::Maker,
+        };
+        let gateway_receipt = match self
+            .adapters
+            .gateway_client
+            .request_refill(refill_request)
+            .await
+        {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                let reason = format!("gateway refill failed: {error}");
+                self.publish(RuntimeEvent::Gateway(GatewayEvent::BurnFailed {
+                    metadata: EventMetadata::new(self.app_state.run_id()),
+                    trade_id,
+                    amount: usdc_amount,
+                    reason: reason.clone(),
+                }))
+                .await?;
+                return Err(AppError::external_service("circle_gateway", reason));
+            }
+        };
+        // Same-domain Solana Gateway transfer returns one composite signature
+        // for the gatewayMint instruction (the burn is a Circle API attestation
+        // request without a dedicated user-visible signature). Surface the same
+        // signature on both lifecycle events so downstream consumers can
+        // correlate the trade to the on-chain effect either way.
+        let burn_signature = gateway_receipt.signature.clone();
+        let mint_signature = gateway_receipt.signature.clone();
 
         self.publish(RuntimeEvent::Gateway(GatewayEvent::BurnIntentSubmitted {
             metadata: EventMetadata::new(self.app_state.run_id()),
             trade_id,
             amount: usdc_amount.clone(),
+            signature: burn_signature.clone(),
         }))
         .await?;
+        push_kinded_signature(
+            tx_signatures,
+            tx_signature_kinds,
+            burn_signature.as_ref(),
+            TradeSignatureKind::GatewayBurn,
+        );
+
         self.publish(RuntimeEvent::Gateway(GatewayEvent::MintConfirmed {
             metadata: EventMetadata::new(self.app_state.run_id()),
             trade_id,
             amount: usdc_amount.clone(),
+            signature: mint_signature.clone(),
         }))
         .await?;
+        push_kinded_signature(
+            tx_signatures,
+            tx_signature_kinds,
+            mint_signature.as_ref(),
+            TradeSignatureKind::GatewayMint,
+        );
 
+        // Step B: Jupiter swap (non-USDC outputs only).
         if quote.output_amount.asset != usdc {
+            let pair =
+                crate::domain::types::AssetPair::new(usdc.clone(), quote.output_amount.asset.clone());
+            let swap_request = crate::domain::types::SwapRequest {
+                pair,
+                input_amount: usdc_amount.clone(),
+                source_wallet: WalletRole::Maker,
+                destination_wallet: WalletRole::Maker,
+                max_slippage_bps: self.app_state.config().jupiter.max_slippage_bps,
+            };
+            let swap_quote = match self
+                .adapters
+                .swap_executor
+                .quote_swap(swap_request.clone())
+                .await
+            {
+                Ok(quote) => quote,
+                Err(error) => {
+                    // Swap quote failure happens before any pending_dex_spend
+                    // reservation lands, so no unwind event is needed.
+                    return Err(AppError::solana(format!(
+                        "jupiter quote failed for trade {trade_id}: {error}"
+                    )));
+                }
+            };
+
+            // The swap submit event must land before execute_swap so that any
+            // execute failure has a `pending_dex_spend` reservation to unwind.
+            // Use a placeholder None signature on submit; the real on-chain
+            // signature is reported by the receipt and surfaced on the
+            // confirmed event.
             self.publish(RuntimeEvent::Swap(SwapEvent::TradeSwapSubmitted {
                 metadata: EventMetadata::new(self.app_state.run_id()),
                 trade_id,
                 input_amount: usdc_amount.clone(),
+                signature: None,
             }))
             .await?;
+
+            let swap_receipt = match self
+                .adapters
+                .swap_executor
+                .execute_swap(swap_quote.clone())
+                .await
+            {
+                Ok(receipt) => receipt,
+                Err(error) => {
+                    let reason = format!("jupiter swap failed: {error}");
+                    self.publish(RuntimeEvent::Swap(SwapEvent::TradeSwapFailed {
+                        metadata: EventMetadata::new(self.app_state.run_id()),
+                        trade_id,
+                        input_amount: usdc_amount,
+                        reason: reason.clone(),
+                    }))
+                    .await?;
+                    return Err(AppError::solana(reason));
+                }
+            };
+
+            let confirmed_output = swap_receipt
+                .output_amount
+                .clone()
+                .unwrap_or_else(|| swap_quote.expected_output.clone());
+
             self.publish(RuntimeEvent::Swap(SwapEvent::TradeSwapConfirmed {
                 metadata: EventMetadata::new(self.app_state.run_id()),
                 trade_id,
                 input_amount: usdc_amount,
-                output_amount: quote.output_amount.clone(),
+                output_amount: confirmed_output,
+                signature: Some(swap_receipt.signature.clone()),
             }))
             .await?;
+            push_kinded_signature(
+                tx_signatures,
+                tx_signature_kinds,
+                Some(&swap_receipt.signature),
+                TradeSignatureKind::JupiterSwap,
+            );
         }
 
         Ok(())
@@ -2199,6 +2328,25 @@ fn push_trade_signature(
         receipt.signature.as_ref(),
         TradeSignatureKind::from_htlc_receipt(receipt.leg, receipt.status),
     ) {
+        kinded.push(TradeSignature {
+            kind,
+            signature: signature.as_str().to_owned(),
+        });
+    }
+}
+
+/// Append a Gateway/Jupiter signature with the supplied kind. No-op when no
+/// signature is present (real Gateway transfers may complete without a
+/// trade-bound signature when the adapter is configured without a mint
+/// submitter, in which case the lifecycle event still fires for the ledger).
+fn push_kinded_signature(
+    plain: &mut Vec<TxSignature>,
+    kinded: &mut Vec<TradeSignature>,
+    signature: Option<&TxSignature>,
+    kind: TradeSignatureKind,
+) {
+    if let Some(signature) = signature {
+        plain.push(signature.clone());
         kinded.push(TradeSignature {
             kind,
             signature: signature.as_str().to_owned(),

@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">Firmament submission logo</title>
+  <desc id="desc">Firmament four-tile mark with wordmark and Solana RFQ Maker Runtime subtitle.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#181d28"/>
+      <stop offset="0.56" stop-color="#20293a"/>
+      <stop offset="1" stop-color="#13251f"/>
+    </linearGradient>
+    <pattern id="grid" width="36" height="36" patternUnits="userSpaceOnUse">
+      <path d="M 36 0 L 0 0 0 36" fill="none" stroke="#303a4d" stroke-width="1"/>
+    </pattern>
+    <filter id="soft-shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="20" stdDeviation="20" flood-color="#05070d" flood-opacity="0.45"/>
+    </filter>
+  </defs>
+
+  <rect width="1024" height="1024" rx="96" fill="url(#background)"/>
+  <rect width="1024" height="1024" rx="96" fill="url(#grid)" opacity="0.26"/>
+  <rect x="64" y="64" width="896" height="896" rx="56" fill="none" stroke="#dfe7ff" stroke-width="3" opacity="0.18"/>
+
+  <g transform="translate(328 156)" filter="url(#soft-shadow)">
+    <rect width="368" height="368" rx="42" fill="#f8fbff"/>
+    <rect x="64" y="64" width="100" height="100" rx="12" fill="#00a6ff"/>
+    <rect x="204" y="64" width="100" height="100" rx="12" fill="#16a34a"/>
+    <rect x="64" y="204" width="100" height="100" rx="12" fill="#d97706"/>
+    <rect x="204" y="204" width="100" height="100" rx="12" fill="#7107e7"/>
+  </g>
+
+  <text x="512" y="638" fill="#f8fbff" text-anchor="middle" font-family="Inter, Arial Black, Arial, sans-serif" font-size="92" font-weight="900">Firmament</text>
+  <text x="512" y="708" fill="#9fb7ff" text-anchor="middle" font-family="JetBrains Mono, Menlo, Consolas, monospace" font-size="30" font-weight="800" letter-spacing="2">SOLANA RFQ MAKER RUNTIME</text>
+
+  <g font-family="JetBrains Mono, Menlo, Consolas, monospace" font-size="23" font-weight="800" text-anchor="middle">
+    <rect x="178" y="790" width="198" height="54" rx="10" fill="#f8fbff" opacity="0.08" stroke="#dfe7ff" stroke-width="2" stroke-opacity="0.2"/>
+    <text x="277" y="825" fill="#f8fbff">Firm RFQs</text>
+    <rect x="413" y="790" width="198" height="54" rx="10" fill="#f8fbff" opacity="0.08" stroke="#dfe7ff" stroke-width="2" stroke-opacity="0.2"/>
+    <text x="512" y="825" fill="#f8fbff">Risk Gates</text>
+    <rect x="648" y="790" width="198" height="54" rx="10" fill="#f8fbff" opacity="0.08" stroke="#dfe7ff" stroke-width="2" stroke-opacity="0.2"/>
+    <text x="747" y="825" fill="#f8fbff">Ledger Proof</text>
+  </g>
+</svg>
