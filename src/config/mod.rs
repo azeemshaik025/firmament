@@ -600,7 +600,7 @@ pub struct ReconciliationConfig {
     /// Number of consecutive in-window observations required to trigger an
     /// adjustment. Defaults to 3.
     pub consecutive_ticks_for_adjustment: u8,
-    /// Whether to emit a `Skipped` ReconciliationEvent on guard-blocked
+    /// Whether to emit a `Skipped` `ReconciliationEvent` on guard-blocked
     /// adjustments. Defaults to true.
     pub emit_event_on_skip: bool,
     /// Per-asset dust threshold (raw native units). Drifts at or below the

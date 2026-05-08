@@ -711,7 +711,7 @@ fn admin_password_hashes() -> Result<std::collections::HashMap<String, String>, 
 fn admin_session_secret() -> Result<Vec<u8>, ApiError> {
     env::var(FIRMAMENT_ADMIN_SESSION_SECRET_ENV)
         .ok()
-        .map(|value| value.into_bytes())
+        .map(String::into_bytes)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| {
             ApiError::new(

@@ -544,7 +544,9 @@ mod tests {
         let mut settlement = TwoSidedSettlement::new(terms());
         // Advance through taker phases without locking maker output.
         let _ = settlement.record_taker_lock(run_id, Some("sig".into()));
-        let _ = settlement.confirm_taker_lock(run_id).expect("taker confirm");
+        let _ = settlement
+            .confirm_taker_lock(run_id)
+            .expect("taker confirm");
 
         let error = settlement
             .confirm_maker_lock(run_id)

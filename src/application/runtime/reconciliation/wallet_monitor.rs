@@ -1,4 +1,4 @@
-//! Wallet-side reconciliation: working_custody + reserved + pending_dex_spend
+//! Wallet-side reconciliation: `working_custody` + `reserved` + `pending_dex_spend`
 //! vs. on-chain.
 
 use std::collections::HashMap;
@@ -109,7 +109,9 @@ impl WalletMonitor {
 
         let outcome = match window.observe(drift_raw) {
             DriftOutcome::WithinDust => ObservationOutcome::WithinDust,
-            DriftOutcome::Building { observations } => ObservationOutcome::Building { observations },
+            DriftOutcome::Building { observations } => {
+                ObservationOutcome::Building { observations }
+            }
             DriftOutcome::Trigger { drift } => {
                 if let Some(reason) = trade_in_flight_reason(orchestrator, asset)? {
                     // Reset the window so the next tick starts a fresh count
@@ -151,6 +153,7 @@ impl WalletMonitor {
             .unwrap_or(self.default_dust)
     }
 
+    #[allow(clippy::unused_self)]
     fn expected_balance(
         &self,
         orchestrator: &RuntimeOrchestrator,
@@ -161,8 +164,7 @@ impl WalletMonitor {
             .expect("reconciliation requires persistence");
 
         let working = persistence.account_balance(&LedgerAccountId::working(asset.clone()))?;
-        let reserved =
-            persistence.aggregate_balance_by_type(LedgerAccountType::Reserved, asset)?;
+        let reserved = persistence.aggregate_balance_by_type(LedgerAccountType::Reserved, asset)?;
         let pending_dex_spend =
             persistence.aggregate_balance_by_type(LedgerAccountType::PendingDexSpend, asset)?;
 
@@ -248,8 +250,7 @@ fn trade_in_flight_reason(
         persistence.aggregate_balance_by_type(LedgerAccountType::PendingEscrow, asset)?;
     let htlc_escrow =
         persistence.aggregate_balance_by_type(LedgerAccountType::HtlcEscrow, asset)?;
-    let receivable =
-        persistence.aggregate_balance_by_type(LedgerAccountType::Receivable, asset)?;
+    let receivable = persistence.aggregate_balance_by_type(LedgerAccountType::Receivable, asset)?;
     let pending_dex_spend =
         persistence.aggregate_balance_by_type(LedgerAccountType::PendingDexSpend, asset)?;
 

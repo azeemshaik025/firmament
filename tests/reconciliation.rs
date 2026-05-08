@@ -15,7 +15,9 @@ use firmament::config::ReconciliationConfig;
 use firmament::events::{ReconciliationEvent, ReconciliationOutcome, RuntimeEvent};
 use firmament::ledger::{LedgerAccountId, LedgerTransactionBuilder};
 use firmament::ports::{BalanceReader, GatewayClient, HtlcClient, PriceProvider, SwapExecutor};
-use firmament::runtime::reconciliation::{ObservationOutcome, ReconciliationWorker, today_utc_date};
+use firmament::runtime::reconciliation::{
+    ObservationOutcome, ReconciliationWorker, today_utc_date,
+};
 use firmament::runtime::{
     RuntimeAdapters, RuntimeOrchestrator, RuntimeOrchestratorOptions, RuntimePersistence,
 };
@@ -224,7 +226,10 @@ fn seed_gateway(persistence: &Arc<RuntimePersistence>, asset: &AssetId, amount: 
             amount,
             uuid::Uuid::now_v7()
         ))
-        .debit(LedgerAccountId::gateway(asset.clone()), AmountRaw::new(amount))
+        .debit(
+            LedgerAccountId::gateway(asset.clone()),
+            AmountRaw::new(amount),
+        )
         .credit(
             LedgerAccountId::external(asset.clone(), "seed"),
             AmountRaw::new(amount),
@@ -314,7 +319,10 @@ fn seed_working_custody(persistence: &Arc<RuntimePersistence>, asset: &AssetId, 
             amount,
             uuid::Uuid::now_v7()
         ))
-        .debit(LedgerAccountId::working(asset.clone()), AmountRaw::new(amount))
+        .debit(
+            LedgerAccountId::working(asset.clone()),
+            AmountRaw::new(amount),
+        )
         .credit(
             LedgerAccountId::external(asset.clone(), "seed"),
             AmountRaw::new(amount),
@@ -392,7 +400,10 @@ async fn recon_wallet_positive_drift_adjusts_after_three_consecutive_ticks() {
         key.starts_with("recon:wallet:USDC:"),
         "unexpected idempotency key: {key}"
     );
-    assert!(key.ends_with(":1"), "first adjustment must use seq=1: {key}");
+    assert!(
+        key.ends_with(":1"),
+        "first adjustment must use seq=1: {key}"
+    );
 
     let working = harness
         .persistence
@@ -462,7 +473,10 @@ async fn recon_dust_threshold_skips() {
     let mut worker = build_worker(&harness);
     for _ in 0..3 {
         let observation = worker.tick_wallet(&usdc()).await.expect("tick");
-        assert!(matches!(observation.outcome, ObservationOutcome::WithinDust));
+        assert!(matches!(
+            observation.outcome,
+            ObservationOutcome::WithinDust
+        ));
     }
 
     // No adjustment occurred — working_custody stays at the seeded value.
@@ -569,9 +583,7 @@ async fn recon_emits_event_on_skip() {
 
     let events = recent_recon_events(&harness).await;
     let last = events.last().expect("at least one tick event");
-    let ReconciliationEvent::Tick {
-        outcome, scope, ..
-    } = last;
+    let ReconciliationEvent::Tick { outcome, scope, .. } = last;
     assert!(matches!(
         scope,
         firmament::events::ReconciliationScope::Wallet
@@ -681,8 +693,7 @@ async fn recon_idempotent_across_restart() {
         worker.tick_wallet(&usdc()).await.expect("tick");
     }
 
-    let count_after_first =
-        count_recon_idempotency_keys(&persistence, "recon:wallet:USDC");
+    let count_after_first = count_recon_idempotency_keys(&persistence, "recon:wallet:USDC");
     assert_eq!(count_after_first, 1);
 
     // Restart: drop the in-memory worker and build a fresh one against the
@@ -700,8 +711,7 @@ async fn recon_idempotent_across_restart() {
             .expect("tick after restart");
     }
 
-    let count_after_restart =
-        count_recon_idempotency_keys(&persistence, "recon:wallet:USDC");
+    let count_after_restart = count_recon_idempotency_keys(&persistence, "recon:wallet:USDC");
     assert_eq!(
         count_after_restart, 2,
         "restart must not duplicate adjustments — expected exactly 2 distinct recon keys"
@@ -715,7 +725,7 @@ async fn recon_idempotent_across_restart() {
 
 fn count_recon_idempotency_keys(persistence: &Arc<RuntimePersistence>, prefix: &str) -> usize {
     persistence
-        .with_recon_idempotency_keys(prefix, |keys| keys.len())
+        .with_recon_idempotency_keys(prefix, <[String]>::len)
         .expect("read recon keys")
 }
 

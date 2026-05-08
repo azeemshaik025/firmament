@@ -118,8 +118,14 @@ mod tests {
     fn window_triggers_after_three_same_sign_observations_above_dust() {
         let mut window = DriftWindow::new(100);
         assert_eq!(window.observe(50), DriftOutcome::WithinDust);
-        assert_eq!(window.observe(200), DriftOutcome::Building { observations: 1 });
-        assert_eq!(window.observe(210), DriftOutcome::Building { observations: 2 });
+        assert_eq!(
+            window.observe(200),
+            DriftOutcome::Building { observations: 1 }
+        );
+        assert_eq!(
+            window.observe(210),
+            DriftOutcome::Building { observations: 2 }
+        );
         assert_eq!(window.observe(205), DriftOutcome::Trigger { drift: 205 });
     }
 

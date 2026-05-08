@@ -115,6 +115,7 @@ fn looks_like_entry_boundary(value: &str) -> bool {
 ///
 /// Returns a configuration error when the stored PHC string for a known user is
 /// invalid or cannot be verified by the Argon2 verifier.
+#[allow(clippy::implicit_hasher)]
 pub fn verify_admin_password(
     username: &str,
     password: &str,

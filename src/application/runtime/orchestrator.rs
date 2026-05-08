@@ -331,8 +331,7 @@ impl RuntimePersistence {
         account_type: LedgerAccountType,
         asset: &AssetId,
     ) -> AppResult<i128> {
-        SqliteLedgerRepository::new(self.db.as_ref())
-            .aggregate_balance_by_type(account_type, asset)
+        SqliteLedgerRepository::new(self.db.as_ref()).aggregate_balance_by_type(account_type, asset)
     }
 
     /// Visit reconciliation idempotency keys whose stored value starts with
@@ -383,8 +382,8 @@ impl RuntimePersistence {
         utc_date: &str,
         sequences: &mut std::collections::HashMap<(&'static str, AssetId, String), u64>,
     ) -> AppResult<()> {
-        let prefix_wallet = format!("recon:wallet:");
-        let prefix_gateway = format!("recon:gateway:");
+        let prefix_wallet = "recon:wallet:";
+        let prefix_gateway = "recon:gateway:";
         let pattern = format!("recon:%:%:{utc_date}:%");
         let rows: Vec<String> = self.db.with_connection(|connection| {
             let mut statement = connection
@@ -405,9 +404,9 @@ impl RuntimePersistence {
 
         for key in rows {
             // Format: recon:{scope}:{asset}:{utc_date}:{seq}
-            let scope_label: &'static str = if key.starts_with(prefix_wallet.as_str()) {
+            let scope_label: &'static str = if key.starts_with(prefix_wallet) {
                 "wallet"
-            } else if key.starts_with(prefix_gateway.as_str()) {
+            } else if key.starts_with(prefix_gateway) {
                 "gateway"
             } else {
                 continue;
@@ -571,15 +570,12 @@ impl RuntimeOrchestrator {
         self.persistence.clone()
     }
 
-    /// Read live wallet balances through the configured BalanceReader port.
+    /// Read live wallet balances through the configured `BalanceReader` port.
     ///
     /// # Errors
     ///
     /// Returns adapter errors (RPC, decoding, etc.).
-    pub async fn balances(
-        &self,
-        wallet: WalletRole,
-    ) -> AppResult<BalanceSnapshot> {
+    pub async fn balances(&self, wallet: WalletRole) -> AppResult<BalanceSnapshot> {
         self.adapters.balance_reader.balances(wallet).await
     }
 
@@ -897,7 +893,9 @@ impl RuntimeOrchestrator {
         // The browser-driven path posts the signed taker tx via
         // `record_external_initiate`, which already confirms the signature
         // before returning, so for v1 we treat the submission as confirmed.
-        let confirmation = state.settlement.confirm_taker_lock(self.app_state.run_id())?;
+        let confirmation = state
+            .settlement
+            .confirm_taker_lock(self.app_state.run_id())?;
         self.publish(RuntimeEvent::Settlement(confirmation.event))
             .await?;
 
@@ -919,7 +917,9 @@ impl RuntimeOrchestrator {
         // TODO(v0.2): wire real confirmation polling for the wallet flow.
         // The maker leg uses `initiate_with_external_redeemer` which submits
         // and signs locally; for v1 we treat the submission as confirmed.
-        let confirmation = state.settlement.confirm_maker_lock(self.app_state.run_id())?;
+        let confirmation = state
+            .settlement
+            .confirm_maker_lock(self.app_state.run_id())?;
         self.publish(RuntimeEvent::Settlement(confirmation.event))
             .await?;
 
@@ -1698,11 +1698,7 @@ impl RuntimeOrchestrator {
                 .find(|asset| asset.enabled && asset.id == usdc)
                 .map_or(6, |asset| asset.decimals);
             let pair = crate::domain::types::AssetPair::new(usdc.clone(), output_asset.id.clone());
-            let Ok(reference_price) = self
-                .adapters
-                .price_provider
-                .reference_price(pair)
-                .await
+            let Ok(reference_price) = self.adapters.price_provider.reference_price(pair).await
             else {
                 // No price route from USDC to the output asset. The Gateway
                 // path requires a feasible Jupiter route in the live runtime;
@@ -1729,7 +1725,10 @@ impl RuntimeOrchestrator {
             .iter_mut()
             .find(|amount| amount.asset == output_asset.id)
         {
-            let combined = entry.amount_raw.as_u64().saturating_add(synthetic_output_raw);
+            let combined = entry
+                .amount_raw
+                .as_u64()
+                .saturating_add(synthetic_output_raw);
             entry.amount_raw = AmountRaw::new(combined);
         } else {
             inventory.balances.push(TokenAmount::new(

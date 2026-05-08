@@ -234,10 +234,10 @@ fn config_without_reconciliation_section_falls_back_to_defaults() {
     // Stripping the [reconciliation] section entirely must keep the worker
     // operable on safe defaults — operators should not need to hand-write
     // the section.
-    let toml_without_section = r#"
+    let toml_without_section = r"
 [runtime]
 event_capacity = 64
-        "#;
+        ";
     let settings = ::config::Config::builder()
         .add_source(::config::File::from_str(
             toml_without_section,
@@ -250,5 +250,8 @@ event_capacity = 64
     assert_eq!(config.reconciliation.consecutive_ticks_for_adjustment, 3);
     assert!(config.reconciliation.emit_event_on_skip);
     // Default dust map still applies.
-    assert_eq!(config.reconciliation.dust.get("USDC").copied(), Some(10_000));
+    assert_eq!(
+        config.reconciliation.dust.get("USDC").copied(),
+        Some(10_000)
+    );
 }

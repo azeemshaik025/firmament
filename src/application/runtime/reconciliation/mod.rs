@@ -90,9 +90,7 @@ impl ReconciliationWorker {
             self.wallet.tick(self.orchestrator.as_ref(), asset).await?;
         }
         let usdc = AssetId::from("USDC");
-        self.gateway
-            .tick(self.orchestrator.as_ref(), &usdc)
-            .await?;
+        self.gateway.tick(self.orchestrator.as_ref(), &usdc).await?;
         Ok(())
     }
 

@@ -1,4 +1,4 @@
-//! Gateway-side reconciliation: gateway + sum(gateway_reserved:*) vs.
+//! Gateway-side reconciliation: `gateway` + `sum(gateway_reserved:*)` vs.
 //! Circle Gateway-reported balance.
 
 use std::collections::HashMap;
@@ -86,10 +86,11 @@ impl GatewayMonitor {
 
         let outcome = match window.observe(drift_raw) {
             DriftOutcome::WithinDust => ObservationOutcome::WithinDust,
-            DriftOutcome::Building { observations } => ObservationOutcome::Building { observations },
+            DriftOutcome::Building { observations } => {
+                ObservationOutcome::Building { observations }
+            }
             DriftOutcome::Trigger { drift } => {
-                let reserved_active =
-                    gateway_reserved_active(orchestrator, asset).unwrap_or(false);
+                let reserved_active = gateway_reserved_active(orchestrator, asset).unwrap_or(false);
                 if drift < 0 && reserved_active {
                     window.reset();
                     ObservationOutcome::Skipped {
@@ -130,6 +131,7 @@ impl GatewayMonitor {
             .unwrap_or(self.default_dust)
     }
 
+    #[allow(clippy::unused_self)]
     fn expected_balance(
         &self,
         orchestrator: &RuntimeOrchestrator,
@@ -207,10 +209,7 @@ async fn read_gateway_balance(
     Ok(u128::from(receipt.amount.amount_raw.as_u64()))
 }
 
-fn gateway_reserved_active(
-    orchestrator: &RuntimeOrchestrator,
-    asset: &AssetId,
-) -> AppResult<bool> {
+fn gateway_reserved_active(orchestrator: &RuntimeOrchestrator, asset: &AssetId) -> AppResult<bool> {
     let persistence = orchestrator
         .persistence_handle()
         .expect("reconciliation requires persistence");
