@@ -516,7 +516,7 @@ impl RuntimeOrchestrator {
 
     /// Resolve the [`ExecutionPath`] for an accepted quote. Walks the same
     /// rules as [`crate::application::rfq::select_execution_path`] using the
-    /// ledger's working_custody and FREE Gateway balance.
+    /// ledger's `working_custody` and FREE Gateway balance.
     ///
     /// When no persistence is wired (legacy harness tests) the path defaults
     /// to `InventoryToInventory` — the existing behaviour before this method
@@ -562,10 +562,7 @@ impl RuntimeOrchestrator {
                 .supported
                 .iter()
                 .find(|asset| asset.enabled && asset.id == *output_asset)
-                .map_or(
-                    quote.reference_price.pair.output.as_str().len() as u8,
-                    |asset| asset.decimals,
-                );
+                .map_or(9, |asset| asset.decimals);
             let pair = crate::domain::types::AssetPair::new(usdc.clone(), output_asset.clone());
             let Ok(reference_price) = self.adapters.price_provider.reference_price(pair).await
             else {

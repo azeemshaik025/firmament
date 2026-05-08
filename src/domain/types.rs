@@ -528,7 +528,7 @@ pub enum LedgerEntryCategory {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionPath {
-    /// Maker working_custody covers the requested output. No Gateway or DEX
+    /// Maker `working_custody` covers the requested output. No Gateway or DEX
     /// activity is needed for the lifecycle.
     InventoryToInventory,
     /// Maker pulls USDC from the Circle Gateway and (when output is not USDC)

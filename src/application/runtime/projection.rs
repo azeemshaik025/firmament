@@ -202,7 +202,13 @@ impl RuntimeState {
 
     fn apply_swap_event(&mut self, event: &SwapEvent) {
         match event {
-            SwapEvent::PriceObserved { .. } => {}
+            // Trade-correlated swap events drive the Gateway-backed lifecycle
+            // ledger movements; they are not background rebalances and should
+            // not move the rebalance counters. Same no-op as PriceObserved.
+            SwapEvent::PriceObserved { .. }
+            | SwapEvent::TradeSwapSubmitted { .. }
+            | SwapEvent::TradeSwapConfirmed { .. }
+            | SwapEvent::TradeSwapFailed { .. } => {}
             SwapEvent::Quoted { .. } => {
                 self.rebalance.pending_swap_count =
                     self.rebalance.pending_swap_count.saturating_add(1);
@@ -217,12 +223,6 @@ impl RuntimeState {
                 self.rebalance.pending_swap_count =
                     self.rebalance.pending_swap_count.saturating_sub(1);
             }
-            // Trade-correlated swap events drive the Gateway-backed lifecycle
-            // ledger movements; they are not background rebalances and should
-            // not move the rebalance counters.
-            SwapEvent::TradeSwapSubmitted { .. }
-            | SwapEvent::TradeSwapConfirmed { .. }
-            | SwapEvent::TradeSwapFailed { .. } => {}
         }
     }
 
