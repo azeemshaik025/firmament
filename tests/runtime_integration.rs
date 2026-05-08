@@ -5,7 +5,8 @@ use async_trait::async_trait;
 use firmament::assets::AssetRegistry;
 use firmament::db::Db;
 use firmament::events::{
-    EventMetadata, InventoryEvent, QuoteEvent, RuntimeEvent, SettlementEvent, SwapEvent,
+    EventMetadata, GatewayEvent, InventoryEvent, QuoteEvent, RuntimeEvent, SettlementEvent,
+    SwapEvent,
 };
 use firmament::ledger::{LedgerAccountId, LedgerEventConsumer, SqliteLedgerRepository};
 use firmament::ports::{BalanceReader, GatewayClient, HtlcClient, PriceProvider, SwapExecutor};
@@ -15,10 +16,10 @@ use firmament::runtime::{
 };
 use firmament::settlement::SettlementLeg;
 use firmament::types::{
-    AmountRaw, AssetId, AssetPair, BalanceSnapshot, GatewayReceipt, GatewayRefillRequest,
-    HtlcInitiation, HtlcReceipt, MintAddress, QuoteId, ReferencePrice, RejectionReason,
-    SettlementStatus, SwapQuote, SwapReceipt, SwapRequest, TokenAmount, TradeId, TxSignature,
-    WalletAddress, WalletRole,
+    AmountRaw, AssetId, AssetPair, BalanceSnapshot, ExecutionPath, GatewayReceipt,
+    GatewayRefillRequest, HtlcInitiation, HtlcReceipt, MintAddress, QuoteId, ReferencePrice,
+    RejectionReason, SettlementStatus, SwapQuote, SwapReceipt, SwapRequest, TokenAmount, TradeId,
+    TxSignature, WalletAddress, WalletRole,
 };
 use firmament::{AppConfig, AppError, bootstrap};
 use rust_decimal::Decimal;
@@ -909,6 +910,108 @@ async fn rfq_gateway_quoteability_uses_ledger_minus_reserved() {
     }
 }
 
+#[tokio::test]
+async fn quote_records_inventory_to_inventory_path_when_custody_covers() {
+    // working_custody:SOL covers a small RFQ output → quote should resolve to
+    // ExecutionPath::InventoryToInventory.
+    let persistence = Arc::new(
+        RuntimePersistence::open_in_memory(AssetRegistry::default()).expect("persistence"),
+    );
+    seed_working_custody(&persistence, &sol(), 200_000_000);
+    seed_working_custody(&persistence, &usdc(), 10_000_000);
+
+    let orchestrator = persistent_harness_with_persistence(
+        FakePriceProvider::default(),
+        FakeHtlcClient::default(),
+        FakeSwapExecutor::default(),
+        FakeGatewayClient::default(),
+        FakeBalanceReader::new(vec![quote_inventory(), quote_inventory()]),
+        RuntimeOrchestratorOptions::default(),
+        Arc::clone(&persistence),
+    )
+    .await;
+
+    let response = orchestrator
+        .request_rfq(rfq(100_000))
+        .await
+        .expect("request quote");
+    let quote = match response {
+        RfqResponse::Accepted(quote) => quote,
+        RfqResponse::Rejected(rejection) => panic!("expected accepted: {rejection:?}"),
+    };
+    assert_eq!(
+        quote.execution_path,
+        ExecutionPath::InventoryToInventory,
+        "expected InventoryToInventory when working_custody covers, got {:?}",
+        quote.execution_path,
+    );
+}
+
+#[tokio::test]
+async fn quote_records_gateway_to_dex_path_when_only_gateway_covers() {
+    // working_custody:SOL = 0; gateway:USDC seeded with enough free supply to
+    // cover the requested SOL output. Quote should resolve to
+    // ExecutionPath::GatewayToDex.
+    let mut config = AppConfig::default();
+    config.risk.max_quote_notional_usd = Decimal::from(1_000);
+    config.risk.max_trade_notional_usd = Decimal::from(1_000);
+    config.risk.max_daily_notional_usd = Decimal::from(10_000);
+    config.risk.max_non_stable_asset_notional_usd = Decimal::from(1_000);
+
+    // SOL = $200 reference: 1 USDC = 0.005 SOL.
+    let price_provider = FakePriceProvider {
+        prices: Arc::new(HashMap::from([
+            (AssetPair::new(usdc(), sol()), Decimal::new(5, 3)),
+            (AssetPair::new(sol(), usdc()), Decimal::from(200)),
+        ])),
+    };
+
+    let zero_sol_inventory = balance_snapshot(vec![
+        TokenAmount::new(usdc(), AmountRaw::new(0)),
+        TokenAmount::new(sol(), AmountRaw::new(0)),
+        TokenAmount::new(cbbtc(), AmountRaw::new(0)),
+    ]);
+
+    let persistence = Arc::new(
+        RuntimePersistence::open_in_memory(AssetRegistry::default()).expect("persistence"),
+    );
+    // working_custody:SOL = 0; USDC seeded enough for the request input balance
+    // and for the quoteable threshold to consider the input asset present.
+    seed_working_custody(&persistence, &usdc(), 1_000_000_000);
+    // Free Gateway USDC = 1_000_000_000 (= 1000 USDC = 5 SOL synthetic supply).
+    seed_gateway_balance(&persistence, &usdc(), 1_000_000_000);
+
+    let orchestrator = persistent_harness_with_config(
+        config,
+        price_provider,
+        FakeHtlcClient::default(),
+        FakeSwapExecutor::default(),
+        FakeGatewayClient::default(),
+        FakeBalanceReader::new(vec![zero_sol_inventory.clone(), zero_sol_inventory]),
+        RuntimeOrchestratorOptions::default(),
+        Arc::clone(&persistence),
+    )
+    .await;
+
+    // Request 200 USDC input → 1.0 SOL output (well within the 5 SOL synthetic
+    // supply). Working custody for SOL is empty so this must select the
+    // Gateway path.
+    let response = orchestrator
+        .request_rfq(rfq(200_000_000))
+        .await
+        .expect("request quote");
+    let quote = match response {
+        RfqResponse::Accepted(quote) => quote,
+        RfqResponse::Rejected(rejection) => panic!("expected accepted: {rejection:?}"),
+    };
+    assert_eq!(
+        quote.execution_path,
+        ExecutionPath::GatewayToDex,
+        "expected GatewayToDex when only gateway covers, got {:?}",
+        quote.execution_path,
+    );
+}
+
 #[derive(Debug, Clone)]
 struct FakePriceProvider {
     prices: Arc<HashMap<AssetPair, Decimal>>,
@@ -1576,4 +1679,659 @@ async fn taker_input_refund_closes_receivable_back_to_external() {
 
     let report = repository.integrity_report().expect("integrity report");
     assert!(report.healthy, "refund should leave ledger balanced");
+}
+
+#[allow(clippy::too_many_lines)]
+#[tokio::test]
+async fn settlement_gateway_usdc_path_emits_full_ledger_sequence() {
+    // GatewayToDex path with USDC output. Drives the LedgerEventConsumer with
+    // the full Gateway-backed sequence and asserts each transition.
+    //
+    // Per design § 2 Gateway-backed USDC table:
+    //   1. Confirmed{TakerInput}        external -> receivable (taker input asset)
+    //   2. Gateway::BurnIntentSubmitted  gateway -> gateway_reserved -> trading
+    //   3. Gateway::MintConfirmed       trading -> working_custody (USDC)
+    //   4. Submitted{MakerOutput}       working_custody -> reserved -> pending_escrow
+    //   5. Confirmed{MakerOutput}       pending_escrow -> htlc_escrow
+    //   6. Redeemed{MakerOutput}        htlc_escrow -> trading
+    //   7. Redeemed{TakerInput}         receivable -> working_custody
+    let db = Db::open_in_memory().expect("open in-memory db");
+    let consumer = LedgerEventConsumer::new(&db);
+    let repository = SqliteLedgerRepository::new(&db);
+
+    let trade_id = TradeId::generate();
+    let run = run_id();
+
+    // For Gateway-backed paths the maker has nothing in working_custody for
+    // the output asset at quote time — that's why the path was selected.
+    // Seed gateway:USDC to fund the burn.
+    let gateway_amount: u64 = 1_000_000_000;
+    let burn_amount: u64 = 500_000_000;
+    let taker_input_amount: u64 = 500_000_000; // input also USDC for this scenario
+    let seed_gateway = firmament::ledger::LedgerTransactionBuilder::new(
+        "test_seed_gateway_usdc",
+        trade_id.as_uuid(),
+    )
+    .description("seed maker gateway USDC")
+    .idempotency_key(format!("seed:{trade_id}:gateway_usdc"))
+    .debit(
+        LedgerAccountId::gateway(usdc()),
+        AmountRaw::new(gateway_amount),
+    )
+    .credit(
+        LedgerAccountId::external(usdc(), "seed_gateway"),
+        AmountRaw::new(gateway_amount),
+    )
+    .build()
+    .expect("balanced gateway seed");
+    repository
+        .save_transaction(&seed_gateway)
+        .expect("save gateway seed");
+
+    // Step 1: Confirmed{TakerInput} on input asset (use a different asset than
+    // USDC so receivable/working_custody assertions stay distinct).
+    consumer
+        .consume(&settlement_event(SettlementEvent::Confirmed {
+            metadata: EventMetadata::new(run),
+            receipt: htlc_receipt(
+                trade_id,
+                SettlementLeg::TakerInput,
+                sol(),
+                taker_input_amount,
+                SettlementStatus::Initiated,
+            ),
+        }))
+        .expect("confirmed taker input");
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::receivable(sol(), trade_id.to_string()))
+            .expect("receivable after taker confirm"),
+        i128::from(taker_input_amount)
+    );
+
+    // Step 2: BurnIntentSubmitted (compound: gateway -> gateway_reserved
+    // -> trading). After both transitions land, gateway_reserved nets to zero.
+    consumer
+        .consume(&RuntimeEvent::Gateway(GatewayEvent::BurnIntentSubmitted {
+            metadata: EventMetadata::new(run),
+            trade_id,
+            amount: TokenAmount::new(usdc(), AmountRaw::new(burn_amount)),
+        }))
+        .expect("burn intent submitted");
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::gateway(usdc()))
+            .expect("gateway after burn"),
+        i128::from(gateway_amount - burn_amount)
+    );
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::gateway_reserved(
+                usdc(),
+                trade_id.to_string()
+            ))
+            .expect("gateway_reserved after burn"),
+        0,
+        "gateway_reserved nets to zero after burn"
+    );
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::trading(usdc()))
+            .expect("trading after burn"),
+        i128::from(burn_amount)
+    );
+
+    // Step 3: MintConfirmed → trading -> working_custody.
+    consumer
+        .consume(&RuntimeEvent::Gateway(GatewayEvent::MintConfirmed {
+            metadata: EventMetadata::new(run),
+            trade_id,
+            amount: TokenAmount::new(usdc(), AmountRaw::new(burn_amount)),
+        }))
+        .expect("mint confirmed");
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::trading(usdc()))
+            .expect("trading after mint"),
+        0
+    );
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::working(usdc()))
+            .expect("working USDC after mint"),
+        i128::from(burn_amount)
+    );
+
+    // Step 4: Submitted{MakerOutput} on USDC.
+    consumer
+        .consume(&settlement_event(SettlementEvent::Submitted {
+            metadata: EventMetadata::new(run),
+            receipt: htlc_receipt(
+                trade_id,
+                SettlementLeg::MakerOutput,
+                usdc(),
+                burn_amount,
+                SettlementStatus::Initiated,
+            ),
+        }))
+        .expect("submitted maker output");
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::working(usdc()))
+            .expect("working USDC after maker submit"),
+        0
+    );
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::pending_escrow(usdc()))
+            .expect("pending_escrow after maker submit"),
+        i128::from(burn_amount)
+    );
+
+    // Step 5: Confirmed{MakerOutput}.
+    consumer
+        .consume(&settlement_event(SettlementEvent::Confirmed {
+            metadata: EventMetadata::new(run),
+            receipt: htlc_receipt(
+                trade_id,
+                SettlementLeg::MakerOutput,
+                usdc(),
+                burn_amount,
+                SettlementStatus::Initiated,
+            ),
+        }))
+        .expect("confirmed maker output");
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::htlc_escrow(usdc()))
+            .expect("htlc_escrow after maker confirm"),
+        i128::from(burn_amount)
+    );
+
+    // Step 6: Redeemed{MakerOutput}.
+    consumer
+        .consume(&settlement_event(SettlementEvent::Redeemed {
+            metadata: EventMetadata::new(run),
+            receipt: htlc_receipt(
+                trade_id,
+                SettlementLeg::MakerOutput,
+                usdc(),
+                burn_amount,
+                SettlementStatus::Redeemed,
+            ),
+        }))
+        .expect("redeemed maker output");
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::htlc_escrow(usdc()))
+            .expect("htlc_escrow after maker redeem"),
+        0
+    );
+
+    // Step 7: Redeemed{TakerInput}.
+    consumer
+        .consume(&settlement_event(SettlementEvent::Redeemed {
+            metadata: EventMetadata::new(run),
+            receipt: htlc_receipt(
+                trade_id,
+                SettlementLeg::TakerInput,
+                sol(),
+                taker_input_amount,
+                SettlementStatus::Redeemed,
+            ),
+        }))
+        .expect("redeemed taker input");
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::receivable(sol(), trade_id.to_string()))
+            .expect("receivable after maker redeem"),
+        0
+    );
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::working(sol()))
+            .expect("working SOL after maker redeem"),
+        i128::from(taker_input_amount)
+    );
+
+    let report = repository.integrity_report().expect("integrity report");
+    assert!(report.healthy, "ledger should balance: {report:?}");
+}
+
+#[allow(clippy::too_many_lines)]
+#[tokio::test]
+async fn settlement_gateway_sol_path_emits_jupiter_spend_sequence() {
+    // GatewayToDex path with SOL output. Drives:
+    //   1. Confirmed{TakerInput}        external -> receivable (input asset)
+    //   2. BurnIntentSubmitted          gateway -> gateway_reserved -> trading (USDC)
+    //   3. MintConfirmed                trading -> working_custody (USDC)
+    //   4. TradeSwapSubmitted           working_custody:USDC -> pending_dex_spend:USDC
+    //   5. TradeSwapConfirmed           pending_dex_spend:USDC -> trading:USDC
+    //                                    AND trading:SOL -> working_custody:SOL
+    //   6. Submitted{MakerOutput}       working_custody:SOL -> reserved:SOL -> pending_escrow:SOL
+    //   7. Confirmed{MakerOutput}       pending_escrow -> htlc_escrow
+    //   8. Redeemed{MakerOutput}        htlc_escrow -> trading
+    //   9. Redeemed{TakerInput}         receivable -> working_custody
+    let db = Db::open_in_memory().expect("open in-memory db");
+    let consumer = LedgerEventConsumer::new(&db);
+    let repository = SqliteLedgerRepository::new(&db);
+
+    let trade_id = TradeId::generate();
+    let run = run_id();
+
+    let gateway_amount: u64 = 1_000_000_000;
+    let usdc_input_amount: u64 = 500_000_000; // taker delivered USDC
+    let sol_output_amount: u64 = 2_500_000_000; // 2.5 SOL ($500 at $200/SOL)
+    let usdc_swap_amount: u64 = 500_000_000;
+
+    let seed_gateway = firmament::ledger::LedgerTransactionBuilder::new(
+        "test_seed_gateway_sol",
+        trade_id.as_uuid(),
+    )
+    .description("seed maker gateway USDC for SOL path")
+    .idempotency_key(format!("seed:{trade_id}:gateway_usdc_sol"))
+    .debit(
+        LedgerAccountId::gateway(usdc()),
+        AmountRaw::new(gateway_amount),
+    )
+    .credit(
+        LedgerAccountId::external(usdc(), "seed_gateway"),
+        AmountRaw::new(gateway_amount),
+    )
+    .build()
+    .expect("balanced gateway seed");
+    repository
+        .save_transaction(&seed_gateway)
+        .expect("save gateway seed");
+
+    // Step 1: Confirmed{TakerInput}.
+    consumer
+        .consume(&settlement_event(SettlementEvent::Confirmed {
+            metadata: EventMetadata::new(run),
+            receipt: htlc_receipt(
+                trade_id,
+                SettlementLeg::TakerInput,
+                usdc(),
+                usdc_input_amount,
+                SettlementStatus::Initiated,
+            ),
+        }))
+        .expect("confirmed taker input");
+
+    // Step 2: BurnIntentSubmitted.
+    consumer
+        .consume(&RuntimeEvent::Gateway(GatewayEvent::BurnIntentSubmitted {
+            metadata: EventMetadata::new(run),
+            trade_id,
+            amount: TokenAmount::new(usdc(), AmountRaw::new(usdc_swap_amount)),
+        }))
+        .expect("burn intent submitted");
+
+    // Step 3: MintConfirmed.
+    consumer
+        .consume(&RuntimeEvent::Gateway(GatewayEvent::MintConfirmed {
+            metadata: EventMetadata::new(run),
+            trade_id,
+            amount: TokenAmount::new(usdc(), AmountRaw::new(usdc_swap_amount)),
+        }))
+        .expect("mint confirmed");
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::working(usdc()))
+            .expect("working USDC after mint"),
+        i128::from(usdc_swap_amount)
+    );
+
+    // Step 4: TradeSwapSubmitted.
+    consumer
+        .consume(&RuntimeEvent::Swap(SwapEvent::TradeSwapSubmitted {
+            metadata: EventMetadata::new(run),
+            trade_id,
+            input_amount: TokenAmount::new(usdc(), AmountRaw::new(usdc_swap_amount)),
+        }))
+        .expect("trade swap submitted");
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::working(usdc()))
+            .expect("working USDC after swap submit"),
+        0
+    );
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::pending_dex_spend(
+                usdc(),
+                trade_id.to_string()
+            ))
+            .expect("pending_dex_spend after swap submit"),
+        i128::from(usdc_swap_amount)
+    );
+
+    // Step 5: TradeSwapConfirmed.
+    consumer
+        .consume(&RuntimeEvent::Swap(SwapEvent::TradeSwapConfirmed {
+            metadata: EventMetadata::new(run),
+            trade_id,
+            input_amount: TokenAmount::new(usdc(), AmountRaw::new(usdc_swap_amount)),
+            output_amount: TokenAmount::new(sol(), AmountRaw::new(sol_output_amount)),
+        }))
+        .expect("trade swap confirmed");
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::pending_dex_spend(
+                usdc(),
+                trade_id.to_string()
+            ))
+            .expect("pending_dex_spend after swap confirm"),
+        0
+    );
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::working(sol()))
+            .expect("working SOL after swap confirm"),
+        i128::from(sol_output_amount)
+    );
+
+    // Step 6: Submitted{MakerOutput} on SOL.
+    consumer
+        .consume(&settlement_event(SettlementEvent::Submitted {
+            metadata: EventMetadata::new(run),
+            receipt: htlc_receipt(
+                trade_id,
+                SettlementLeg::MakerOutput,
+                sol(),
+                sol_output_amount,
+                SettlementStatus::Initiated,
+            ),
+        }))
+        .expect("submitted maker output");
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::working(sol()))
+            .expect("working SOL after maker submit"),
+        0
+    );
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::pending_escrow(sol()))
+            .expect("pending_escrow after maker submit"),
+        i128::from(sol_output_amount)
+    );
+
+    // Step 7: Confirmed{MakerOutput}.
+    consumer
+        .consume(&settlement_event(SettlementEvent::Confirmed {
+            metadata: EventMetadata::new(run),
+            receipt: htlc_receipt(
+                trade_id,
+                SettlementLeg::MakerOutput,
+                sol(),
+                sol_output_amount,
+                SettlementStatus::Initiated,
+            ),
+        }))
+        .expect("confirmed maker output");
+
+    // Step 8: Redeemed{MakerOutput}.
+    consumer
+        .consume(&settlement_event(SettlementEvent::Redeemed {
+            metadata: EventMetadata::new(run),
+            receipt: htlc_receipt(
+                trade_id,
+                SettlementLeg::MakerOutput,
+                sol(),
+                sol_output_amount,
+                SettlementStatus::Redeemed,
+            ),
+        }))
+        .expect("redeemed maker output");
+
+    // Step 9: Redeemed{TakerInput}.
+    consumer
+        .consume(&settlement_event(SettlementEvent::Redeemed {
+            metadata: EventMetadata::new(run),
+            receipt: htlc_receipt(
+                trade_id,
+                SettlementLeg::TakerInput,
+                usdc(),
+                usdc_input_amount,
+                SettlementStatus::Redeemed,
+            ),
+        }))
+        .expect("redeemed taker input");
+
+    let report = repository.integrity_report().expect("integrity report");
+    assert!(report.healthy, "ledger should balance: {report:?}");
+}
+
+#[tokio::test]
+async fn settlement_gateway_failure_releases_reservation() {
+    // Drives the consumer through a successful BurnIntentSubmitted (which
+    // moves gateway -> trading via the back-to-back reserve+burn) and then a
+    // BurnFailed: the latter must reverse trading -> gateway so the maker's
+    // gateway balance ends up at the original seed value.
+    let db = Db::open_in_memory().expect("open in-memory db");
+    let consumer = LedgerEventConsumer::new(&db);
+    let repository = SqliteLedgerRepository::new(&db);
+
+    let trade_id = TradeId::generate();
+    let run = run_id();
+    let gateway_amount: u64 = 1_000_000_000;
+    let burn_amount: u64 = 250_000_000;
+
+    let seed = firmament::ledger::LedgerTransactionBuilder::new(
+        "test_seed_gateway_burn",
+        trade_id.as_uuid(),
+    )
+    .description("seed gateway USDC for burn-failure test")
+    .idempotency_key(format!("seed:{trade_id}:gateway_burn_failure"))
+    .debit(
+        LedgerAccountId::gateway(usdc()),
+        AmountRaw::new(gateway_amount),
+    )
+    .credit(
+        LedgerAccountId::external(usdc(), "seed_gateway"),
+        AmountRaw::new(gateway_amount),
+    )
+    .build()
+    .expect("balanced gateway seed");
+    repository.save_transaction(&seed).expect("save seed");
+
+    consumer
+        .consume(&RuntimeEvent::Gateway(GatewayEvent::BurnIntentSubmitted {
+            metadata: EventMetadata::new(run),
+            trade_id,
+            amount: TokenAmount::new(usdc(), AmountRaw::new(burn_amount)),
+        }))
+        .expect("burn intent submitted");
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::trading(usdc()))
+            .expect("trading after burn"),
+        i128::from(burn_amount)
+    );
+
+    consumer
+        .consume(&RuntimeEvent::Gateway(GatewayEvent::BurnFailed {
+            metadata: EventMetadata::new(run),
+            trade_id,
+            amount: TokenAmount::new(usdc(), AmountRaw::new(burn_amount)),
+            reason: "gateway adapter timeout".to_owned(),
+        }))
+        .expect("burn failed");
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::trading(usdc()))
+            .expect("trading after burn failure"),
+        0
+    );
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::gateway(usdc()))
+            .expect("gateway after burn failure"),
+        i128::from(gateway_amount),
+        "gateway balance should be fully released back"
+    );
+}
+
+#[tokio::test]
+async fn settlement_jupiter_failure_unwinds_pending_dex_spend() {
+    // Drives TradeSwapSubmitted (working_custody -> pending_dex_spend) and
+    // then TradeSwapFailed: the latter must reverse pending_dex_spend ->
+    // working_custody.
+    let db = Db::open_in_memory().expect("open in-memory db");
+    let consumer = LedgerEventConsumer::new(&db);
+    let repository = SqliteLedgerRepository::new(&db);
+
+    let trade_id = TradeId::generate();
+    let run = run_id();
+    let usdc_amount: u64 = 300_000_000;
+
+    let seed = firmament::ledger::LedgerTransactionBuilder::new(
+        "test_seed_swap_failure",
+        trade_id.as_uuid(),
+    )
+    .description("seed working USDC for swap-failure test")
+    .idempotency_key(format!("seed:{trade_id}:swap_failure"))
+    .debit(
+        LedgerAccountId::working(usdc()),
+        AmountRaw::new(usdc_amount),
+    )
+    .credit(
+        LedgerAccountId::external(usdc(), "seed"),
+        AmountRaw::new(usdc_amount),
+    )
+    .build()
+    .expect("balanced seed");
+    repository.save_transaction(&seed).expect("save seed");
+
+    consumer
+        .consume(&RuntimeEvent::Swap(SwapEvent::TradeSwapSubmitted {
+            metadata: EventMetadata::new(run),
+            trade_id,
+            input_amount: TokenAmount::new(usdc(), AmountRaw::new(usdc_amount)),
+        }))
+        .expect("trade swap submitted");
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::pending_dex_spend(
+                usdc(),
+                trade_id.to_string()
+            ))
+            .expect("pending_dex_spend after submit"),
+        i128::from(usdc_amount)
+    );
+
+    consumer
+        .consume(&RuntimeEvent::Swap(SwapEvent::TradeSwapFailed {
+            metadata: EventMetadata::new(run),
+            trade_id,
+            input_amount: TokenAmount::new(usdc(), AmountRaw::new(usdc_amount)),
+            reason: "jupiter route stale".to_owned(),
+        }))
+        .expect("trade swap failed");
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::pending_dex_spend(
+                usdc(),
+                trade_id.to_string()
+            ))
+            .expect("pending_dex_spend after failure"),
+        0
+    );
+    assert_eq!(
+        repository
+            .account_balance(&LedgerAccountId::working(usdc()))
+            .expect("working USDC after failure"),
+        i128::from(usdc_amount),
+        "working_custody should be fully restored"
+    );
+}
+
+#[tokio::test]
+async fn settlement_repricing_failure_skips_reservation() {
+    // Drive the orchestrator with a quote that expires before acceptance.
+    // The accept path must:
+    //   1. Not move working_custody -> reserved (no Submitted{MakerOutput} fires).
+    //   2. Emit a Settlement::Failed with reason "repricing_failed".
+    //   3. Record a RuntimeTrade in Failed state for operator visibility.
+    let persistence = Arc::new(
+        RuntimePersistence::open_in_memory(AssetRegistry::default()).expect("persistence"),
+    );
+    seed_working_custody(&persistence, &sol(), 200_000_000);
+    seed_working_custody(&persistence, &usdc(), 10_000_000);
+
+    let orchestrator = persistent_harness_with_persistence(
+        FakePriceProvider::default(),
+        FakeHtlcClient::default(),
+        FakeSwapExecutor::default(),
+        FakeGatewayClient::default(),
+        FakeBalanceReader::new(vec![quote_inventory(), quote_inventory()]),
+        RuntimeOrchestratorOptions::default(),
+        Arc::clone(&persistence),
+    )
+    .await;
+
+    let mut request = rfq(100_000);
+    request.expiry_seconds = Some(1);
+    let response = orchestrator
+        .request_rfq(request)
+        .await
+        .expect("request quote");
+    let quote = match response {
+        RfqResponse::Accepted(quote) => quote,
+        RfqResponse::Rejected(rejection) => panic!("expected accepted: {rejection:?}"),
+    };
+    let quote_id = quote.quote_id;
+
+    // Wait past the quote expiry so accept_quote enters the Expired branch.
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+
+    let error = orchestrator
+        .accept_quote(quote_id)
+        .await
+        .expect_err("expired quote acceptance should fail");
+    assert!(error.to_string().contains("expired"));
+
+    // The expiry handler emits a Settlement::Failed with reason
+    // "repricing_failed" — find it in the runtime event stream.
+    let events = orchestrator.runtime().recent_events(None).await;
+    let saw_repricing_failed = events.iter().any(|event| {
+        matches!(
+            event,
+            RuntimeEvent::Settlement(SettlementEvent::Failed { reason, .. })
+                if reason == "repricing_failed"
+        )
+    });
+    assert!(
+        saw_repricing_failed,
+        "expected Settlement::Failed reason=repricing_failed in events: {events:#?}"
+    );
+
+    let trade_id = events
+        .iter()
+        .find_map(|event| match event {
+            RuntimeEvent::Settlement(SettlementEvent::Failed {
+                trade_id, reason, ..
+            }) if reason == "repricing_failed" => Some(*trade_id),
+            _ => None,
+        })
+        .expect("repricing_failed event carries trade_id");
+
+    let runtime_trade = orchestrator
+        .trade(trade_id)
+        .await
+        .expect("expired-quote trade recorded for visibility");
+    assert_eq!(runtime_trade.settlement_status, SettlementStatus::Failed);
+
+    // No Submitted settlement events should have fired (those carry the
+    // working_custody -> reserved compound move on the maker leg).
+    assert!(
+        events.iter().all(|event| {
+            !matches!(
+                event,
+                RuntimeEvent::Settlement(SettlementEvent::Submitted { .. })
+            )
+        }),
+        "no Submitted settlement events should fire on repricing failure"
+    );
 }
