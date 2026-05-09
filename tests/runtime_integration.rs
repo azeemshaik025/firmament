@@ -15,12 +15,12 @@ use firmament::runtime::{
     RuntimeAdapters, RuntimeOrchestrator, RuntimeOrchestratorOptions, RuntimePersistence,
     TradeSignatureKind,
 };
-use firmament::settlement::SettlementLeg;
+use firmament::settlement::{SettlementLeg, SettlementPhase};
 use firmament::types::{
-    AmountRaw, AssetId, AssetPair, BalanceSnapshot, ExecutionPath, GatewayReceipt,
-    GatewayRefillRequest, HtlcInitiation, HtlcReceipt, MintAddress, QuoteId, ReferencePrice,
-    RejectionReason, SettlementStatus, SwapQuote, SwapReceipt, SwapRequest, TokenAmount, TradeId,
-    TxSignature, WalletAddress, WalletRole,
+    AmountRaw, AssetId, AssetPair, BalanceSnapshot, ExecutionPath, ExternalHtlcInitiation,
+    GatewayReceipt, GatewayRefillRequest, HtlcInitiation, HtlcReceipt, MintAddress, QuoteId,
+    ReferencePrice, RejectionReason, SettlementStatus, SwapQuote, SwapReceipt, SwapRequest,
+    TokenAmount, TradeId, TxSignature, UnsignedWalletTransaction, WalletAddress, WalletRole,
 };
 use firmament::{AppConfig, AppError, bootstrap};
 use rust_decimal::Decimal;
@@ -50,6 +50,10 @@ fn taker_wallet() -> WalletAddress {
     WalletAddress::new("DemoTaker111111111111111111111111111111111111")
 }
 
+fn other_taker_wallet() -> WalletAddress {
+    WalletAddress::new("OtherTaker11111111111111111111111111111111111")
+}
+
 fn rfq(amount_raw: u64) -> RfqRequest {
     RfqRequest {
         input_mint: usdc_mint(),
@@ -57,6 +61,13 @@ fn rfq(amount_raw: u64) -> RfqRequest {
         input_amount_raw: AmountRaw::new(amount_raw),
         taker_wallet: taker_wallet(),
         expiry_seconds: Some(30),
+    }
+}
+
+fn rfq_for_wallet(amount_raw: u64, taker_wallet: WalletAddress) -> RfqRequest {
+    RfqRequest {
+        taker_wallet,
+        ..rfq(amount_raw)
     }
 }
 
@@ -179,6 +190,643 @@ async fn persistent_harness_with_config(
         persistence,
         options,
     )
+}
+
+#[tokio::test]
+async fn terminal_trades_survive_runtime_restart() {
+    let persistence = Arc::new(
+        RuntimePersistence::open_in_memory(AssetRegistry::from_config(&relaxed_default_config()))
+            .expect("open persistence"),
+    );
+    seed_working_custody(&persistence, &sol(), 200_000_000);
+    seed_working_custody(&persistence, &usdc(), 10_000_000);
+    let orchestrator = persistent_harness_with_persistence(
+        FakePriceProvider::default(),
+        FakeHtlcClient::default(),
+        FakeSwapExecutor::default(),
+        FakeGatewayClient::default(),
+        FakeBalanceReader::new(vec![quote_inventory(), post_settlement_drift_inventory()]),
+        RuntimeOrchestratorOptions::default(),
+        Arc::clone(&persistence),
+    )
+    .await;
+
+    let quote = orchestrator
+        .request_rfq(rfq(1_000_000))
+        .await
+        .expect("request quote");
+    let quote_id = match quote {
+        RfqResponse::Accepted(quote) => quote.quote_id,
+        RfqResponse::Rejected(rejection) => panic!("expected accepted quote: {rejection:?}"),
+    };
+    let trade = orchestrator
+        .accept_quote(quote_id)
+        .await
+        .expect("accept quote");
+
+    let restarted = persistent_harness_with_persistence(
+        FakePriceProvider::default(),
+        FakeHtlcClient::default(),
+        FakeSwapExecutor::default(),
+        FakeGatewayClient::default(),
+        FakeBalanceReader::new(vec![quote_inventory()]),
+        RuntimeOrchestratorOptions::default(),
+        Arc::clone(&persistence),
+    )
+    .await;
+
+    let restored = restarted
+        .trade(trade.trade_id)
+        .await
+        .expect("restored trade");
+    assert_eq!(restored.trade_id, trade.trade_id);
+    assert_eq!(restored.run_id, trade.run_id);
+    assert_eq!(restored.settlement_status, SettlementStatus::Redeemed);
+    assert_eq!(restored.tx_signature_kinds, trade.tx_signature_kinds);
+
+    let recent = restarted.recent_trades(10).await;
+    assert_eq!(
+        recent.first().map(|trade| trade.trade_id),
+        Some(trade.trade_id)
+    );
+    let counts = restarted.trade_counts().await;
+    assert_eq!(counts.total_count, 1);
+    assert_eq!(counts.successful_count, 1);
+}
+
+#[tokio::test]
+async fn wallet_filtered_trades_survive_runtime_restart() {
+    let persistence = Arc::new(
+        RuntimePersistence::open_in_memory(AssetRegistry::from_config(&relaxed_default_config()))
+            .expect("open persistence"),
+    );
+    seed_working_custody(&persistence, &sol(), 400_000_000);
+    seed_working_custody(&persistence, &usdc(), 20_000_000);
+    let orchestrator = persistent_harness_with_persistence(
+        FakePriceProvider::default(),
+        FakeHtlcClient::default(),
+        FakeSwapExecutor::default(),
+        FakeGatewayClient::default(),
+        FakeBalanceReader::new(vec![quote_inventory(), quote_inventory()]),
+        RuntimeOrchestratorOptions::default(),
+        Arc::clone(&persistence),
+    )
+    .await;
+
+    let quote = orchestrator
+        .request_rfq(rfq_for_wallet(1_000_000, taker_wallet()))
+        .await
+        .expect("request quote");
+    let quote_id = match quote {
+        RfqResponse::Accepted(quote) => quote.quote_id,
+        RfqResponse::Rejected(rejection) => panic!("expected accepted quote: {rejection:?}"),
+    };
+    let started = orchestrator
+        .start_wallet_settlement(quote_id, taker_wallet(), "ee".repeat(32))
+        .await
+        .expect("start wallet settlement");
+    let completed = orchestrator
+        .record_wallet_taker_lock(started.trade_id, TxSignature::new("wallet-one-lock"))
+        .await
+        .expect("record taker lock");
+    let completed = orchestrator
+        .complete_wallet_taker_redeem(
+            completed.trade_id,
+            "00".repeat(32),
+            TxSignature::new("wallet-one-redeem"),
+        )
+        .await
+        .expect("record taker redeem");
+
+    let restarted = persistent_harness_with_persistence(
+        FakePriceProvider::default(),
+        FakeHtlcClient::default(),
+        FakeSwapExecutor::default(),
+        FakeGatewayClient::default(),
+        FakeBalanceReader::new(vec![quote_inventory()]),
+        RuntimeOrchestratorOptions::default(),
+        Arc::clone(&persistence),
+    )
+    .await;
+
+    let wallet_trades = restarted
+        .recent_trades_for_wallet(&taker_wallet(), 10)
+        .await;
+    assert_eq!(wallet_trades.len(), 1);
+    assert_eq!(wallet_trades[0].trade_id, completed.trade.trade_id);
+    assert_eq!(
+        wallet_trades[0].taker_wallet.as_ref(),
+        Some(&taker_wallet())
+    );
+
+    let other_wallet_trades = restarted
+        .recent_trades_for_wallet(&other_taker_wallet(), 10)
+        .await;
+    assert!(other_wallet_trades.is_empty());
+}
+
+#[tokio::test]
+async fn active_wallet_settlement_resumes_after_runtime_restart() {
+    let persistence = Arc::new(
+        RuntimePersistence::open_in_memory(AssetRegistry::from_config(&relaxed_default_config()))
+            .expect("open persistence"),
+    );
+    seed_working_custody(&persistence, &sol(), 200_000_000);
+    seed_working_custody(&persistence, &usdc(), 10_000_000);
+    let orchestrator = persistent_harness_with_persistence(
+        FakePriceProvider::default(),
+        FakeHtlcClient::default(),
+        FakeSwapExecutor::default(),
+        FakeGatewayClient::default(),
+        FakeBalanceReader::new(vec![quote_inventory()]),
+        RuntimeOrchestratorOptions::default(),
+        Arc::clone(&persistence),
+    )
+    .await;
+
+    let quote = orchestrator
+        .request_rfq(rfq(1_000_000))
+        .await
+        .expect("request quote");
+    let quote_id = match quote {
+        RfqResponse::Accepted(quote) => quote.quote_id,
+        RfqResponse::Rejected(rejection) => panic!("expected accepted quote: {rejection:?}"),
+    };
+    let started = orchestrator
+        .start_wallet_settlement(quote_id, taker_wallet(), "aa".repeat(32))
+        .await
+        .expect("start wallet settlement");
+
+    let htlc_after_restart = FakeHtlcClient::default();
+    let restarted = persistent_harness_with_persistence(
+        FakePriceProvider::default(),
+        htlc_after_restart.clone(),
+        FakeSwapExecutor::default(),
+        FakeGatewayClient::default(),
+        FakeBalanceReader::new(vec![quote_inventory()]),
+        RuntimeOrchestratorOptions::default(),
+        Arc::clone(&persistence),
+    )
+    .await;
+
+    let resumed = restarted
+        .resume_wallet_settlement(started.trade_id)
+        .await
+        .expect("resume active settlement");
+    assert_eq!(resumed.trade_id, started.trade_id);
+    assert_eq!(resumed.quote_id, quote_id);
+    assert_eq!(resumed.settlement_phase, SettlementPhase::Started);
+    assert!(resumed.taker_lock_transaction.is_some());
+    assert!(resumed.taker_redeem_transaction.is_none());
+    assert!(resumed.taker_refund_transaction.is_none());
+    assert_eq!(resumed.tx_signature_kinds, Vec::new());
+    assert_eq!(htlc_after_restart.restored_count(), 0);
+}
+
+#[tokio::test]
+async fn wallet_settlement_wrong_wallet_does_not_consume_quote() {
+    let persistence = Arc::new(
+        RuntimePersistence::open_in_memory(AssetRegistry::from_config(&relaxed_default_config()))
+            .expect("open persistence"),
+    );
+    seed_working_custody(&persistence, &sol(), 400_000_000);
+    seed_working_custody(&persistence, &usdc(), 20_000_000);
+    let orchestrator = persistent_harness_with_persistence(
+        FakePriceProvider::default(),
+        FakeHtlcClient::default(),
+        FakeSwapExecutor::default(),
+        FakeGatewayClient::default(),
+        FakeBalanceReader::new(vec![quote_inventory(), quote_inventory()]),
+        RuntimeOrchestratorOptions::default(),
+        Arc::clone(&persistence),
+    )
+    .await;
+
+    let quote = orchestrator
+        .request_rfq(rfq_for_wallet(1_000_000, taker_wallet()))
+        .await
+        .expect("request quote");
+    let quote_id = match quote {
+        RfqResponse::Accepted(quote) => quote.quote_id,
+        RfqResponse::Rejected(rejection) => panic!("expected accepted quote: {rejection:?}"),
+    };
+
+    let error = orchestrator
+        .start_wallet_settlement(quote_id, other_taker_wallet(), "aa".repeat(32))
+        .await
+        .expect_err("wrong wallet must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("connected wallet does not match")
+    );
+
+    let started = orchestrator
+        .start_wallet_settlement(quote_id, taker_wallet(), "aa".repeat(32))
+        .await
+        .expect("correct wallet can still start settlement");
+    assert_eq!(started.quote_id, quote_id);
+}
+
+#[tokio::test]
+async fn wallet_settlement_abandon_requires_secret_hash_and_is_only_allowed_before_onchain_signatures()
+ {
+    let persistence = Arc::new(
+        RuntimePersistence::open_in_memory(AssetRegistry::from_config(&relaxed_default_config()))
+            .expect("open persistence"),
+    );
+    seed_working_custody(&persistence, &sol(), 400_000_000);
+    seed_working_custody(&persistence, &usdc(), 20_000_000);
+    let orchestrator = persistent_harness_with_persistence(
+        FakePriceProvider::default(),
+        FakeHtlcClient::default(),
+        FakeSwapExecutor::default(),
+        FakeGatewayClient::default(),
+        FakeBalanceReader::new(vec![quote_inventory(), quote_inventory()]),
+        RuntimeOrchestratorOptions::default(),
+        Arc::clone(&persistence),
+    )
+    .await;
+
+    let quote = orchestrator
+        .request_rfq(rfq(1_000_000))
+        .await
+        .expect("request quote");
+    let quote_id = match quote {
+        RfqResponse::Accepted(quote) => quote.quote_id,
+        RfqResponse::Rejected(rejection) => panic!("expected accepted quote: {rejection:?}"),
+    };
+    let started = orchestrator
+        .start_wallet_settlement(quote_id, taker_wallet(), "bb".repeat(32))
+        .await
+        .expect("start wallet settlement");
+    let wrong_secret = orchestrator
+        .abandon_wallet_settlement(started.trade_id, "00".repeat(32))
+        .await
+        .expect_err("wrong secret hash must be rejected");
+    assert!(wrong_secret.to_string().contains("secret_hash"));
+
+    let abandoned = orchestrator
+        .abandon_wallet_settlement(started.trade_id, "bb".repeat(32))
+        .await
+        .expect("abandon pre-lock settlement");
+    assert_eq!(abandoned.settlement_status, SettlementStatus::Failed);
+    assert!(
+        orchestrator
+            .resume_wallet_settlement(started.trade_id)
+            .await
+            .is_err()
+    );
+
+    let quote = orchestrator
+        .request_rfq(rfq(1_000_000))
+        .await
+        .expect("request second quote");
+    let quote_id = match quote {
+        RfqResponse::Accepted(quote) => quote.quote_id,
+        RfqResponse::Rejected(rejection) => panic!("expected accepted quote: {rejection:?}"),
+    };
+    let started = orchestrator
+        .start_wallet_settlement(quote_id, taker_wallet(), "cc".repeat(32))
+        .await
+        .expect("start second wallet settlement");
+    orchestrator
+        .record_wallet_taker_lock(started.trade_id, TxSignature::new("taker-lock-sig"))
+        .await
+        .expect("record taker lock");
+
+    let error = orchestrator
+        .abandon_wallet_settlement(started.trade_id, "cc".repeat(32))
+        .await
+        .expect_err("post-lock abandon must be rejected");
+    assert!(matches!(error, AppError::Conflict(_)));
+}
+
+#[tokio::test]
+async fn expired_prelock_wallet_settlement_cannot_resume_or_lock() {
+    let config = relaxed_default_config();
+    let persistence = Arc::new(
+        RuntimePersistence::open_in_memory(AssetRegistry::from_config(&config))
+            .expect("open persistence"),
+    );
+    seed_working_custody(&persistence, &sol(), 200_000_000);
+    seed_working_custody(&persistence, &usdc(), 10_000_000);
+    let orchestrator = persistent_harness_with_config(
+        config,
+        FakePriceProvider::default(),
+        FakeHtlcClient::default(),
+        FakeSwapExecutor::default(),
+        FakeGatewayClient::default(),
+        FakeBalanceReader::new(vec![quote_inventory()]),
+        RuntimeOrchestratorOptions::default(),
+        Arc::clone(&persistence),
+    )
+    .await;
+
+    let quote = orchestrator
+        .request_rfq(RfqRequest {
+            expiry_seconds: Some(1),
+            ..rfq(1_000_000)
+        })
+        .await
+        .expect("request quote");
+    let quote_id = match quote {
+        RfqResponse::Accepted(quote) => quote.quote_id,
+        RfqResponse::Rejected(rejection) => panic!("expected accepted quote: {rejection:?}"),
+    };
+    let started = orchestrator
+        .start_wallet_settlement(quote_id, taker_wallet(), "ad".repeat(32))
+        .await
+        .expect("start wallet settlement");
+
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+
+    let error = orchestrator
+        .resume_wallet_settlement(started.trade_id)
+        .await
+        .expect_err("expired pre-lock settlement must not rebuild lock tx");
+    assert!(error.to_string().contains("expired"));
+
+    let trade = orchestrator
+        .trade(started.trade_id)
+        .await
+        .expect("expired settlement recorded as terminal trade");
+    assert_eq!(trade.settlement_status, SettlementStatus::Failed);
+}
+
+#[tokio::test]
+async fn wallet_taker_lock_retry_continues_missing_maker_lock_after_restart() {
+    let persistence = Arc::new(
+        RuntimePersistence::open_in_memory(AssetRegistry::from_config(&relaxed_default_config()))
+            .expect("open persistence"),
+    );
+    seed_working_custody(&persistence, &sol(), 400_000_000);
+    seed_working_custody(&persistence, &usdc(), 20_000_000);
+    let htlc = FakeHtlcClient::with_failure(HtlcFailure::MakerInitiateOnce);
+    let orchestrator = persistent_harness_with_persistence(
+        FakePriceProvider::default(),
+        htlc.clone(),
+        FakeSwapExecutor::default(),
+        FakeGatewayClient::default(),
+        FakeBalanceReader::new(vec![quote_inventory(), quote_inventory()]),
+        RuntimeOrchestratorOptions::default(),
+        Arc::clone(&persistence),
+    )
+    .await;
+
+    let quote = orchestrator
+        .request_rfq(rfq(1_000_000))
+        .await
+        .expect("request quote");
+    let quote_id = match quote {
+        RfqResponse::Accepted(quote) => quote.quote_id,
+        RfqResponse::Rejected(rejection) => panic!("expected accepted quote: {rejection:?}"),
+    };
+    let started = orchestrator
+        .start_wallet_settlement(quote_id, taker_wallet(), "ee".repeat(32))
+        .await
+        .expect("start wallet settlement");
+    orchestrator
+        .record_wallet_taker_lock(started.trade_id, TxSignature::new("taker-lock-retry-sig"))
+        .await
+        .expect_err("first maker lock fails after taker lock was accepted");
+    assert_eq!(htlc.initiated_count(), 1, "only taker lock should exist");
+
+    let restarted = persistent_harness_with_persistence(
+        FakePriceProvider::default(),
+        htlc.clone(),
+        FakeSwapExecutor::default(),
+        FakeGatewayClient::default(),
+        FakeBalanceReader::new(vec![quote_inventory()]),
+        RuntimeOrchestratorOptions::default(),
+        Arc::clone(&persistence),
+    )
+    .await;
+
+    let retried = restarted
+        .record_wallet_taker_lock(started.trade_id, TxSignature::new("taker-lock-retry-sig"))
+        .await
+        .expect("retry continues missing maker lock");
+    assert_eq!(
+        retried
+            .maker_lock_signature
+            .as_ref()
+            .map(TxSignature::as_str),
+        Some("init-2")
+    );
+    assert_eq!(htlc.initiated_count(), 2, "maker lock should be added once");
+}
+
+#[tokio::test]
+async fn wallet_taker_redeem_retry_continues_missing_maker_redeem_after_restart() {
+    let persistence = Arc::new(
+        RuntimePersistence::open_in_memory(AssetRegistry::from_config(&relaxed_default_config()))
+            .expect("open persistence"),
+    );
+    seed_working_custody(&persistence, &sol(), 400_000_000);
+    seed_working_custody(&persistence, &usdc(), 20_000_000);
+    let htlc = FakeHtlcClient::with_failure(HtlcFailure::MakerRedeemOnce);
+    let orchestrator = persistent_harness_with_persistence(
+        FakePriceProvider::default(),
+        htlc.clone(),
+        FakeSwapExecutor::default(),
+        FakeGatewayClient::default(),
+        FakeBalanceReader::new(vec![quote_inventory(), quote_inventory()]),
+        RuntimeOrchestratorOptions::default(),
+        Arc::clone(&persistence),
+    )
+    .await;
+
+    let quote = orchestrator
+        .request_rfq(rfq(1_000_000))
+        .await
+        .expect("request quote");
+    let quote_id = match quote {
+        RfqResponse::Accepted(quote) => quote.quote_id,
+        RfqResponse::Rejected(rejection) => panic!("expected accepted quote: {rejection:?}"),
+    };
+    let started = orchestrator
+        .start_wallet_settlement(quote_id, taker_wallet(), "ef".repeat(32))
+        .await
+        .expect("start wallet settlement");
+    orchestrator
+        .record_wallet_taker_lock(started.trade_id, TxSignature::new("taker-lock-sig"))
+        .await
+        .expect("record taker lock");
+    orchestrator
+        .complete_wallet_taker_redeem(
+            started.trade_id,
+            "11".repeat(32),
+            TxSignature::new("taker-redeem-retry-sig"),
+        )
+        .await
+        .expect_err("first maker redeem fails after taker redeem was accepted");
+
+    let restarted = persistent_harness_with_persistence(
+        FakePriceProvider::default(),
+        htlc.clone(),
+        FakeSwapExecutor::default(),
+        FakeGatewayClient::default(),
+        FakeBalanceReader::new(vec![quote_inventory()]),
+        RuntimeOrchestratorOptions::default(),
+        Arc::clone(&persistence),
+    )
+    .await;
+    let completed = restarted
+        .complete_wallet_taker_redeem(
+            started.trade_id,
+            "11".repeat(32),
+            TxSignature::new("taker-redeem-retry-sig"),
+        )
+        .await
+        .expect("retry continues missing maker redeem");
+    assert_eq!(
+        completed.trade.settlement_status,
+        SettlementStatus::Redeemed
+    );
+    assert!(completed.maker_redeem_signature.is_some());
+}
+
+#[tokio::test]
+async fn wallet_taker_refund_retry_continues_missing_maker_refund_after_restart() {
+    let config = relaxed_default_config();
+    let persistence = Arc::new(
+        RuntimePersistence::open_in_memory(AssetRegistry::from_config(&config))
+            .expect("open persistence"),
+    );
+    seed_working_custody(&persistence, &sol(), 400_000_000);
+    seed_working_custody(&persistence, &usdc(), 20_000_000);
+    let htlc = FakeHtlcClient::with_failure(HtlcFailure::MakerRefundOnce);
+    let orchestrator = persistent_harness_with_config(
+        config.clone(),
+        FakePriceProvider::default(),
+        htlc.clone(),
+        FakeSwapExecutor::default(),
+        FakeGatewayClient::default(),
+        FakeBalanceReader::new(vec![quote_inventory(), quote_inventory()]),
+        RuntimeOrchestratorOptions::default(),
+        Arc::clone(&persistence),
+    )
+    .await;
+
+    let quote = orchestrator
+        .request_rfq(RfqRequest {
+            expiry_seconds: Some(1),
+            ..rfq(1_000_000)
+        })
+        .await
+        .expect("request quote");
+    let quote_id = match quote {
+        RfqResponse::Accepted(quote) => quote.quote_id,
+        RfqResponse::Rejected(rejection) => panic!("expected accepted quote: {rejection:?}"),
+    };
+    let started = orchestrator
+        .start_wallet_settlement(quote_id, taker_wallet(), "fe".repeat(32))
+        .await
+        .expect("start wallet settlement");
+    orchestrator
+        .record_wallet_taker_lock(started.trade_id, TxSignature::new("taker-lock-sig"))
+        .await
+        .expect("record taker lock");
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+
+    orchestrator
+        .complete_wallet_taker_refund(started.trade_id, TxSignature::new("taker-refund-retry-sig"))
+        .await
+        .expect_err("first maker refund fails after taker refund was accepted");
+
+    let restarted = persistent_harness_with_config(
+        config,
+        FakePriceProvider::default(),
+        htlc.clone(),
+        FakeSwapExecutor::default(),
+        FakeGatewayClient::default(),
+        FakeBalanceReader::new(vec![quote_inventory()]),
+        RuntimeOrchestratorOptions::default(),
+        Arc::clone(&persistence),
+    )
+    .await;
+    let refunded = restarted
+        .complete_wallet_taker_refund(started.trade_id, TxSignature::new("taker-refund-retry-sig"))
+        .await
+        .expect("retry continues missing maker refund");
+    assert_eq!(refunded.trade.settlement_status, SettlementStatus::Refunded);
+    assert!(refunded.maker_refund_signature.is_some());
+}
+
+#[tokio::test]
+async fn expired_locked_wallet_settlement_can_refund_after_restart() {
+    let config = relaxed_default_config();
+    let persistence = Arc::new(
+        RuntimePersistence::open_in_memory(AssetRegistry::from_config(&config))
+            .expect("open persistence"),
+    );
+    seed_working_custody(&persistence, &sol(), 200_000_000);
+    seed_working_custody(&persistence, &usdc(), 10_000_000);
+    let htlc = FakeHtlcClient::default();
+    let orchestrator = persistent_harness_with_config(
+        config.clone(),
+        FakePriceProvider::default(),
+        htlc.clone(),
+        FakeSwapExecutor::default(),
+        FakeGatewayClient::default(),
+        FakeBalanceReader::new(vec![quote_inventory(), quote_inventory()]),
+        RuntimeOrchestratorOptions::default(),
+        Arc::clone(&persistence),
+    )
+    .await;
+
+    let quote = orchestrator
+        .request_rfq(RfqRequest {
+            expiry_seconds: Some(1),
+            ..rfq(1_000_000)
+        })
+        .await
+        .expect("request quote");
+    let quote_id = match quote {
+        RfqResponse::Accepted(quote) => quote.quote_id,
+        RfqResponse::Rejected(rejection) => panic!("expected accepted quote: {rejection:?}"),
+    };
+    let started = orchestrator
+        .start_wallet_settlement(quote_id, taker_wallet(), "dd".repeat(32))
+        .await
+        .expect("start wallet settlement");
+    orchestrator
+        .record_wallet_taker_lock(started.trade_id, TxSignature::new("taker-lock-sig"))
+        .await
+        .expect("record taker lock");
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+
+    let restarted_htlc = FakeHtlcClient::default();
+    let restarted = persistent_harness_with_config(
+        config,
+        FakePriceProvider::default(),
+        restarted_htlc.clone(),
+        FakeSwapExecutor::default(),
+        FakeGatewayClient::default(),
+        FakeBalanceReader::new(vec![quote_inventory()]),
+        RuntimeOrchestratorOptions::default(),
+        Arc::clone(&persistence),
+    )
+    .await;
+
+    let prepared = restarted
+        .prepare_wallet_taker_refund(started.trade_id)
+        .await
+        .expect("prepare taker refund");
+    assert_eq!(prepared.trade_id, started.trade_id);
+    assert_eq!(
+        prepared.taker_refund_transaction.recent_blockhash,
+        "fake-blockhash"
+    );
+
+    let refunded = restarted
+        .complete_wallet_taker_refund(started.trade_id, TxSignature::new("taker-refund-sig"))
+        .await
+        .expect("complete taker refund");
+    assert_eq!(refunded.trade.settlement_status, SettlementStatus::Refunded);
+    assert!(refunded.maker_refund_signature.is_some());
+    assert_eq!(restarted_htlc.restored_count(), 1);
 }
 
 #[tokio::test]
@@ -1327,6 +1975,10 @@ struct FakeHtlcState {
     initiated: Vec<HtlcInitiation>,
     redeemed: Vec<(TradeId, String)>,
     redeemed_legs: HashMap<TradeId, Vec<SettlementLeg>>,
+    externally_redeemed: HashMap<TradeId, TxSignature>,
+    externally_refunded: HashMap<TradeId, TxSignature>,
+    refunded_legs: HashMap<TradeId, Vec<SettlementLeg>>,
+    restored: Vec<TradeId>,
     failure: Option<HtlcFailure>,
 }
 
@@ -1340,6 +1992,9 @@ fn fake_leg_for_funder(funder: WalletRole) -> SettlementLeg {
 #[derive(Debug, Clone, Copy)]
 enum HtlcFailure {
     MakerInitiate,
+    MakerInitiateOnce,
+    MakerRedeemOnce,
+    MakerRefundOnce,
 }
 
 impl FakeHtlcClient {
@@ -1359,14 +2014,33 @@ impl FakeHtlcClient {
     fn redeemed_count(&self) -> usize {
         self.inner.lock().expect("htlc lock").redeemed.len()
     }
+
+    fn restored_count(&self) -> usize {
+        self.inner.lock().expect("htlc lock").restored.len()
+    }
 }
 
 #[async_trait]
 impl HtlcClient for FakeHtlcClient {
+    async fn wallet_address(&self, role: WalletRole) -> Result<WalletAddress, AppError> {
+        Ok(WalletAddress::new(match role {
+            WalletRole::Maker => "DemoMaker111111111111111111111111111111111111",
+            WalletRole::Taker => "DemoTaker111111111111111111111111111111111111",
+            WalletRole::Operator => "DemoOperator11111111111111111111111111111111",
+            WalletRole::Gateway => "DemoGateway111111111111111111111111111111111",
+        }))
+    }
+
     async fn initiate(&self, request: HtlcInitiation) -> Result<HtlcReceipt, AppError> {
         let mut state = self.inner.lock().expect("htlc lock");
         if matches!(state.failure, Some(HtlcFailure::MakerInitiate)) && state.initiated.len() == 1 {
             return Err(AppError::solana("maker initiate failed"));
+        }
+        if matches!(state.failure, Some(HtlcFailure::MakerInitiateOnce))
+            && request.funder == WalletRole::Maker
+        {
+            state.failure = None;
+            return Err(AppError::solana("maker initiate failed once"));
         }
         let leg = fake_leg_for_funder(request.funder);
         let amount = request.amount.clone();
@@ -1380,7 +2054,223 @@ impl HtlcClient for FakeHtlcClient {
         })
     }
 
+    async fn initiate_with_external_redeemer(
+        &self,
+        request: HtlcInitiation,
+        _redeemer: WalletAddress,
+    ) -> Result<HtlcReceipt, AppError> {
+        self.initiate(request).await
+    }
+
+    async fn build_external_initiate(
+        &self,
+        _request: ExternalHtlcInitiation,
+    ) -> Result<UnsignedWalletTransaction, AppError> {
+        Ok(UnsignedWalletTransaction {
+            transaction_base64: "AA==".to_owned(),
+            recent_blockhash: "fake-blockhash".to_owned(),
+        })
+    }
+
+    async fn record_external_initiate(
+        &self,
+        request: ExternalHtlcInitiation,
+        signature: TxSignature,
+    ) -> Result<HtlcReceipt, AppError> {
+        let role_request = HtlcInitiation {
+            trade_id: request.trade_id,
+            funder: WalletRole::Taker,
+            redeemer: WalletRole::Maker,
+            amount: request.amount.clone(),
+            hashlock: request.hashlock,
+            expires_at: request.expires_at,
+        };
+        self.inner
+            .lock()
+            .expect("htlc lock")
+            .initiated
+            .push(role_request);
+        Ok(HtlcReceipt {
+            trade_id: request.trade_id,
+            leg: SettlementLeg::TakerInput,
+            amount: request.amount,
+            status: SettlementStatus::Initiated,
+            signature: Some(signature),
+        })
+    }
+
+    async fn build_external_redeem(
+        &self,
+        _trade_id: TradeId,
+        _redeemer: WalletAddress,
+        _preimage: String,
+    ) -> Result<UnsignedWalletTransaction, AppError> {
+        Ok(UnsignedWalletTransaction {
+            transaction_base64: "AA==".to_owned(),
+            recent_blockhash: "fake-blockhash".to_owned(),
+        })
+    }
+
+    async fn record_external_redeem(
+        &self,
+        trade_id: TradeId,
+        signature: TxSignature,
+    ) -> Result<HtlcReceipt, AppError> {
+        let mut state = self.inner.lock().expect("htlc lock");
+        if state.externally_redeemed.contains_key(&trade_id) {
+            return Err(AppError::validation(format!(
+                "fake htlc client: maker-funded leg already externally redeemed for {trade_id}"
+            )));
+        }
+        let init = state
+            .initiated
+            .iter()
+            .find(|init| init.trade_id == trade_id && init.funder == WalletRole::Maker)
+            .ok_or_else(|| {
+                AppError::validation(format!("fake htlc client: no maker leg for {trade_id}"))
+            })?;
+        let amount = init.amount.clone();
+        state
+            .externally_redeemed
+            .insert(trade_id, signature.clone());
+        state
+            .redeemed_legs
+            .entry(trade_id)
+            .or_default()
+            .push(SettlementLeg::MakerOutput);
+        Ok(HtlcReceipt {
+            trade_id,
+            leg: SettlementLeg::MakerOutput,
+            amount,
+            status: SettlementStatus::Redeemed,
+            signature: Some(signature),
+        })
+    }
+
+    async fn build_external_refund(
+        &self,
+        _trade_id: TradeId,
+        _funder: WalletAddress,
+    ) -> Result<UnsignedWalletTransaction, AppError> {
+        Ok(UnsignedWalletTransaction {
+            transaction_base64: "AA==".to_owned(),
+            recent_blockhash: "fake-blockhash".to_owned(),
+        })
+    }
+
+    async fn record_external_refund(
+        &self,
+        trade_id: TradeId,
+        signature: TxSignature,
+    ) -> Result<HtlcReceipt, AppError> {
+        let mut state = self.inner.lock().expect("htlc lock");
+        if state.externally_refunded.contains_key(&trade_id) {
+            return Err(AppError::validation(format!(
+                "fake htlc client: taker-funded leg already externally refunded for {trade_id}"
+            )));
+        }
+        let init = state
+            .initiated
+            .iter()
+            .find(|init| init.trade_id == trade_id && init.funder == WalletRole::Taker)
+            .cloned()
+            .ok_or_else(|| {
+                AppError::validation(format!("fake htlc client: no taker leg for {trade_id}"))
+            })?;
+        state
+            .refunded_legs
+            .entry(trade_id)
+            .or_default()
+            .push(SettlementLeg::TakerInput);
+        state
+            .externally_refunded
+            .insert(trade_id, signature.clone());
+        Ok(HtlcReceipt {
+            trade_id,
+            leg: SettlementLeg::TakerInput,
+            amount: init.amount,
+            status: SettlementStatus::Refunded,
+            signature: Some(signature),
+        })
+    }
+
+    async fn refund_leg(
+        &self,
+        trade_id: TradeId,
+        leg: SettlementLeg,
+    ) -> Result<HtlcReceipt, AppError> {
+        let mut state = self.inner.lock().expect("htlc lock");
+        if matches!(state.failure, Some(HtlcFailure::MakerRefundOnce))
+            && leg == SettlementLeg::MakerOutput
+        {
+            state.failure = None;
+            return Err(AppError::solana("maker refund failed once"));
+        }
+        let init = state
+            .initiated
+            .iter()
+            .find(|init| init.trade_id == trade_id && fake_leg_for_funder(init.funder) == leg)
+            .cloned()
+            .ok_or_else(|| {
+                AppError::validation(format!("fake htlc client: no {leg:?} leg for {trade_id}"))
+            })?;
+        state.refunded_legs.entry(trade_id).or_default().push(leg);
+        Ok(HtlcReceipt {
+            trade_id,
+            leg,
+            amount: init.amount,
+            status: SettlementStatus::Refunded,
+            signature: Some(TxSignature::new(format!("refund-{leg:?}"))),
+        })
+    }
+
+    async fn restore_wallet_settlement(
+        &self,
+        taker_lock: ExternalHtlcInitiation,
+        maker_lock: HtlcInitiation,
+        taker_locked: bool,
+        maker_locked: bool,
+    ) -> Result<(), AppError> {
+        let mut state = self.inner.lock().expect("htlc lock");
+        let trade_id = taker_lock.trade_id;
+        let mut restored_any = false;
+        if taker_locked
+            && !state
+                .initiated
+                .iter()
+                .any(|init| init.trade_id == trade_id && init.funder == WalletRole::Taker)
+        {
+            state.initiated.push(HtlcInitiation {
+                trade_id,
+                funder: WalletRole::Taker,
+                redeemer: WalletRole::Maker,
+                amount: taker_lock.amount,
+                hashlock: taker_lock.hashlock,
+                expires_at: taker_lock.expires_at,
+            });
+            restored_any = true;
+        }
+        if maker_locked
+            && !state.initiated.iter().any(|init| {
+                init.trade_id == maker_lock.trade_id && init.funder == WalletRole::Maker
+            })
+        {
+            state.initiated.push(maker_lock);
+            restored_any = true;
+        }
+        if restored_any {
+            state.restored.push(trade_id);
+        }
+        Ok(())
+    }
+
     async fn redeem(&self, trade_id: TradeId, preimage: String) -> Result<HtlcReceipt, AppError> {
+        let mut state = self.inner.lock().expect("htlc lock");
+        if matches!(state.failure, Some(HtlcFailure::MakerRedeemOnce)) {
+            state.failure = None;
+            return Err(AppError::solana("maker redeem failed once"));
+        }
+        drop(state);
         let mut state = self.inner.lock().expect("htlc lock");
         let trade_initiations: Vec<HtlcInitiation> = state
             .initiated

@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use crate::adapters::persistence::ledger::LedgerAccountType;
 use crate::application::runtime::RuntimeTrade;
 use crate::domain::assets::AssetRegistry;
-use crate::domain::types::SettlementStatus;
+use crate::domain::types::{SettlementStatus, WalletAddress};
 
 use super::types::{
     LedgerBalanceEntry, LedgerSnapshotResponse, TradeAmount, TradeSummary, TradesResponse,
@@ -110,9 +110,11 @@ pub struct TradesQuery {
     /// Number of trades to return. Default 10. Hard cap 100. Out-of-range
     /// or zero returns 400.
     pub limit: Option<u32>,
+    /// Optional taker wallet filter for connected-wallet history drawers.
+    pub wallet: Option<String>,
 }
 
-/// `GET /v1/runtime/trades?limit=<n>`.
+/// `GET /v1/runtime/trades?limit=<n>&wallet=<address>`.
 ///
 /// Returns the most recent in-memory trades, newest first. Default limit
 /// is 10 and the hard cap is 100. `total_count` and `successful_count`
@@ -129,6 +131,22 @@ pub(crate) async fn get_trades(
             format!("limit must be 1..=100, got {limit}"),
         ));
     }
+    let wallet = query
+        .wallet
+        .as_deref()
+        .map(str::trim)
+        .filter(|wallet| !wallet.is_empty())
+        .map(WalletAddress::new);
+    if query
+        .wallet
+        .as_deref()
+        .is_some_and(|wallet| wallet.trim().is_empty())
+    {
+        return Err(ApiError::bad_request(
+            "invalid_wallet",
+            "wallet must not be empty",
+        ));
+    }
 
     let orchestrator = context.orchestrator.as_ref().ok_or_else(|| {
         ApiError::new(
@@ -140,24 +158,50 @@ pub(crate) async fn get_trades(
     })?;
 
     let registry = orchestrator.asset_registry();
-    let (total_count, successful_count) = orchestrator.trade_counts().await;
-    let recent = orchestrator.recent_trades(limit as usize).await;
+    let counts = if let Some(wallet) = wallet.as_ref() {
+        orchestrator.trade_counts_for_wallet(wallet).await
+    } else {
+        orchestrator.trade_counts().await
+    };
+    let current_run = orchestrator.run_id();
+    let recent = if let Some(wallet) = wallet.as_ref() {
+        orchestrator
+            .recent_trades_for_wallet(wallet, limit as usize)
+            .await
+    } else {
+        orchestrator.recent_trades(limit as usize).await
+    };
     let trades = recent
         .into_iter()
-        .map(|trade| trade_to_summary(&trade, &registry))
+        .map(|trade| trade_to_summary(&trade, &registry, current_run))
         .collect();
 
     Ok(Json(TradesResponse {
-        total_count: total_count as u64,
-        successful_count: successful_count as u64,
+        total_count: counts.total_count as u64,
+        successful_count: counts.successful_count as u64,
+        active_count: counts.active_count as u64,
+        refunded_count: counts.refunded_count as u64,
+        failed_count: counts.failed_count as u64,
         trades,
     }))
 }
 
-fn trade_to_summary(trade: &RuntimeTrade, registry: &AssetRegistry) -> TradeSummary {
+fn trade_to_summary(
+    trade: &RuntimeTrade,
+    registry: &AssetRegistry,
+    current_run: crate::domain::types::RuntimeRunId,
+) -> TradeSummary {
     TradeSummary {
         trade_id: trade.trade_id.to_string(),
         quote_id: trade.quote_id.to_string(),
+        run_id: trade.run_id.to_string(),
+        current_run: trade.run_id == current_run,
+        taker_wallet: trade
+            .taker_wallet
+            .as_ref()
+            .map(|wallet| wallet.as_str().to_owned()),
+        expires_at: trade.expires_at.map(|expires_at| expires_at.to_string()),
+        created_at: trade.created_at.to_string(),
         settlement_status: settlement_status_str(trade.settlement_status).to_owned(),
         input: amount_to_summary(&trade.input_amount, registry),
         output: amount_to_summary(&trade.output_amount, registry),

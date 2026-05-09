@@ -10,6 +10,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_commitment_config::CommitmentConfig;
+use solana_sdk::account::Account;
 use solana_sdk::instruction::Instruction;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::{Keypair, Signature, Signer};
@@ -92,6 +93,7 @@ struct SolanaHtlcLeg {
     program_id: Pubkey,
     swap_pda: Pubkey,
     funder_pubkey: Pubkey,
+    redeemer_pubkey: Pubkey,
     mint: Option<Pubkey>,
     token_program: Option<Pubkey>,
     status: SettlementStatus,
@@ -214,6 +216,7 @@ impl SolanaHtlcClient {
                     program_id: self.native_program_id,
                     swap_pda,
                     funder_pubkey,
+                    redeemer_pubkey,
                     mint: None,
                     token_program: None,
                     status: SettlementStatus::Pending,
@@ -253,6 +256,7 @@ impl SolanaHtlcClient {
                 program_id: self.spl_program_id,
                 swap_pda,
                 funder_pubkey,
+                redeemer_pubkey,
                 mint: Some(mint),
                 token_program: Some(token_program),
                 status: SettlementStatus::Pending,
@@ -314,11 +318,18 @@ impl SolanaHtlcClient {
 
     fn build_refund_instruction(&self, leg: &SolanaHtlcLeg) -> Result<Instruction, AppError> {
         let funder = self.wallet(leg.request.funder)?;
+        Self::build_refund_instruction_for_pubkey(leg, funder.pubkey())
+    }
+
+    fn build_refund_instruction_for_pubkey(
+        leg: &SolanaHtlcLeg,
+        funder_pubkey: Pubkey,
+    ) -> Result<Instruction, AppError> {
         match leg.kind {
             HtlcProgramKind::Native => Ok(build_refund_native(
                 &leg.program_id,
                 &leg.swap_pda,
-                &funder.pubkey(),
+                &funder_pubkey,
             )),
             HtlcProgramKind::Spl => {
                 let mint = leg
@@ -329,7 +340,7 @@ impl SolanaHtlcClient {
                     .ok_or_else(|| AppError::internal("SPL HTLC leg missing token program"))?;
                 let funder_ata =
                     crate::adapters::solana::client::SolanaClient::derive_associated_token_address(
-                        &funder.pubkey(),
+                        &funder_pubkey,
                         &mint,
                         &token_program,
                     );
@@ -338,7 +349,7 @@ impl SolanaHtlcClient {
                     &leg.swap_pda,
                     &mint,
                     &funder_ata,
-                    &funder.pubkey(),
+                    &funder_pubkey,
                     token_program,
                 ))
             }
@@ -421,6 +432,49 @@ impl SolanaHtlcClient {
 
         Err(AppError::solana(format!(
             "confirmation timeout for HTLC transaction {signature}"
+        )))
+    }
+
+    async fn validate_active_htlc_leg(&self, leg: &SolanaHtlcLeg) -> Result<(), AppError> {
+        let account = self
+            .rpc_client
+            .get_account_with_commitment(&leg.swap_pda, CommitmentConfig::confirmed())
+            .await
+            .map_err(|error| {
+                AppError::solana(format!("get HTLC account {}: {error}", leg.swap_pda))
+            })?
+            .value
+            .ok_or_else(|| {
+                AppError::solana(format!(
+                    "confirmed signature did not create expected HTLC account {}",
+                    leg.swap_pda
+                ))
+            })?;
+        validate_active_htlc_account_matches_leg(leg, &account)
+    }
+
+    async fn await_htlc_leg_inactive(&self, leg: &SolanaHtlcLeg) -> Result<(), AppError> {
+        for _ in 0..self.confirmation.max_attempts {
+            let account = self
+                .rpc_client
+                .get_account_with_commitment(&leg.swap_pda, CommitmentConfig::confirmed())
+                .await
+                .map_err(|error| {
+                    AppError::solana(format!("get HTLC account {}: {error}", leg.swap_pda))
+                })?
+                .value;
+            if let Some(account) = account {
+                if validate_active_htlc_account_matches_leg(leg, &account).is_ok() {
+                    tokio::time::sleep(self.confirmation.poll_interval).await;
+                    continue;
+                }
+            }
+            return Ok(());
+        }
+
+        Err(AppError::solana(format!(
+            "HTLC account {} is still active after confirmed transaction",
+            leg.swap_pda
         )))
     }
 
@@ -562,6 +616,7 @@ impl HtlcClient for SolanaHtlcClient {
         let (_, mut leg) = self
             .build_initiate_instruction_for_pubkeys(&role_request, funder, redeemer)
             .await?;
+        self.validate_active_htlc_leg(&leg).await?;
         leg.status = SettlementStatus::Initiated;
         let receipt_leg = leg_for_funder(role_request.funder);
         let receipt_amount = role_request.amount.clone();
@@ -618,7 +673,23 @@ impl HtlcClient for SolanaHtlcClient {
         let signature = Signature::from_str(signature.as_str()).map_err(|error| {
             AppError::validation(format!("invalid taker redeem signature: {error}"))
         })?;
+        let leg = {
+            let state = self.state.lock().await;
+            let trade = state
+                .get(&trade_id)
+                .ok_or_else(|| AppError::validation(format!("unknown HTLC trade {trade_id}")))?;
+            trade
+                .legs
+                .iter()
+                .find(|leg| {
+                    leg.request.funder == WalletRole::Maker
+                        && leg.status == SettlementStatus::Initiated
+                })
+                .cloned()
+                .ok_or_else(|| AppError::validation("no maker-funded HTLC leg is redeemable"))?
+        };
         self.await_confirmation(&signature).await?;
+        self.await_htlc_leg_inactive(&leg).await?;
 
         let mut state = self.state.lock().await;
         let trade = state
@@ -643,6 +714,184 @@ impl HtlcClient for SolanaHtlcClient {
             status: SettlementStatus::Redeemed,
             signature: Some(TxSignature::new(signature.to_string())),
         })
+    }
+
+    async fn build_external_refund(
+        &self,
+        trade_id: TradeId,
+        funder: WalletAddress,
+    ) -> Result<UnsignedWalletTransaction, AppError> {
+        let funder_pubkey = Self::pubkey_from_wallet(&funder)?;
+        let leg = {
+            let state = self.state.lock().await;
+            let trade = state
+                .get(&trade_id)
+                .ok_or_else(|| AppError::validation(format!("unknown HTLC trade {trade_id}")))?;
+            trade
+                .legs
+                .iter()
+                .find(|leg| {
+                    leg.request.funder == WalletRole::Taker
+                        && leg.status == SettlementStatus::Initiated
+                })
+                .cloned()
+                .ok_or_else(|| AppError::validation("no taker-funded HTLC leg is refundable"))?
+        };
+        let instruction = Self::build_refund_instruction_for_pubkey(&leg, funder_pubkey)?;
+        self.build_unsigned_transaction(funder_pubkey, instruction)
+            .await
+    }
+
+    async fn record_external_refund(
+        &self,
+        trade_id: TradeId,
+        signature: TxSignature,
+    ) -> Result<HtlcReceipt, AppError> {
+        let signature = Signature::from_str(signature.as_str()).map_err(|error| {
+            AppError::validation(format!("invalid taker refund signature: {error}"))
+        })?;
+        let leg = {
+            let state = self.state.lock().await;
+            let trade = state
+                .get(&trade_id)
+                .ok_or_else(|| AppError::validation(format!("unknown HTLC trade {trade_id}")))?;
+            trade
+                .legs
+                .iter()
+                .find(|leg| {
+                    leg.request.funder == WalletRole::Taker
+                        && leg.status == SettlementStatus::Initiated
+                })
+                .cloned()
+                .ok_or_else(|| AppError::validation("no taker-funded HTLC leg is refundable"))?
+        };
+        self.await_confirmation(&signature).await?;
+        self.await_htlc_leg_inactive(&leg).await?;
+
+        let mut state = self.state.lock().await;
+        let trade = state
+            .get_mut(&trade_id)
+            .ok_or_else(|| AppError::validation(format!("unknown HTLC trade {trade_id}")))?;
+        let leg = trade
+            .legs
+            .iter_mut()
+            .find(|leg| {
+                leg.request.funder == WalletRole::Taker && leg.status == SettlementStatus::Initiated
+            })
+            .ok_or_else(|| AppError::validation("no taker-funded HTLC leg is refundable"))?;
+        leg.status = SettlementStatus::Refunded;
+        let receipt_amount = leg.request.amount.clone();
+
+        Ok(HtlcReceipt {
+            trade_id,
+            leg: SettlementLeg::TakerInput,
+            amount: receipt_amount,
+            status: SettlementStatus::Refunded,
+            signature: Some(TxSignature::new(signature.to_string())),
+        })
+    }
+
+    async fn refund_leg(
+        &self,
+        trade_id: TradeId,
+        requested_leg: SettlementLeg,
+    ) -> Result<HtlcReceipt, AppError> {
+        let leg = {
+            let state = self.state.lock().await;
+            let trade = state
+                .get(&trade_id)
+                .ok_or_else(|| AppError::validation(format!("unknown HTLC trade {trade_id}")))?;
+            trade
+                .legs
+                .iter()
+                .find(|leg| {
+                    leg_for_funder(leg.request.funder) == requested_leg
+                        && leg.status == SettlementStatus::Initiated
+                })
+                .cloned()
+                .ok_or_else(|| {
+                    AppError::validation(format!("no refundable {requested_leg:?} HTLC leg"))
+                })?
+        };
+        let instruction = self.build_refund_instruction(&leg)?;
+        let signature = self.submit(leg.request.funder, instruction).await?;
+        let receipt_leg = leg_for_funder(leg.request.funder);
+        let receipt_amount = leg.request.amount.clone();
+
+        let mut state = self.state.lock().await;
+        if let Some(trade) = state.get_mut(&trade_id) {
+            if let Some(stored_leg) = trade
+                .legs
+                .iter_mut()
+                .find(|stored| stored.swap_pda == leg.swap_pda)
+            {
+                stored_leg.status = SettlementStatus::Refunded;
+            }
+        }
+
+        Ok(HtlcReceipt {
+            trade_id,
+            leg: receipt_leg,
+            amount: receipt_amount,
+            status: SettlementStatus::Refunded,
+            signature: Some(signature),
+        })
+    }
+
+    async fn restore_wallet_settlement(
+        &self,
+        taker_lock: ExternalHtlcInitiation,
+        maker_lock: HtlcInitiation,
+        taker_locked: bool,
+        maker_locked: bool,
+    ) -> Result<(), AppError> {
+        let taker_wallet = taker_lock.funder.clone();
+        let taker_leg = if taker_locked {
+            let funder = Self::pubkey_from_wallet(&taker_lock.funder)?;
+            let redeemer = Self::pubkey_from_wallet(&taker_lock.redeemer)?;
+            let role_request = HtlcInitiation {
+                trade_id: taker_lock.trade_id,
+                funder: WalletRole::Taker,
+                redeemer: WalletRole::Maker,
+                amount: taker_lock.amount.clone(),
+                hashlock: taker_lock.hashlock.clone(),
+                expires_at: taker_lock.expires_at,
+            };
+            let (_, mut leg) = self
+                .build_initiate_instruction_for_pubkeys(&role_request, funder, redeemer)
+                .await?;
+            leg.status = SettlementStatus::Initiated;
+            Some(leg)
+        } else {
+            None
+        };
+        let maker_leg = if maker_locked {
+            let funder = self.wallet(maker_lock.funder)?.pubkey();
+            let redeemer = Self::pubkey_from_wallet(&WalletAddress::new(
+                // The maker lock request only stores roles; the browser
+                // taker address is available on the taker lock request.
+                taker_wallet.as_str().to_owned(),
+            ))?;
+            let (_, mut leg) = self
+                .build_initiate_instruction_for_pubkeys(&maker_lock, funder, redeemer)
+                .await?;
+            leg.status = SettlementStatus::Initiated;
+            Some(leg)
+        } else {
+            None
+        };
+        let mut state = self.state.lock().await;
+        let trade_state = state.entry(maker_lock.trade_id).or_default();
+        for leg in [taker_leg, maker_leg].into_iter().flatten() {
+            if !trade_state
+                .legs
+                .iter()
+                .any(|existing| existing.swap_pda == leg.swap_pda)
+            {
+                trade_state.legs.push(leg);
+            }
+        }
+        Ok(())
     }
 
     async fn redeem(&self, trade_id: TradeId, preimage: String) -> Result<HtlcReceipt, AppError> {
@@ -782,6 +1031,107 @@ fn decode_live_swap_account(kind: HtlcProgramKind, data: &[u8]) -> Result<(), Ap
             .map(|_| ())
             .map_err(|error| AppError::solana(format!("decode SPL HTLC account: {error}"))),
     }
+}
+
+fn validate_active_htlc_account_matches_leg(
+    leg: &SolanaHtlcLeg,
+    account: &Account,
+) -> Result<(), AppError> {
+    if account.owner != leg.program_id {
+        return Err(AppError::solana(format!(
+            "HTLC account {} is owned by {}, expected {}",
+            leg.swap_pda, account.owner, leg.program_id
+        )));
+    }
+
+    match leg.kind {
+        HtlcProgramKind::Native => {
+            let account = decode_native_swap_account(&account.data).map_err(|error| {
+                AppError::solana(format!(
+                    "decode native HTLC account {}: {error}",
+                    leg.swap_pda
+                ))
+            })?;
+            validate_native_swap_account_matches_leg(leg, &account)
+        }
+        HtlcProgramKind::Spl => {
+            let account = decode_spl_swap_account(&account.data).map_err(|error| {
+                AppError::solana(format!("decode SPL HTLC account {}: {error}", leg.swap_pda))
+            })?;
+            validate_spl_swap_account_matches_leg(leg, &account)
+        }
+    }
+}
+
+fn validate_native_swap_account_matches_leg(
+    leg: &SolanaHtlcLeg,
+    account: &super::encoding::NativeSwapAccount,
+) -> Result<(), AppError> {
+    let expected_hash = parse_secret_hash(&leg.request.hashlock)
+        .map_err(|error| AppError::validation(error.to_string()))?;
+    if account.amount_lamports != leg.request.amount.amount_raw.as_u64() {
+        return Err(AppError::solana(format!(
+            "native HTLC amount mismatch: got {}, expected {}",
+            account.amount_lamports,
+            leg.request.amount.amount_raw.as_u64()
+        )));
+    }
+    if account.initiator != leg.funder_pubkey {
+        return Err(AppError::solana(format!(
+            "native HTLC initiator mismatch: got {}, expected {}",
+            account.initiator, leg.funder_pubkey
+        )));
+    }
+    if account.redeemer != leg.redeemer_pubkey {
+        return Err(AppError::solana(format!(
+            "native HTLC redeemer mismatch: got {}, expected {}",
+            account.redeemer, leg.redeemer_pubkey
+        )));
+    }
+    if account.secret_hash != expected_hash {
+        return Err(AppError::solana("native HTLC secret hash mismatch"));
+    }
+    Ok(())
+}
+
+fn validate_spl_swap_account_matches_leg(
+    leg: &SolanaHtlcLeg,
+    account: &super::encoding::SplSwapAccount,
+) -> Result<(), AppError> {
+    let expected_hash = parse_secret_hash(&leg.request.hashlock)
+        .map_err(|error| AppError::validation(error.to_string()))?;
+    let expected_mint = leg
+        .mint
+        .ok_or_else(|| AppError::internal("SPL HTLC leg missing mint"))?;
+    if account.mint != expected_mint {
+        return Err(AppError::solana(format!(
+            "SPL HTLC mint mismatch: got {}, expected {}",
+            account.mint, expected_mint
+        )));
+    }
+    if account.swap_amount != leg.request.amount.amount_raw.as_u64() {
+        return Err(AppError::solana(format!(
+            "SPL HTLC amount mismatch: got {}, expected {}",
+            account.swap_amount,
+            leg.request.amount.amount_raw.as_u64()
+        )));
+    }
+    if account.initiator != leg.funder_pubkey {
+        return Err(AppError::solana(format!(
+            "SPL HTLC initiator mismatch: got {}, expected {}",
+            account.initiator, leg.funder_pubkey
+        )));
+    }
+    if account.redeemer != leg.redeemer_pubkey {
+        return Err(AppError::solana(format!(
+            "SPL HTLC redeemer mismatch: got {}, expected {}",
+            account.redeemer, leg.redeemer_pubkey
+        )));
+    }
+    if account.secret_hash != expected_hash {
+        return Err(AppError::solana("SPL HTLC secret hash mismatch"));
+    }
+    Ok(())
 }
 
 fn expires_in_slots(expires_at: time::OffsetDateTime) -> u64 {
@@ -1272,6 +1622,88 @@ mod tests {
     }
 
     #[test]
+    fn native_htlc_account_validation_rejects_unexpected_lock_state() {
+        let secret_hash = secret_hash();
+        let leg = SolanaHtlcLeg {
+            request: HtlcInitiation {
+                trade_id: TradeId::generate(),
+                funder: WalletRole::Taker,
+                redeemer: WalletRole::Maker,
+                amount: TokenAmount::new(AssetId::from("SOL"), AmountRaw::new(1_000)),
+                hashlock: hex::encode(secret_hash),
+                expires_at: time::OffsetDateTime::now_utc() + time::Duration::seconds(30),
+            },
+            kind: HtlcProgramKind::Native,
+            program_id: native_program(),
+            swap_pda: Pubkey::new_unique(),
+            funder_pubkey: initiator(),
+            redeemer_pubkey: redeemer(),
+            mint: None,
+            token_program: None,
+            status: SettlementStatus::Initiated,
+        };
+        let matching = NativeSwapAccount {
+            amount_lamports: 1_000,
+            expiry_slot: 22,
+            initiator: initiator(),
+            redeemer: redeemer(),
+            secret_hash,
+        };
+        validate_native_swap_account_matches_leg(&leg, &matching).expect("matching native account");
+
+        let wrong_amount = NativeSwapAccount {
+            amount_lamports: 999,
+            ..matching
+        };
+        let error = validate_native_swap_account_matches_leg(&leg, &wrong_amount)
+            .expect_err("wrong amount rejected");
+        assert!(error.to_string().contains("amount"));
+    }
+
+    #[test]
+    fn spl_htlc_account_validation_rejects_unexpected_lock_state() {
+        let secret_hash = secret_hash();
+        let mint = Pubkey::new_unique();
+        let leg = SolanaHtlcLeg {
+            request: HtlcInitiation {
+                trade_id: TradeId::generate(),
+                funder: WalletRole::Taker,
+                redeemer: WalletRole::Maker,
+                amount: TokenAmount::new(AssetId::from("USDC"), AmountRaw::new(2_000)),
+                hashlock: hex::encode(secret_hash),
+                expires_at: time::OffsetDateTime::now_utc() + time::Duration::seconds(30),
+            },
+            kind: HtlcProgramKind::Spl,
+            program_id: spl_program(),
+            swap_pda: Pubkey::new_unique(),
+            funder_pubkey: initiator(),
+            redeemer_pubkey: redeemer(),
+            mint: Some(mint),
+            token_program: Some(token_program()),
+            status: SettlementStatus::Initiated,
+        };
+        let matching = SplSwapAccount {
+            mint,
+            expiry_slot: 33,
+            initiator: initiator(),
+            redeemer: redeemer(),
+            secret_hash,
+            swap_amount: 2_000,
+            identity_pda_bump: 254,
+            sponsor: initiator(),
+        };
+        validate_spl_swap_account_matches_leg(&leg, &matching).expect("matching spl account");
+
+        let wrong_mint = SplSwapAccount {
+            mint: Pubkey::new_unique(),
+            ..matching
+        };
+        let error = validate_spl_swap_account_matches_leg(&leg, &wrong_mint)
+            .expect_err("wrong mint rejected");
+        assert!(error.to_string().contains("mint"));
+    }
+
+    #[test]
     fn solana_htlc_client_builds_native_initiate_transaction_without_rpc() {
         let maker = Arc::new(Keypair::new());
         let taker = Arc::new(Keypair::new());
@@ -1327,6 +1759,7 @@ mod tests {
             program_id: spl_program(),
             swap_pda,
             funder_pubkey: taker.pubkey(),
+            redeemer_pubkey: maker.pubkey(),
             mint: Some(mint),
             token_program: Some(token_program()),
             status: SettlementStatus::Initiated,

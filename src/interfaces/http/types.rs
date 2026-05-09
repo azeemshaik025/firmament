@@ -244,6 +244,13 @@ pub struct WalletSettlementRequest {
     pub secret_hash: String,
 }
 
+/// Request body for abandoning an unused pre-lock wallet settlement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AbandonRequest {
+    /// Browser-held hash commitment for the settlement being abandoned.
+    pub secret_hash: String,
+}
+
 /// Response body for wallet settlement start.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WalletSettlementResponse {
@@ -260,6 +267,39 @@ pub struct WalletSettlementResponse {
     pub integration_status: IntegrationStatus,
     /// Self-describing next call for an API consumer.
     pub next_action: NextAction,
+}
+
+/// Response body for resuming an active wallet settlement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletSettlementResumeResponse {
+    /// Trade being resumed.
+    pub trade_id: TradeId,
+    /// Quote that produced the trade.
+    pub quote_id: QuoteId,
+    /// Runtime invocation that created the settlement.
+    pub run_id: String,
+    /// Current settlement phase.
+    pub settlement_phase: String,
+    /// Current coarse settlement status.
+    pub settlement_status: SettlementStatus,
+    /// Fresh taker lock transaction when funds are not locked yet.
+    pub taker_lock_transaction: Option<UnsignedWalletTransaction>,
+    /// Fresh taker redeem transaction when available.
+    pub taker_redeem_transaction: Option<UnsignedWalletTransaction>,
+    /// Fresh taker refund transaction when the locked taker leg is expired.
+    pub taker_refund_transaction: Option<UnsignedWalletTransaction>,
+    /// Known raw signatures.
+    pub tx_signatures: Vec<TxSignature>,
+    /// Known typed signatures.
+    pub tx_signature_kinds: Vec<TradeSignature>,
+    /// HTLC expiry timestamp.
+    #[serde(with = "time::serde::rfc3339")]
+    pub expires_at: OffsetDateTime,
+    /// Integration status for the route handler.
+    pub integration_status: IntegrationStatus,
+    /// Self-describing next call for an API consumer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_action: Option<NextAction>,
 }
 
 /// Request body for recording a browser taker lock.
@@ -319,6 +359,36 @@ pub struct TakerRedeemResponse {
     pub next_action: Option<NextAction>,
 }
 
+/// Request body for preparing or recording browser taker refund.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct TakerRefundRequest {
+    /// Submitted taker refund transaction signature. Omit to request the
+    /// unsigned refund transaction first.
+    pub signature: Option<TxSignature>,
+}
+
+/// Response body for the taker refund route.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TakerRefundResponse {
+    /// Trade being refunded.
+    pub trade_id: TradeId,
+    /// Current settlement status.
+    pub settlement_status: SettlementStatus,
+    /// Unsigned taker refund transaction when signature is omitted.
+    pub taker_refund_transaction: Option<UnsignedWalletTransaction>,
+    /// Maker refund signature after finalization.
+    pub maker_refund_signature: Option<TxSignature>,
+    /// All observed settlement signatures after finalization.
+    pub tx_signatures: Vec<TxSignature>,
+    /// Ledger summary.
+    pub ledger_summary: LedgerSummary,
+    /// Integration status for the route handler.
+    pub integration_status: IntegrationStatus,
+    /// Self-describing next call for an API consumer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_action: Option<NextAction>,
+}
+
 /// Token amounts associated with a trade lookup.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TradeAmounts {
@@ -354,10 +424,26 @@ impl Default for LedgerSummary {
 pub struct TradeResponse {
     /// Requested trade identifier.
     pub trade_id: TradeId,
+    /// Quote that produced the trade.
+    pub quote_id: QuoteId,
+    /// Runtime invocation that created the trade.
+    pub run_id: String,
+    /// Whether the trade belongs to the currently running runtime process.
+    pub current_run: bool,
+    /// Taker wallet that requested the trade when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub taker_wallet: Option<String>,
+    /// HTLC expiry timestamp when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    /// RFC3339 creation timestamp.
+    pub created_at: String,
     /// Current settlement status.
     pub settlement_status: SettlementStatus,
     /// Solana transaction signatures observed so far.
     pub tx_signatures: Vec<TxSignature>,
+    /// Trade-bound transaction signatures with role labels.
+    pub tx_signature_kinds: Vec<TradeSignature>,
     /// Known trade amounts. Legacy envelope.
     pub amounts: TradeAmounts,
     /// Display-friendly input amount.
@@ -463,10 +549,16 @@ pub struct LedgerBalanceEntry {
 /// Response body for `GET /v1/runtime/trades`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TradesResponse {
-    /// Total in-memory trade count.
+    /// Total persisted or active trade count.
     pub total_count: u64,
     /// Total trades whose settlement status is `redeemed`.
     pub successful_count: u64,
+    /// Active wallet settlements not yet terminal.
+    pub active_count: u64,
+    /// Total trades whose settlement status is `refunded`.
+    pub refunded_count: u64,
+    /// Total trades whose settlement status is `failed`.
+    pub failed_count: u64,
     /// Trades returned, newest first, capped at `limit` (default 10, max 100).
     pub trades: Vec<TradeSummary>,
 }
@@ -478,6 +570,18 @@ pub struct TradeSummary {
     pub trade_id: String,
     /// Quote that produced the trade.
     pub quote_id: String,
+    /// Runtime invocation that created the trade.
+    pub run_id: String,
+    /// Whether the trade belongs to the currently running runtime process.
+    pub current_run: bool,
+    /// Taker wallet that requested the trade when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub taker_wallet: Option<String>,
+    /// HTLC expiry timestamp when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    /// RFC3339 creation timestamp.
+    pub created_at: String,
     /// Snake-case settlement status.
     pub settlement_status: String,
     /// Taker input amount.

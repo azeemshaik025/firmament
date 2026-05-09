@@ -2,7 +2,7 @@ import { FormEvent, KeyboardEvent as ReactKeyboardEvent, useCallback, useEffect,
 import { useConnection, useWallet } from '@solana/wallet-adapter-react';
 import { useWalletModal } from '@solana/wallet-adapter-react-ui';
 import { PublicKey, Transaction, type Connection } from '@solana/web3.js';
-import { api, Asset, RfqRejectedResponse, RfqResponse, TradeStepResponse, WalletSettlementResponse } from '../api';
+import { api, Asset, RfqRejectedResponse, RfqResponse, RuntimeTrade, RuntimeTradesResponse, TradeSignature, TradeSignatureKind, TradeStepResponse, WalletSettlementResponse, WalletSettlementResumeResponse } from '../api';
 
 type NoticeTone = 'info' | 'success' | 'warn' | 'error';
 
@@ -77,7 +77,11 @@ type PersistedSwapState = {
   settlement: WalletSettlementResponse | null;
   lock: TradeStepResponse | null;
   redeem: TradeStepResponse | null;
+  refund: TradeStepResponse | null;
   preimage: string | null;
+  pending_lock_signature?: string | null;
+  pending_redeem_signature?: string | null;
+  pending_refund_signature?: string | null;
 };
 
 function assetBySymbol(assets: Asset[], symbol: string) {
@@ -142,6 +146,27 @@ function formatRawBigInt(raw: bigint, decimals: number) {
 
 function bytesToHex(bytes: Uint8Array) {
   return [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function hexToBytes(value: string) {
+  const normalized = value.trim();
+  if (normalized.length % 2 !== 0) {
+    throw new Error('Invalid recovery secret.');
+  }
+  const bytes = new Uint8Array(normalized.length / 2);
+  for (let index = 0; index < bytes.length; index += 1) {
+    const byte = Number.parseInt(normalized.slice(index * 2, index * 2 + 2), 16);
+    if (Number.isNaN(byte)) {
+      throw new Error('Invalid recovery secret.');
+    }
+    bytes[index] = byte;
+  }
+  return bytes;
+}
+
+async function hashHexSecret(value: string) {
+  const digest = await crypto.subtle.digest('SHA-256', hexToBytes(value));
+  return bytesToHex(new Uint8Array(digest));
 }
 
 function bytesFromBase64(value: string) {
@@ -282,7 +307,11 @@ function readPersistedSwapState(): PersistedSwapState | null {
       settlement: parsed.settlement ?? null,
       lock: parsed.lock ?? null,
       redeem: parsed.redeem ?? null,
-      preimage: typeof parsed.preimage === 'string' ? parsed.preimage : null
+      refund: parsed.refund ?? null,
+      preimage: typeof parsed.preimage === 'string' ? parsed.preimage : null,
+      pending_lock_signature: typeof parsed.pending_lock_signature === 'string' ? parsed.pending_lock_signature : null,
+      pending_redeem_signature: typeof parsed.pending_redeem_signature === 'string' ? parsed.pending_redeem_signature : null,
+      pending_refund_signature: typeof parsed.pending_refund_signature === 'string' ? parsed.pending_refund_signature : null
     };
   } catch {
     window.localStorage.removeItem(swapStateStorageKey);
@@ -313,13 +342,60 @@ function isWalletCancellation(error: unknown) {
   return message.toLowerCase().includes('reject') || message.toLowerCase().includes('cancel');
 }
 
+function signatureByKind(response: WalletSettlementResumeResponse, kind: TradeSignatureKind) {
+  return response.tx_signature_kinds?.find((proof) => proof.kind === kind)?.signature ?? null;
+}
+
+function proofSignatures(response: WalletSettlementResumeResponse) {
+  if (response.tx_signatures?.length) return response.tx_signatures;
+  return response.tx_signature_kinds?.map((proof) => proof.signature) ?? [];
+}
+
+function tradeProofSignatures(trade: RuntimeTrade) {
+  return trade.tx_signatures ?? [];
+}
+
+function tradeSignatureByKind(trade: RuntimeTrade, kind: TradeSignatureKind) {
+  return trade.tx_signatures?.find((proof) => proof.kind === kind)?.signature ?? null;
+}
+
+function isTerminalTrade(trade: RuntimeTrade) {
+  const status = trade.settlement_status.toLowerCase();
+  return status === 'redeemed' || status === 'refunded' || status === 'failed';
+}
+
+function isTradeExpired(trade: RuntimeTrade) {
+  if (!trade.expires_at) return false;
+  const expiresAt = new Date(trade.expires_at).getTime();
+  return Number.isFinite(expiresAt) && expiresAt <= Date.now();
+}
+
+function tradeStatusLabel(status: string) {
+  const normalized = status.toLowerCase();
+  if (normalized === 'redeemed') return 'Redeemed';
+  if (normalized === 'refunded') return 'Refunded';
+  if (normalized === 'failed') return 'Failed';
+  if (normalized === 'initiated') return 'Locked';
+  if (normalized === 'pending') return 'Pending';
+  return normalized ? normalized.replace(/_/g, ' ') : 'Pending';
+}
+
+function historyAmount(amount: RuntimeTrade['input']) {
+  return `${amount.display_amount || amount.amount_raw} ${amount.asset}`;
+}
+
+const emptyWalletTransaction: WalletSettlementResponse['taker_lock_transaction'] = {
+  transaction_base64: '',
+  recent_blockhash: ''
+};
+
 export function SwapPage() {
   const { connection } = useConnection();
   const { publicKey, signTransaction } = useWallet();
   const { setVisible: setWalletModalVisible } = useWalletModal();
   const [restoredSwap] = useState(() => readPersistedSwapState());
-  const restoredFlowRef = useRef(Boolean(restoredSwap?.quote || restoredSwap?.settlement || restoredSwap?.lock || restoredSwap?.redeem));
-  const restoredQuoteRefreshRef = useRef(Boolean(restoredSwap?.quote && !restoredSwap?.settlement && !restoredSwap?.lock && !restoredSwap?.redeem));
+  const restoredFlowRef = useRef(Boolean(restoredSwap?.quote || restoredSwap?.settlement || restoredSwap?.lock || restoredSwap?.redeem || restoredSwap?.refund));
+  const restoredQuoteRefreshRef = useRef(Boolean(restoredSwap?.quote && !restoredSwap?.settlement && !restoredSwap?.lock && !restoredSwap?.redeem && !restoredSwap?.refund));
   const persistedWalletRef = useRef(restoredSwap?.wallet_address ?? '');
   const [assets, setAssets] = useState<Asset[]>(fallbackAssets);
   const [inputMint, setInputMint] = useState(restoredSwap?.input_mint || assetBySymbol(fallbackAssets, defaultSourceSymbol)?.mint || fallbackAssets[0].mint);
@@ -330,7 +406,17 @@ export function SwapPage() {
   const [settlement, setSettlement] = useState<WalletSettlementResponse | null>(restoredSwap?.settlement ?? null);
   const [lock, setLock] = useState<TradeStepResponse | null>(restoredSwap?.lock ?? null);
   const [redeem, setRedeem] = useState<TradeStepResponse | null>(restoredSwap?.redeem ?? null);
+  const [refund, setRefund] = useState<TradeStepResponse | null>(restoredSwap?.refund ?? null);
   const [preimage, setPreimage] = useState<string | null>(restoredSwap?.preimage ?? null);
+  const [pendingLockSignature, setPendingLockSignature] = useState<string | null>(restoredSwap?.pending_lock_signature ?? null);
+  const [pendingRedeemSignature, setPendingRedeemSignature] = useState<string | null>(restoredSwap?.pending_redeem_signature ?? null);
+  const [pendingRefundSignature, setPendingRefundSignature] = useState<string | null>(restoredSwap?.pending_refund_signature ?? null);
+  const [, bumpSettlementClock] = useState(0);
+  const [walletHistoryOpen, setWalletHistoryOpen] = useState(false);
+  const [walletHistory, setWalletHistory] = useState<RuntimeTradesResponse | null>(null);
+  const [walletHistoryLoading, setWalletHistoryLoading] = useState(false);
+  const [walletHistoryError, setWalletHistoryError] = useState<string | null>(null);
+  const [selectedHistoryProofTrade, setSelectedHistoryProofTrade] = useState<RuntimeTrade | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [terminalFailure, setTerminalFailure] = useState<TerminalFailure | null>(null);
@@ -338,6 +424,7 @@ export function SwapPage() {
   const quoteTimerRef = useRef<number | null>(null);
   const quoteRequestSeqRef = useRef(0);
   const quoteInFlightRef = useRef(false);
+  const resumedTradeRef = useRef<string | null>(null);
 
   const sourceAsset = useMemo(
     () => assets.find((asset) => asset.mint === inputMint) ?? assetBySymbol(assets, defaultSourceSymbol) ?? assetBySymbol(fallbackAssets, defaultSourceSymbol) ?? fallbackAssets[0],
@@ -380,8 +467,22 @@ export function SwapPage() {
     () => (quote?.status === 'rejected' ? quoteRejectionCopy(quote) : null),
     [quote]
   );
-  const flowLocked = Boolean(settlement || lock || redeem);
-  const completedSwap = Boolean(redeem?.settlement_status);
+  const flowLocked = Boolean(settlement || lock || redeem || refund);
+  const completedSwap = Boolean(redeem?.settlement_status || refund?.settlement_status);
+  const refundAvailable = Boolean(
+    settlement?.trade_id &&
+    lock?.settlement_status &&
+    !redeem?.settlement_status &&
+    !refund?.settlement_status &&
+    settlement.expires_at &&
+    new Date(settlement.expires_at).getTime() <= Date.now()
+  );
+  const settlementPrelockExpired = Boolean(
+    settlement?.trade_id &&
+    !lock?.settlement_status &&
+    settlement.expires_at &&
+    new Date(settlement.expires_at).getTime() <= Date.now()
+  );
   const terminalStartOver = Boolean(!lock && !redeem && (terminalFailure || quote?.status === 'rejected'));
   const amountRangeOk = amountRangeValidation?.ok !== false;
   const showSourceRangeError = Boolean(
@@ -400,6 +501,9 @@ export function SwapPage() {
     settlement,
     lock,
     redeem,
+    refund,
+    refundAvailable,
+    settlementPrelockExpired,
     terminalStartOver,
     busy
   });
@@ -413,6 +517,9 @@ export function SwapPage() {
     settlement,
     lock,
     redeem,
+    refund,
+    refundAvailable,
+    settlementPrelockExpired,
     terminalStartOver,
     busy
   });
@@ -440,6 +547,23 @@ export function SwapPage() {
       noticeTimeoutRef.current = null;
     }, noticeTimeoutMs[nextNotice.tone]);
   }, [clearNoticeTimer]);
+
+  const refreshWalletHistory = useCallback(async () => {
+    if (!walletAddress) {
+      setWalletHistory(null);
+      return;
+    }
+
+    setWalletHistoryLoading(true);
+    setWalletHistoryError(null);
+    try {
+      setWalletHistory(await api.walletTrades(walletAddress, 25));
+    } catch (error) {
+      setWalletHistoryError(error instanceof Error ? error.message : 'Unable to load wallet history.');
+    } finally {
+      setWalletHistoryLoading(false);
+    }
+  }, [walletAddress]);
 
   useEffect(() => {
     api.assets()
@@ -472,6 +596,19 @@ export function SwapPage() {
 
   useEffect(() => clearNoticeTimer, [clearNoticeTimer]);
 
+  useEffect(() => {
+    if (!walletAddress) {
+      setWalletHistoryOpen(false);
+      setWalletHistory(null);
+      setSelectedHistoryProofTrade(null);
+      return;
+    }
+
+    if (walletHistoryOpen) {
+      void refreshWalletHistory();
+    }
+  }, [walletAddress, walletHistoryOpen, refreshWalletHistory]);
+
   useEffect(() => () => {
     quoteRequestSeqRef.current += 1;
     clearQuoteTimer();
@@ -482,12 +619,17 @@ export function SwapPage() {
     clearQuoteTimer();
     restoredFlowRef.current = false;
     restoredQuoteRefreshRef.current = false;
+    resumedTradeRef.current = null;
     setQuote(null);
     setQuoteExpired(false);
     setSettlement(null);
     setLock(null);
     setRedeem(null);
+    setRefund(null);
     setPreimage(null);
+    setPendingLockSignature(null);
+    setPendingRedeemSignature(null);
+    setPendingRefundSignature(null);
     setTerminalFailure(null);
     setBusy((currentBusy) => (currentBusy === 'quote' ? null : currentBusy));
   }
@@ -497,6 +639,9 @@ export function SwapPage() {
     setAmount('');
     setOutputMint('');
     writePersistedSwapState(null);
+    if (walletHistoryOpen) {
+      void refreshWalletHistory();
+    }
     showNotice({
       tone: 'success',
       title: 'New swap ready',
@@ -504,12 +649,53 @@ export function SwapPage() {
     });
   }
 
-  function startOverSwap() {
+  async function startOverSwap() {
+    if (settlement?.trade_id && !lock && !redeem && !refund) {
+      if (!preimage) {
+        showNotice({
+          tone: 'warn',
+          title: 'Recovery secret missing',
+          detail: 'Use the original browser state, or let the unused settlement expire.'
+        });
+        return;
+      }
+      setBusy('abandon');
+      showNotice({
+        tone: 'info',
+        title: 'Starting over',
+        detail: 'Abandoning the unused settlement before any funds are locked.'
+      }, { persist: true });
+      try {
+        await api.abandonSettlement(settlement.trade_id, {
+          secret_hash: await hashHexSecret(preimage)
+        });
+        startNewSwap();
+      } catch (error) {
+        showNotice({
+          tone: 'error',
+          title: 'Cannot start over now',
+          detail: error instanceof Error ? error.message : 'Continue this swap or refund after expiry.'
+        });
+      } finally {
+        setBusy(null);
+      }
+      return;
+    }
+
     startNewSwap();
   }
 
   useEffect(() => {
-    if (restoredSwap?.quote || restoredSwap?.settlement || restoredSwap?.lock || restoredSwap?.redeem) {
+    if (
+      restoredSwap?.quote ||
+      restoredSwap?.settlement ||
+      restoredSwap?.lock ||
+      restoredSwap?.redeem ||
+      restoredSwap?.refund ||
+      restoredSwap?.pending_lock_signature ||
+      restoredSwap?.pending_redeem_signature ||
+      restoredSwap?.pending_refund_signature
+    ) {
       showNotice({
         tone: 'info',
         title: 'Swap restored',
@@ -526,7 +712,7 @@ export function SwapPage() {
     }
     if (walletAddress === persistedWalletRef.current) return;
 
-    if (quote || settlement || lock || redeem || preimage) {
+    if (quote || settlement || lock || redeem || refund || preimage) {
       writePersistedSwapState(null);
       resetFlow();
       showNotice({
@@ -536,7 +722,7 @@ export function SwapPage() {
       });
     }
     persistedWalletRef.current = walletAddress;
-  }, [walletAddress, quote, settlement, lock, redeem, preimage, showNotice]);
+  }, [walletAddress, quote, settlement, lock, redeem, refund, preimage, showNotice]);
 
   useEffect(() => {
     const hasStateToRestore = Boolean(
@@ -546,7 +732,11 @@ export function SwapPage() {
       settlement ||
       lock ||
       redeem ||
-      preimage
+      refund ||
+      preimage ||
+      pendingLockSignature ||
+      pendingRedeemSignature ||
+      pendingRefundSignature
     );
 
     if (terminalFailure || quote?.status === 'rejected') {
@@ -575,9 +765,13 @@ export function SwapPage() {
       settlement,
       lock,
       redeem,
-      preimage
+      refund,
+      preimage,
+      pending_lock_signature: pendingLockSignature,
+      pending_redeem_signature: pendingRedeemSignature,
+      pending_refund_signature: pendingRefundSignature
     });
-  }, [walletAddress, inputMint, outputMint, amount, quote, quoteExpired, settlement, lock, redeem, preimage, terminalFailure]);
+  }, [walletAddress, inputMint, outputMint, amount, quote, quoteExpired, settlement, lock, redeem, refund, preimage, pendingLockSignature, pendingRedeemSignature, pendingRefundSignature, terminalFailure]);
 
   useEffect(() => {
     if (!restoredQuoteRefreshRef.current || !walletAddress || !outputAsset || flowLocked) {
@@ -590,6 +784,164 @@ export function SwapPage() {
       return;
     }
   }, [walletAddress, outputAsset, flowLocked]);
+
+  useEffect(() => {
+    if (!settlement?.expires_at || !lock?.settlement_status || redeem?.settlement_status || refund?.settlement_status) {
+      return undefined;
+    }
+
+    const expiresAt = new Date(settlement.expires_at).getTime();
+    if (Number.isNaN(expiresAt)) return undefined;
+
+    const delay = expiresAt - Date.now();
+    if (delay <= 0) {
+      bumpSettlementClock((tick) => tick + 1);
+      return undefined;
+    }
+
+    const timer = window.setTimeout(() => {
+      bumpSettlementClock((tick) => tick + 1);
+    }, delay + 250);
+
+    return () => window.clearTimeout(timer);
+  }, [settlement?.expires_at, lock?.settlement_status, redeem?.settlement_status, refund?.settlement_status]);
+
+  function applyResumeState(response: WalletSettlementResumeResponse) {
+    setSettlement((currentSettlement) => {
+      return {
+        trade_id: response.trade_id,
+        quote_id: response.quote_id,
+        expires_at: response.expires_at ?? currentSettlement?.expires_at,
+        taker_lock_transaction: response.taker_lock_transaction ?? currentSettlement?.taker_lock_transaction ?? emptyWalletTransaction
+      };
+    });
+
+    const signatures = proofSignatures(response);
+    const makerLock = signatureByKind(response, 'maker_lock');
+    const takerLock = signatureByKind(response, 'taker_lock');
+    if (takerLock || makerLock) {
+      setLock({
+        trade_id: response.trade_id,
+        settlement_status: response.settlement_status,
+        maker_lock_signature: makerLock ?? undefined,
+        tx_signatures: signatures
+      });
+    } else {
+      setLock(null);
+    }
+
+    const makerRedeem = signatureByKind(response, 'maker_redeem');
+    const takerRedeem = signatureByKind(response, 'taker_redeem');
+    if (takerRedeem || makerRedeem || response.settlement_status === 'redeemed') {
+      setRedeem({
+        trade_id: response.trade_id,
+        settlement_status: response.settlement_status,
+        maker_redeem_signature: makerRedeem ?? undefined,
+        tx_signatures: signatures
+      });
+    } else {
+      setRedeem(null);
+    }
+
+    const makerRefund = signatureByKind(response, 'maker_refund');
+    const takerRefund = signatureByKind(response, 'taker_refund');
+    if (takerRefund || makerRefund || response.settlement_status === 'refunded') {
+      setRefund({
+        trade_id: response.trade_id,
+        settlement_status: response.settlement_status,
+        maker_refund_signature: makerRefund ?? undefined,
+        tx_signatures: signatures
+      });
+    } else {
+      setRefund(null);
+    }
+  }
+
+  useEffect(() => {
+    if (!settlement?.trade_id || !walletAddress || redeem?.settlement_status || refund?.settlement_status) {
+      return undefined;
+    }
+    if (resumedTradeRef.current === settlement.trade_id) {
+      return undefined;
+    }
+
+    let cancelled = false;
+    const tradeId = settlement.trade_id;
+    resumedTradeRef.current = tradeId;
+
+    async function resumeSettlement() {
+      showNotice({
+        tone: 'info',
+        title: 'Checking settlement state',
+        detail: 'Refreshing recovery state from the runtime.'
+      }, { persist: true });
+
+      try {
+        const resume = await api.resumeSettlement(tradeId);
+        if (cancelled) return;
+        applyResumeState(resume);
+
+        const hasTakerLock = Boolean(signatureByKind(resume, 'taker_lock'));
+        const hasTakerRedeem = Boolean(signatureByKind(resume, 'taker_redeem'));
+        const hasTakerRefund = Boolean(signatureByKind(resume, 'taker_refund'));
+
+        if (pendingLockSignature && !hasTakerLock) {
+          const nextLock = await api.takerLock(tradeId, { signature: pendingLockSignature });
+          if (cancelled) return;
+          setLock(nextLock);
+          setPendingLockSignature(null);
+          showNotice({ tone: 'success', title: 'Lock signature recovered', detail: 'The runtime accepted your submitted lock transaction.' });
+          return;
+        }
+
+        if (pendingRedeemSignature && preimage && !hasTakerRedeem) {
+          const nextRedeem = await api.takerRedeem(tradeId, { preimage, signature: pendingRedeemSignature });
+          if (cancelled) return;
+          setRedeem(nextRedeem);
+          setPendingRedeemSignature(null);
+          showNotice({ tone: 'success', title: 'Redeem signature recovered', detail: 'The swap is complete.' });
+          return;
+        }
+
+        if (pendingRefundSignature && !hasTakerRefund) {
+          const nextRefund = await api.takerRefund(tradeId, { signature: pendingRefundSignature });
+          if (cancelled) return;
+          setRefund(nextRefund);
+          setPendingRefundSignature(null);
+          showNotice({ tone: 'success', title: 'Refund signature recovered', detail: 'Expired funds were returned safely.' });
+          return;
+        }
+
+        showNotice({
+          tone: 'success',
+          title: 'Swap state refreshed',
+          detail: resume.taker_refund_transaction ? 'This expired swap can now be refunded.' : 'Continue from the latest persisted settlement step.'
+        });
+      } catch (error) {
+        if (cancelled) return;
+        showNotice({
+          tone: 'warn',
+          title: 'Could not refresh settlement',
+          detail: error instanceof Error ? error.message : 'The runtime did not return a recovery state.'
+        });
+      }
+    }
+
+    void resumeSettlement();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    settlement?.trade_id,
+    walletAddress,
+    redeem?.settlement_status,
+    refund?.settlement_status,
+    pendingLockSignature,
+    pendingRedeemSignature,
+    pendingRefundSignature,
+    preimage,
+    showNotice
+  ]);
 
   useEffect(() => {
     if (restoredFlowRef.current) {
@@ -660,7 +1012,7 @@ export function SwapPage() {
   }
 
   async function requestQuote(reason: 'auto' | 'refresh' | 'retry') {
-    if (quoteInFlightRef.current || settlement || lock || redeem || !walletAddress || !outputAsset) {
+    if (quoteInFlightRef.current || settlement || lock || redeem || refund || !walletAddress || !outputAsset) {
       return;
     }
 
@@ -746,6 +1098,9 @@ export function SwapPage() {
         taker_wallet: publicKey.toBase58(),
         secret_hash: bytesToHex(hash)
       }));
+      if (walletHistoryOpen) {
+        void refreshWalletHistory();
+      }
       showNotice({ tone: 'success', title: 'Secure settlement ready', detail: 'Your wallet can now lock funds for this swap.' });
     } catch (error) {
       const failure: TerminalFailure = {
@@ -806,9 +1161,16 @@ export function SwapPage() {
         return;
       }
 
-      const signature = await signAndSubmit(settlement.taker_lock_transaction.transaction_base64);
+      const signature = pendingLockSignature ?? await signAndSubmit(settlement.taker_lock_transaction.transaction_base64);
       submittedSignature = signature;
+      if (!pendingLockSignature) {
+        setPendingLockSignature(signature);
+      }
       setLock(await api.takerLock(settlement.trade_id, { signature }));
+      setPendingLockSignature(null);
+      if (walletHistoryOpen) {
+        void refreshWalletHistory();
+      }
       showNotice({ tone: 'success', title: 'Funds locked', detail: 'Maker liquidity is now being reserved for your swap.' });
     } catch (error) {
       const title = walletFailure(error, 'Unable to lock funds.');
@@ -834,14 +1196,30 @@ export function SwapPage() {
     setBusy('redeem');
     showNotice({ tone: 'info', title: 'Completing swap', detail: 'Your wallet may need one final signature.' }, { persist: true });
     try {
-      const prepared = await api.takerRedeem(settlement.trade_id, { preimage });
-      if (!prepared.taker_redeem_transaction) {
+      const prepared = pendingRedeemSignature
+        ? null
+        : await api.takerRedeem(settlement.trade_id, { preimage });
+      if (prepared && !prepared.taker_redeem_transaction) {
         setRedeem(prepared);
+        if (walletHistoryOpen) {
+          void refreshWalletHistory();
+        }
         showNotice({ tone: 'success', title: 'Swap complete', detail: 'The runtime has finalized this trade.' });
         return;
       }
-      const signature = await signAndSubmit(prepared.taker_redeem_transaction.transaction_base64);
+      const transaction = prepared?.taker_redeem_transaction;
+      if (!pendingRedeemSignature && !transaction) {
+        throw new Error('Runtime did not return a redeem transaction.');
+      }
+      const signature = pendingRedeemSignature ?? await signAndSubmit(transaction!.transaction_base64);
+      if (!pendingRedeemSignature) {
+        setPendingRedeemSignature(signature);
+      }
       setRedeem(await api.takerRedeem(settlement.trade_id, { preimage, signature }));
+      setPendingRedeemSignature(null);
+      if (walletHistoryOpen) {
+        void refreshWalletHistory();
+      }
       showNotice({ tone: 'success', title: 'Swap complete', detail: 'Funds exchanged successfully.' });
     } catch (error) {
       showNotice({ tone: 'error', title: walletFailure(error, 'Unable to complete swap.') });
@@ -850,12 +1228,134 @@ export function SwapPage() {
     }
   }
 
+  async function takerRefund() {
+    if (!settlement?.trade_id) return;
+    setBusy('refund');
+    showNotice({ tone: 'info', title: 'Preparing refund', detail: 'Your wallet will reclaim the expired locked funds.' }, { persist: true });
+    try {
+      const prepared = pendingRefundSignature
+        ? null
+        : await api.takerRefund(settlement.trade_id, {});
+      if (prepared && !prepared.taker_refund_transaction) {
+        setRefund(prepared);
+        setPendingRefundSignature(null);
+        showNotice({ tone: 'success', title: 'Refund complete', detail: 'Expired funds were returned safely.' });
+        return;
+      }
+      const transaction = prepared?.taker_refund_transaction;
+      if (!pendingRefundSignature && !transaction) {
+        throw new Error('Runtime did not return a refund transaction.');
+      }
+      const signature = pendingRefundSignature ?? await signAndSubmit(transaction!.transaction_base64);
+      if (!pendingRefundSignature) {
+        setPendingRefundSignature(signature);
+      }
+      setRefund(await api.takerRefund(settlement.trade_id, { signature }));
+      setPendingRefundSignature(null);
+      if (walletHistoryOpen) {
+        void refreshWalletHistory();
+      }
+      showNotice({ tone: 'success', title: 'Refund complete', detail: 'Expired funds were returned safely.' });
+    } catch (error) {
+      showNotice({ tone: 'error', title: walletFailure(error, 'Unable to refund locked funds.') });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  function hydrateHistoryTrade(trade: RuntimeTrade, response: WalletSettlementResumeResponse) {
+    const localPreimage = settlement?.trade_id === trade.trade_id ? preimage : null;
+    const inputAsset = assets.find((asset) => asset.id === trade.input.asset || asset.symbol === trade.input.asset);
+    const outputAssetForTrade = assets.find((asset) => asset.id === trade.output.asset || asset.symbol === trade.output.asset);
+
+    resetFlow();
+    if (inputAsset) setInputMint(inputAsset.mint);
+    if (outputAssetForTrade) setOutputMint(outputAssetForTrade.mint);
+    setAmount(trade.input.display_amount || trade.input.amount_raw);
+    setPreimage(localPreimage);
+    setQuote(null);
+    setQuoteExpired(false);
+    setTerminalFailure(null);
+    persistedWalletRef.current = walletAddress;
+    applyResumeState(response);
+  }
+
+  async function handleHistoryResume(trade: RuntimeTrade) {
+    if (isTerminalTrade(trade)) {
+      setSelectedHistoryProofTrade(trade);
+      return;
+    }
+
+    const hasLocalPreimage = settlement?.trade_id === trade.trade_id && Boolean(preimage);
+    if (!hasLocalPreimage && !isTradeExpired(trade)) {
+      showNotice({
+        tone: 'warn',
+        title: 'Original browser needed',
+        detail: 'This swap can continue only where the browser-local preimage is stored. Locked swaps can be refunded after expiry.'
+      });
+      return;
+    }
+
+    setBusy('resume');
+    showNotice({ tone: 'info', title: 'Resuming swap', detail: 'Refreshing the latest settlement state.' }, { persist: true });
+    try {
+      const resume = await api.resumeSettlement(trade.trade_id);
+      hydrateHistoryTrade(trade, resume);
+      setWalletHistoryOpen(false);
+      showNotice({
+        tone: 'success',
+        title: isTradeExpired(trade) ? 'Refund path ready' : 'Swap restored',
+        detail: isTradeExpired(trade) ? 'The expired lock can now be refunded.' : 'Continue from the latest persisted step.'
+      });
+    } catch (error) {
+      showNotice({
+        tone: 'error',
+        title: 'Unable to resume swap',
+        detail: error instanceof Error ? error.message : undefined
+      });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function handleHistoryRefund(trade: RuntimeTrade) {
+    setBusy('refund');
+    showNotice({ tone: 'info', title: 'Preparing refund', detail: 'Your wallet will reclaim the expired locked funds.' }, { persist: true });
+    try {
+      const prepared = await api.takerRefund(trade.trade_id, {});
+      if (!prepared.taker_refund_transaction) {
+        setRefund(prepared);
+        await refreshWalletHistory();
+        showNotice({ tone: 'success', title: 'Refund complete', detail: 'Expired funds were returned safely.' });
+        return;
+      }
+      const signature = await signAndSubmit(prepared.taker_refund_transaction.transaction_base64);
+      const completedRefund = await api.takerRefund(trade.trade_id, { signature });
+      if (settlement?.trade_id === trade.trade_id) {
+        setRefund(completedRefund);
+        setPendingRefundSignature(null);
+      }
+      await refreshWalletHistory();
+      showNotice({ tone: 'success', title: 'Refund complete', detail: 'Expired funds were returned safely.' });
+    } catch (error) {
+      showNotice({
+        tone: 'error',
+        title: walletFailure(error, 'Unable to refund locked funds.'),
+        detail: error instanceof Error && !isWalletCancellation(error) ? error.message : undefined
+      });
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function handlePrimaryAction() {
-    if (redeem?.settlement_status) return startNewSwap();
+    if (redeem?.settlement_status || refund?.settlement_status) return startNewSwap();
+    if (settlementPrelockExpired) return startOverSwap();
     if (terminalStartOver) return startOverSwap();
     if (!walletAddress) return connectWallet();
     if (quote?.status === 'accepted' && !quoteExpired && !settlement) return startSettlement();
     if (settlement?.trade_id && !lock) return takerLock();
+    if (refundAvailable) return takerRefund();
     if (lock?.settlement_status && !redeem) return takerRedeem();
     if (!outputAsset) {
       showNotice({ tone: 'warn', title: 'Choose a receive asset.' });
@@ -884,9 +1384,22 @@ export function SwapPage() {
           <h1>Firmament</h1>
           <p className="lede">Firm quotes. Managed inventory. Live Solana settlement.</p>
         </div>
-        <button className="wallet-button" onClick={connectWallet}>
-          {walletAddress ? shortValue(walletAddress) : 'Connect wallet'}
-        </button>
+        <div className="wallet-actions">
+          {walletAddress && (
+            <button
+              type="button"
+              className="history-button"
+              onClick={() => setWalletHistoryOpen((open) => !open)}
+              aria-label="Open wallet swap history"
+              title="Wallet history"
+            >
+              <span className="history-glyph" aria-hidden="true" />
+            </button>
+          )}
+          <button className="wallet-button" onClick={connectWallet}>
+            {walletAddress ? shortValue(walletAddress) : 'Connect wallet'}
+          </button>
+        </div>
       </section>
 
       {notice && <NotificationBar notice={notice} />}
@@ -960,6 +1473,17 @@ export function SwapPage() {
             {primaryLabel}
           </button>
 
+          {settlement?.trade_id && !lock && !redeem && !refund && !terminalStartOver && (
+            <button
+              type="button"
+              className="secondary-swap-button"
+              onClick={() => void startOverSwap()}
+              disabled={Boolean(busy)}
+            >
+              Start over
+            </button>
+          )}
+
           {quoteAccepted && !terminalStartOver && (
             <div className={quoteExpired ? 'quote-summary quote-summary-expired' : 'quote-summary'}>
               <span>{quoteExpired ? 'Refreshing expired quote' : 'Rate reserved until'}</span>
@@ -976,8 +1500,31 @@ export function SwapPage() {
           settlement={settlement}
           lock={lock}
           redeem={redeem}
+          refund={refund}
         />
       </section>
+
+      {walletHistoryOpen && walletAddress && (
+        <WalletHistoryDrawer
+          walletAddress={walletAddress}
+          history={walletHistory}
+          loading={walletHistoryLoading}
+          error={walletHistoryError}
+          selectedProofTrade={selectedHistoryProofTrade}
+          currentTradeId={settlement?.trade_id ?? null}
+          hasCurrentPreimage={Boolean(preimage)}
+          busy={busy}
+          onClose={() => {
+            setWalletHistoryOpen(false);
+            setSelectedHistoryProofTrade(null);
+          }}
+          onRefresh={() => void refreshWalletHistory()}
+          onResume={(trade) => void handleHistoryResume(trade)}
+          onRefund={(trade) => void handleHistoryRefund(trade)}
+          onProof={setSelectedHistoryProofTrade}
+          onCloseProof={() => setSelectedHistoryProofTrade(null)}
+        />
+      )}
     </main>
   );
 }
@@ -993,6 +1540,9 @@ function primaryActionLabel({
   settlement,
   lock,
   redeem,
+  refund,
+  refundAvailable,
+  settlementPrelockExpired,
   terminalStartOver,
   busy
 }: {
@@ -1006,6 +1556,9 @@ function primaryActionLabel({
   settlement: WalletSettlementResponse | null;
   lock: TradeStepResponse | null;
   redeem: TradeStepResponse | null;
+  refund: TradeStepResponse | null;
+  refundAvailable: boolean;
+  settlementPrelockExpired: boolean;
   terminalStartOver: boolean;
   busy: string | null;
 }) {
@@ -1013,9 +1566,14 @@ function primaryActionLabel({
   if (busy === 'settlement') return 'Preparing settlement...';
   if (busy === 'lock') return 'Waiting for wallet...';
   if (busy === 'redeem') return 'Completing swap...';
-  if (redeem?.settlement_status) return 'Start new swap';
+  if (busy === 'refund') return 'Refunding funds...';
+  if (busy === 'abandon') return 'Starting over...';
+  if (busy === 'resume') return 'Resuming swap...';
+  if (redeem?.settlement_status || refund?.settlement_status) return 'Start new swap';
+  if (settlementPrelockExpired) return 'Start over';
   if (terminalStartOver) return 'Start over';
   if (!hasWallet) return 'Connect wallet';
+  if (refundAvailable) return 'Refund funds';
   if (lock?.settlement_status) return 'Complete swap';
   if (settlement?.trade_id) return 'Lock funds';
   if (!hasDestination) return 'Choose receive asset';
@@ -1037,6 +1595,9 @@ function primaryActionDisabled({
   settlement,
   lock,
   redeem,
+  refund,
+  refundAvailable,
+  settlementPrelockExpired,
   terminalStartOver,
   busy
 }: {
@@ -1049,13 +1610,18 @@ function primaryActionDisabled({
   settlement: WalletSettlementResponse | null;
   lock: TradeStepResponse | null;
   redeem: TradeStepResponse | null;
+  refund: TradeStepResponse | null;
+  refundAvailable: boolean;
+  settlementPrelockExpired: boolean;
   terminalStartOver: boolean;
   busy: string | null;
 }) {
   if (Boolean(busy)) return true;
-  if (redeem?.settlement_status) return false;
+  if (redeem?.settlement_status || refund?.settlement_status) return false;
+  if (settlementPrelockExpired) return false;
   if (terminalStartOver) return false;
   if (!hasWallet) return false;
+  if (refundAvailable) return false;
   if (lock?.settlement_status || settlement?.trade_id) return false;
   if (quote?.status === 'accepted' && !quoteExpired) return false;
   if (!hasDestination || amountValidation?.ok !== true || !amountRangeOk) return true;
@@ -1260,27 +1826,275 @@ function NotificationBar({ notice }: { notice: Notice }) {
   );
 }
 
+function WalletHistoryDrawer({
+  walletAddress,
+  history,
+  loading,
+  error,
+  selectedProofTrade,
+  currentTradeId,
+  hasCurrentPreimage,
+  busy,
+  onClose,
+  onRefresh,
+  onResume,
+  onRefund,
+  onProof,
+  onCloseProof
+}: {
+  walletAddress: string;
+  history: RuntimeTradesResponse | null;
+  loading: boolean;
+  error: string | null;
+  selectedProofTrade: RuntimeTrade | null;
+  currentTradeId: string | null;
+  hasCurrentPreimage: boolean;
+  busy: string | null;
+  onClose: () => void;
+  onRefresh: () => void;
+  onResume: (trade: RuntimeTrade) => void;
+  onRefund: (trade: RuntimeTrade) => void;
+  onProof: (trade: RuntimeTrade) => void;
+  onCloseProof: () => void;
+}) {
+  const trades = history?.trades ?? [];
+
+  return (
+    <aside className="wallet-history-drawer" aria-label="Wallet swap history">
+      <div className="wallet-history-head">
+        <div>
+          <p className="eyebrow">Your swaps</p>
+          <h2>{shortValue(walletAddress)}</h2>
+        </div>
+        <div className="wallet-history-actions">
+          <button type="button" onClick={onRefresh} disabled={loading || Boolean(busy)}>
+            Refresh
+          </button>
+          <button type="button" onClick={onClose}>
+            Close
+          </button>
+        </div>
+      </div>
+
+      {loading && !history ? (
+        <div className="wallet-history-empty">Loading wallet history...</div>
+      ) : error && !history ? (
+        <div className="wallet-history-empty">{error}</div>
+      ) : trades.length === 0 ? (
+        <div className="wallet-history-empty">No swaps for this wallet yet.</div>
+      ) : (
+        <div className="wallet-history-list">
+          {trades.map((trade) => (
+            <WalletHistoryRow
+              key={trade.trade_id}
+              trade={trade}
+              currentTradeId={currentTradeId}
+              hasCurrentPreimage={hasCurrentPreimage}
+              busy={busy}
+              onResume={onResume}
+              onRefund={onRefund}
+              onProof={onProof}
+            />
+          ))}
+        </div>
+      )}
+
+      {selectedProofTrade && (
+        <WalletHistoryProof trade={selectedProofTrade} onClose={onCloseProof} />
+      )}
+    </aside>
+  );
+}
+
+function WalletHistoryRow({
+  trade,
+  currentTradeId,
+  hasCurrentPreimage,
+  busy,
+  onResume,
+  onRefund,
+  onProof
+}: {
+  trade: RuntimeTrade;
+  currentTradeId: string | null;
+  hasCurrentPreimage: boolean;
+  busy: string | null;
+  onResume: (trade: RuntimeTrade) => void;
+  onRefund: (trade: RuntimeTrade) => void;
+  onProof: (trade: RuntimeTrade) => void;
+}) {
+  const terminal = isTerminalTrade(trade);
+  const expired = isTradeExpired(trade);
+  const locked = Boolean(tradeSignatureByKind(trade, 'taker_lock')) || trade.settlement_status === 'initiated';
+  const canResumeHere = currentTradeId === trade.trade_id && hasCurrentPreimage;
+  const txCount = trade.tx_signatures?.length ?? 0;
+
+  let action = (
+    <button type="button" onClick={() => onResume(trade)} disabled={Boolean(busy)}>
+      Resume
+    </button>
+  );
+  let note: string | null = null;
+
+  if (terminal) {
+    action = (
+      <button type="button" onClick={() => onProof(trade)}>
+        Network proof
+      </button>
+    );
+  } else if (locked && expired) {
+    action = (
+      <button type="button" onClick={() => onRefund(trade)} disabled={Boolean(busy)}>
+        Refund
+      </button>
+    );
+  } else if (!canResumeHere) {
+    action = (
+      <button type="button" onClick={() => onResume(trade)} disabled>
+        Resume
+      </button>
+    );
+    note = locked
+      ? 'Complete in original browser. Refund after expiry.'
+      : 'Resume from the browser that created this swap.';
+  }
+
+  return (
+    <article className={terminal ? 'wallet-history-row' : 'wallet-history-row wallet-history-row-active'}>
+      <div className="wallet-history-row-main">
+        <strong>{historyAmount(trade.input)} {'->'} {historyAmount(trade.output)}</strong>
+        <span>{tradeStatusLabel(trade.settlement_status)}</span>
+      </div>
+      <div className="wallet-history-row-meta">
+        <span>{shortValue(trade.trade_id)}</span>
+        <span>{txCount ? `${txCount} txs` : 'No tx yet'}</span>
+        <span>{formatHistoryTime(trade.created_at)}</span>
+      </div>
+      {note && <p>{note}</p>}
+      <div className="wallet-history-row-action">{action}</div>
+    </article>
+  );
+}
+
+function WalletHistoryProof({ trade, onClose }: { trade: RuntimeTrade; onClose: () => void }) {
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const copiedTimer = useRef<number | null>(null);
+  const signatures = tradeProofSignatures(trade);
+
+  useEffect(() => {
+    return () => {
+      if (copiedTimer.current !== null) {
+        window.clearTimeout(copiedTimer.current);
+      }
+    };
+  }, []);
+
+  async function copySignature(proof: TradeSignature, index: number) {
+    const copiedKey = `${proof.kind}-${index}`;
+    await copyToClipboard(proof.signature);
+    setCopiedId(copiedKey);
+    if (copiedTimer.current !== null) {
+      window.clearTimeout(copiedTimer.current);
+    }
+    copiedTimer.current = window.setTimeout(() => setCopiedId(null), 1_400);
+  }
+
+  return (
+    <section className="wallet-history-proof" aria-label="Wallet trade network proof">
+      <div className="wallet-history-proof-head">
+        <div>
+          <p className="eyebrow">Network proof</p>
+          <h3>{historyAmount(trade.input)} {'->'} {historyAmount(trade.output)}</h3>
+        </div>
+        <button type="button" onClick={onClose}>Close</button>
+      </div>
+      <div className="wallet-history-proof-grid">
+        <div>
+          <span>Status</span>
+          <strong>{tradeStatusLabel(trade.settlement_status)}</strong>
+        </div>
+        <div>
+          <span>Trade</span>
+          <strong title={trade.trade_id}>{shortValue(trade.trade_id)}</strong>
+        </div>
+        <div>
+          <span>Quote</span>
+          <strong title={trade.quote_id}>{shortValue(trade.quote_id)}</strong>
+        </div>
+      </div>
+      {signatures.length === 0 ? (
+        <p className="wallet-history-empty">No Solana signatures have landed for this swap yet.</p>
+      ) : (
+        <div className="wallet-history-proof-list">
+          {signatures.map((proof, index) => {
+            const copied = copiedId === `${proof.kind}-${index}`;
+            return (
+              <div className="wallet-history-proof-row" key={`${proof.kind}-${proof.signature}-${index}`}>
+                <div>
+                  <span>{tradeStatusLabel(proof.kind)}</span>
+                  <a href={`https://solscan.io/tx/${proof.signature}`} target="_blank" rel="noreferrer">
+                    {shortValue(proof.signature)}
+                  </a>
+                </div>
+                <button
+                  type="button"
+                  className={copied ? 'copy-proof-button copied' : 'copy-proof-button'}
+                  onClick={() => copySignature(proof, index)}
+                  aria-label={`Copy ${proof.kind} transaction signature ${shortValue(proof.signature)}`}
+                  title={copied ? 'Copied' : 'Copy signature'}
+                >
+                  <span className="copy-glyph" aria-hidden="true" />
+                  <span className="copy-proof-label">{copied ? 'Copied' : 'Copy'}</span>
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function formatHistoryTime(value?: string) {
+  if (!value) return 'Pending';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return 'Pending';
+  return new Intl.DateTimeFormat(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit'
+  }).format(date);
+}
+
 function BehindScenesPanel({
   quote,
   quoteExpired,
   settlement,
   lock,
-  redeem
+  redeem,
+  refund
 }: {
   quote: RfqResponse | null;
   quoteExpired: boolean;
   settlement: WalletSettlementResponse | null;
   lock: TradeStepResponse | null;
   redeem: TradeStepResponse | null;
+  refund: TradeStepResponse | null;
 }) {
   const [copiedProofId, setCopiedProofId] = useState<string | null>(null);
   const copiedTimer = useRef<number | null>(null);
-  const makerProof = lock?.maker_lock_signature ?? redeem?.maker_redeem_signature;
-  const networkProofs = [
+  const makerProof = lock?.maker_lock_signature ?? redeem?.maker_redeem_signature ?? refund?.maker_refund_signature;
+  const networkProofs = Array.from(new Set([
     ...(lock?.tx_signatures ?? []),
     ...(redeem?.tx_signatures ?? []),
+    ...(refund?.tx_signatures ?? []),
     ...(makerProof ? [makerProof] : [])
-  ].filter(Boolean);
+  ].filter(Boolean)));
+  const terminalDone = Boolean(redeem?.settlement_status || refund?.settlement_status);
+  const terminalDetail = refund?.settlement_status
+    ? 'Expired funds were returned safely.'
+    : 'Funds exchanged successfully.';
 
   useEffect(() => {
     return () => {
@@ -1309,7 +2123,7 @@ function BehindScenesPanel({
       <ProofRow done={quote?.status === 'accepted' && !quoteExpired} title="Quote locked" detail="This rate is reserved for a short time." />
       <ProofRow done={Boolean(settlement?.trade_id)} title="Secure settlement ready" detail="Your wallet signs each fund movement." />
       <ProofRow done={Boolean(lock?.maker_lock_signature)} title="Liquidity reserved" detail="Maker liquidity is committed for this swap." />
-      <ProofRow done={Boolean(redeem?.settlement_status)} title="Swap complete" detail="Funds exchanged successfully." />
+      <ProofRow done={terminalDone} title="Swap complete" detail={terminalDetail} />
 
       <div className="network-proof">
         <span>Network proof</span>

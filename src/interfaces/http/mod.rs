@@ -10,7 +10,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::rejection::{JsonRejection, PathRejection};
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
@@ -27,11 +27,13 @@ use tracing::{error, info, warn};
 use crate::application::rfq;
 use crate::application::runtime::{
     AppState, RuntimeHandle, RuntimeOrchestrator, RuntimePersistence, RuntimeTrade,
+    WalletSettlementResume, WalletTakerRefundResult,
 };
 use crate::config::{
     AppConfig, AssetConfig, FIRMAMENT_ADMIN_PASSWORD_HASHES_ENV, FIRMAMENT_ADMIN_SESSION_SECRET_ENV,
 };
 use crate::domain::assets::{AssetError, AssetRegistry, SOL_ID};
+use crate::domain::settlement::SettlementPhase;
 use crate::domain::types::{
     AmountRaw, AssetId, MintAddress, QuoteId, RejectionReason, SettlementStatus, TradeId,
 };
@@ -41,12 +43,13 @@ use crate::interfaces::http::auth::{
     verify_admin_password,
 };
 use crate::interfaces::http::types::{
-    AdminLoginRequest, AdminMeResponse, AdminSummaryResponse, AmountView, AssetResponse, ErrorBody,
-    ErrorResponse, HtlcAcceptanceTerms, IntegrationStatus, LedgerSummary, NextAction, PairResponse,
-    PairsResponse, QuoteAcceptResponse, RfqPair, RfqRequest, RfqResponse, RuntimeEventsResponse,
-    RuntimeStateResponse, TakerLockRequest, TakerLockResponse, TakerRedeemRequest,
-    TakerRedeemResponse, TradeAmounts, TradeResponse, WalletSettlementRequest,
-    WalletSettlementResponse,
+    AbandonRequest, AdminLoginRequest, AdminMeResponse, AdminSummaryResponse, AmountView,
+    AssetResponse, ErrorBody, ErrorResponse, HtlcAcceptanceTerms, IntegrationStatus, LedgerSummary,
+    NextAction, PairResponse, PairsResponse, QuoteAcceptResponse, RfqPair, RfqRequest, RfqResponse,
+    RuntimeEventsResponse, RuntimeStateResponse, TakerLockRequest, TakerLockResponse,
+    TakerRedeemRequest, TakerRedeemResponse, TakerRefundRequest, TakerRefundResponse, TradeAmounts,
+    TradeResponse, WalletSettlementRequest, WalletSettlementResponse,
+    WalletSettlementResumeResponse,
 };
 use std::str::FromStr;
 
@@ -81,6 +84,26 @@ pub trait RfqApiService: Send + Sync {
         trade_id: TradeId,
         request: TakerRedeemRequest,
     ) -> Result<TakerRedeemResponse, ApiError>;
+
+    /// Resume an active connected-wallet settlement.
+    async fn resume_wallet_settlement(
+        &self,
+        trade_id: TradeId,
+    ) -> Result<WalletSettlementResumeResponse, ApiError>;
+
+    /// Abandon a pre-lock connected-wallet settlement.
+    async fn abandon_wallet_settlement(
+        &self,
+        trade_id: TradeId,
+        request: AbandonRequest,
+    ) -> Result<TradeResponse, ApiError>;
+
+    /// Prepare or record a connected-wallet taker refund.
+    async fn taker_refund(
+        &self,
+        trade_id: TradeId,
+        request: TakerRefundRequest,
+    ) -> Result<TakerRefundResponse, ApiError>;
 
     /// Read the current trade shell.
     async fn trade(&self, trade_id: TradeId) -> Result<TradeResponse, ApiError>;
@@ -153,6 +176,12 @@ fn build_router(context: Arc<ApiContext>) -> Router {
         .route(
             "/v1/trades/{trade_id}/taker-redeem",
             post(post_taker_redeem),
+        )
+        .route("/v1/trades/{trade_id}/resume", post(post_trade_resume))
+        .route("/v1/trades/{trade_id}/abandon", post(post_trade_abandon))
+        .route(
+            "/v1/trades/{trade_id}/taker-refund",
+            post(post_taker_refund),
         )
         .route("/v1/assets", get(get_assets))
         .route("/v1/pairs", get(get_pairs))
@@ -312,6 +341,49 @@ impl RfqApiService for DisabledRfqApiService {
         trade_id: TradeId,
         request: TakerRedeemRequest,
     ) -> Result<TakerRedeemResponse, ApiError> {
+        let _ = trade_id;
+        let _ = request;
+        Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "orchestrator_unavailable",
+            self.message.as_ref(),
+            Vec::new(),
+        ))
+    }
+
+    async fn resume_wallet_settlement(
+        &self,
+        trade_id: TradeId,
+    ) -> Result<WalletSettlementResumeResponse, ApiError> {
+        let _ = trade_id;
+        Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "orchestrator_unavailable",
+            self.message.as_ref(),
+            Vec::new(),
+        ))
+    }
+
+    async fn abandon_wallet_settlement(
+        &self,
+        trade_id: TradeId,
+        request: AbandonRequest,
+    ) -> Result<TradeResponse, ApiError> {
+        let _ = trade_id;
+        let _ = request;
+        Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "orchestrator_unavailable",
+            self.message.as_ref(),
+            Vec::new(),
+        ))
+    }
+
+    async fn taker_refund(
+        &self,
+        trade_id: TradeId,
+        request: TakerRefundRequest,
+    ) -> Result<TakerRefundResponse, ApiError> {
         let _ = trade_id;
         let _ = request;
         Err(ApiError::new(
@@ -559,6 +631,85 @@ impl RfqApiService for OrchestratorRfqApiService {
         })
     }
 
+    async fn resume_wallet_settlement(
+        &self,
+        trade_id: TradeId,
+    ) -> Result<WalletSettlementResumeResponse, ApiError> {
+        let response = self
+            .orchestrator
+            .resume_wallet_settlement(trade_id)
+            .await
+            .map_err(ApiError::from_app_error)?;
+        Ok(wallet_resume_to_api_response(response))
+    }
+
+    async fn abandon_wallet_settlement(
+        &self,
+        trade_id: TradeId,
+        request: AbandonRequest,
+    ) -> Result<TradeResponse, ApiError> {
+        let trade = self
+            .orchestrator
+            .abandon_wallet_settlement(trade_id, request.secret_hash)
+            .await
+            .map_err(ApiError::from_app_error)?;
+        let ledger_summary = ledger_summary_to_api(
+            &self
+                .orchestrator
+                .ledger_summary()
+                .map_err(ApiError::from_app_error)?,
+        );
+        Ok(trade_to_api_response(
+            trade,
+            ledger_summary,
+            self.orchestrator.config(),
+            self.orchestrator.run_id(),
+        ))
+    }
+
+    async fn taker_refund(
+        &self,
+        trade_id: TradeId,
+        request: TakerRefundRequest,
+    ) -> Result<TakerRefundResponse, ApiError> {
+        let ledger_summary = || {
+            self.orchestrator
+                .ledger_summary()
+                .map(|summary| ledger_summary_to_api(&summary))
+                .map_err(ApiError::from_app_error)
+        };
+
+        let Some(signature) = request.signature else {
+            let prepared = self
+                .orchestrator
+                .prepare_wallet_taker_refund(trade_id)
+                .await
+                .map_err(ApiError::from_app_error)?;
+            let next_action = NextAction {
+                kind: "submit_taker_refund".to_owned(),
+                method: "POST".to_owned(),
+                path: format!("/v1/trades/{}/taker-refund", prepared.trade_id),
+            };
+            return Ok(TakerRefundResponse {
+                trade_id: prepared.trade_id,
+                settlement_status: SettlementStatus::Initiated,
+                taker_refund_transaction: Some(prepared.taker_refund_transaction),
+                maker_refund_signature: None,
+                tx_signatures: Vec::new(),
+                ledger_summary: ledger_summary()?,
+                integration_status: IntegrationStatus::RuntimeOrchestrated,
+                next_action: Some(next_action),
+            });
+        };
+
+        let completed = self
+            .orchestrator
+            .complete_wallet_taker_refund(trade_id, signature)
+            .await
+            .map_err(ApiError::from_app_error)?;
+        Ok(taker_refund_to_api_response(completed, ledger_summary()?))
+    }
+
     async fn trade(&self, trade_id: TradeId) -> Result<TradeResponse, ApiError> {
         let trade = self
             .orchestrator
@@ -575,6 +726,7 @@ impl RfqApiService for OrchestratorRfqApiService {
             trade,
             ledger_summary,
             self.orchestrator.config(),
+            self.orchestrator.run_id(),
         ))
     }
 
@@ -659,6 +811,50 @@ async fn post_taker_redeem(
     let Json(request) = payload.map_err(|error| ApiError::from_json_rejection(&error))?;
     let response = context.service.taker_redeem(trade_id, request).await?;
     let status = if response.taker_redeem_transaction.is_some() {
+        StatusCode::OK
+    } else {
+        StatusCode::ACCEPTED
+    };
+    Ok((status, Json(response)).into_response())
+}
+
+async fn post_trade_resume(
+    State(context): State<Arc<ApiContext>>,
+    path: Result<Path<TradeId>, PathRejection>,
+) -> Result<Response<Body>, ApiError> {
+    let Path(trade_id) = path.map_err(|error| ApiError::from_path_rejection(&error))?;
+    let response = context.service.resume_wallet_settlement(trade_id).await?;
+    Ok(Json(response).into_response())
+}
+
+async fn post_trade_abandon(
+    State(context): State<Arc<ApiContext>>,
+    path: Result<Path<TradeId>, PathRejection>,
+    payload: Result<Json<AbandonRequest>, JsonRejection>,
+) -> Result<Response<Body>, ApiError> {
+    let Path(trade_id) = path.map_err(|error| ApiError::from_path_rejection(&error))?;
+    let Json(request) = payload.map_err(|error| ApiError::from_json_rejection(&error))?;
+    let response = context
+        .service
+        .abandon_wallet_settlement(trade_id, request)
+        .await?;
+    Ok((StatusCode::ACCEPTED, Json(response)).into_response())
+}
+
+async fn post_taker_refund(
+    State(context): State<Arc<ApiContext>>,
+    path: Result<Path<TradeId>, PathRejection>,
+    body: Bytes,
+) -> Result<Response<Body>, ApiError> {
+    let Path(trade_id) = path.map_err(|error| ApiError::from_path_rejection(&error))?;
+    let request = if body.is_empty() {
+        TakerRefundRequest::default()
+    } else {
+        serde_json::from_slice::<TakerRefundRequest>(&body)
+            .map_err(|error| ApiError::bad_request("invalid_json", error.to_string()))?
+    };
+    let response = context.service.taker_refund(trade_id, request).await?;
+    let status = if response.taker_refund_transaction.is_some() {
         StatusCode::OK
     } else {
         StatusCode::ACCEPTED
@@ -1100,7 +1296,7 @@ impl ApiError {
 
     pub(crate) fn from_app_error(error: AppError) -> Self {
         match &error {
-            AppError::Validation(_) | AppError::Unsupported(_) => {
+            AppError::Validation(_) | AppError::Unsupported(_) | AppError::Conflict(_) => {
                 warn!(%error, "API request rejected by application layer");
             }
             AppError::ExternalService { service, .. } => {
@@ -1116,6 +1312,9 @@ impl ApiError {
 
         match error {
             AppError::Validation(message) => Self::bad_request("validation_failed", message),
+            AppError::Conflict(message) => {
+                Self::new(StatusCode::CONFLICT, "state_conflict", message, Vec::new())
+            }
             AppError::Unsupported(message) => Self::new(
                 StatusCode::NOT_IMPLEMENTED,
                 "unsupported_operation",
@@ -1455,6 +1654,7 @@ fn trade_to_api_response(
     trade: RuntimeTrade,
     ledger_summary: LedgerSummary,
     config: &AppConfig,
+    current_run: crate::domain::types::RuntimeRunId,
 ) -> TradeResponse {
     let input_view = build_amount_view(
         &trade.input_amount.asset,
@@ -1466,10 +1666,21 @@ fn trade_to_api_response(
         trade.output_amount.amount_raw,
         config,
     );
+    let created_at = trade.created_at.to_string();
     TradeResponse {
         trade_id: trade.trade_id,
+        quote_id: trade.quote_id,
+        run_id: trade.run_id.to_string(),
+        current_run: trade.run_id == current_run,
+        taker_wallet: trade
+            .taker_wallet
+            .as_ref()
+            .map(|wallet| wallet.as_str().to_owned()),
+        expires_at: trade.expires_at.map(|expires_at| expires_at.to_string()),
+        created_at,
         settlement_status: trade.settlement_status,
-        tx_signatures: trade.tx_signatures,
+        tx_signatures: trade.tx_signatures.clone(),
+        tx_signature_kinds: trade.tx_signature_kinds.clone(),
         amounts: TradeAmounts {
             input: Some(trade.input_amount),
             output: Some(trade.output_amount),
@@ -1478,6 +1689,74 @@ fn trade_to_api_response(
         output: Some(output_view),
         ledger_summary,
         integration_status: IntegrationStatus::RuntimeOrchestrated,
+    }
+}
+
+fn wallet_resume_to_api_response(
+    response: WalletSettlementResume,
+) -> WalletSettlementResumeResponse {
+    let next_action = if response.taker_lock_transaction.is_some() {
+        Some(NextAction {
+            kind: "submit_taker_lock".to_owned(),
+            method: "POST".to_owned(),
+            path: format!("/v1/trades/{}/taker-lock", response.trade_id),
+        })
+    } else if response.taker_refund_transaction.is_some() {
+        Some(NextAction {
+            kind: "submit_taker_refund".to_owned(),
+            method: "POST".to_owned(),
+            path: format!("/v1/trades/{}/taker-refund", response.trade_id),
+        })
+    } else {
+        Some(NextAction {
+            kind: "submit_taker_redeem".to_owned(),
+            method: "POST".to_owned(),
+            path: format!("/v1/trades/{}/taker-redeem", response.trade_id),
+        })
+    };
+    WalletSettlementResumeResponse {
+        trade_id: response.trade_id,
+        quote_id: response.quote_id,
+        run_id: response.run_id.to_string(),
+        settlement_phase: settlement_phase_to_api(response.settlement_phase).to_owned(),
+        settlement_status: response.settlement_status,
+        taker_lock_transaction: response.taker_lock_transaction,
+        taker_redeem_transaction: response.taker_redeem_transaction,
+        taker_refund_transaction: response.taker_refund_transaction,
+        tx_signatures: response.tx_signatures,
+        tx_signature_kinds: response.tx_signature_kinds,
+        expires_at: response.expires_at,
+        integration_status: IntegrationStatus::RuntimeOrchestrated,
+        next_action,
+    }
+}
+
+fn settlement_phase_to_api(phase: SettlementPhase) -> &'static str {
+    match phase {
+        SettlementPhase::Pending => "pending",
+        SettlementPhase::Started => "started",
+        SettlementPhase::TakerLocked => "taker_locked",
+        SettlementPhase::MakerLocked => "maker_locked",
+        SettlementPhase::TakerRedeemed => "taker_redeemed",
+        SettlementPhase::Complete => "complete",
+        SettlementPhase::Refunded => "refunded",
+        SettlementPhase::Failed => "failed",
+    }
+}
+
+fn taker_refund_to_api_response(
+    completed: WalletTakerRefundResult,
+    ledger_summary: LedgerSummary,
+) -> TakerRefundResponse {
+    TakerRefundResponse {
+        trade_id: completed.trade.trade_id,
+        settlement_status: completed.trade.settlement_status,
+        taker_refund_transaction: None,
+        maker_refund_signature: completed.maker_refund_signature,
+        tx_signatures: completed.trade.tx_signatures,
+        ledger_summary,
+        integration_status: IntegrationStatus::RuntimeOrchestrated,
+        next_action: None,
     }
 }
 

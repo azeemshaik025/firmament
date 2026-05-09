@@ -102,6 +102,28 @@ curl -s "http://127.0.0.1:5050/v1/trades/<trade-id>" \
   | jq . > "demo-evidence/$DEMO_RUN_ID/api/trade-<trade-id>.json"
 ```
 
+For an in-progress wallet settlement, capture recovery and expiry behavior:
+
+```bash
+curl -s -X POST "http://127.0.0.1:5050/v1/trades/<trade-id>/resume" \
+  | jq . > "demo-evidence/$DEMO_RUN_ID/api/trade-<trade-id>-resume.json"
+
+curl -s -X POST "http://127.0.0.1:5050/v1/trades/<trade-id>/taker-refund" \
+  -H 'content-type: application/json' \
+  -d '{}' \
+  | jq . > "demo-evidence/$DEMO_RUN_ID/api/trade-<trade-id>-refund-prepare.json"
+```
+
+Only call the refund route after the taker lock is on chain and the HTLC expiry
+has passed. Use the abandon route only before any lock signature:
+
+```bash
+curl -s -X POST "http://127.0.0.1:5050/v1/trades/<trade-id>/abandon" \
+  -H 'content-type: application/json' \
+  -d '{"secret_hash":"<browser-generated-secret-hash>"}' \
+  | jq . > "demo-evidence/$DEMO_RUN_ID/api/trade-<trade-id>-abandon.json"
+```
+
 ## Screenshots
 
 Save screenshots under `demo-evidence/$DEMO_RUN_ID/screenshots/`.
@@ -111,6 +133,9 @@ Capture:
 - `/app` before quote
 - `/app` after accepted or rejected RFQ
 - `/app` during wallet settlement
+- `/app` after a browser refresh restores an in-progress settlement
+- `/app` wallet-specific trade history drawer for the connected wallet
+- `/app` refund-after-expiry state if the refund path is part of the run
 - `/app/runtime` after startup
 - `/app/runtime` after settlement or operator checks
 
@@ -148,6 +173,14 @@ sqlite3 "demo-evidence/$DEMO_RUN_ID/sqlite/runtime.sqlite" \
   > "demo-evidence/$DEMO_RUN_ID/sqlite/ledger-transaction-count.txt"
 
 sqlite3 "demo-evidence/$DEMO_RUN_ID/sqlite/runtime.sqlite" \
+  'SELECT COUNT(*) FROM runtime_trades;' \
+  > "demo-evidence/$DEMO_RUN_ID/sqlite/runtime-trade-count.txt"
+
+sqlite3 "demo-evidence/$DEMO_RUN_ID/sqlite/runtime.sqlite" \
+  'SELECT COUNT(*) FROM runtime_wallet_settlements;' \
+  > "demo-evidence/$DEMO_RUN_ID/sqlite/runtime-wallet-settlement-count.txt"
+
+sqlite3 "demo-evidence/$DEMO_RUN_ID/sqlite/runtime.sqlite" \
   'SELECT account_type, asset_id, qualifier, SUM(CAST(amount_raw AS INTEGER)) AS balance_raw
    FROM ledger_entries
    GROUP BY account_type, asset_id, qualifier
@@ -158,6 +191,7 @@ sqlite3 "demo-evidence/$DEMO_RUN_ID/sqlite/runtime.sqlite" \
 Check:
 
 - ledger transactions have entries
+- accepted trades create durable trade or active settlement records
 - entries net to zero per transaction and asset
 - public ledger endpoint reports `healthy: true`
 
@@ -166,7 +200,9 @@ Check:
 Before sharing, search for secrets:
 
 ```bash
-rg -n 'PRIVATE_KEY|KEYPAIR|SECRET|TOKEN|API_KEY|RPC_URL|WALLET_ID' "demo-evidence/$DEMO_RUN_ID"
+rg -n 'PRIVATE_KEY|KEYPAIR|SECRET|TOKEN|API_KEY|RPC_URL|WALLET_ID|preimage' "demo-evidence/$DEMO_RUN_ID"
 ```
 
-Manually inspect every match. Redact private keys, keypair JSON, API keys, credentialed RPC URLs, and unapproved Gateway identifiers.
+Manually inspect every match. Redact private keys, keypair JSON, API keys,
+credentialed RPC URLs, unapproved Gateway identifiers, and any browser-local
+preimage accidentally captured in screenshots or logs.

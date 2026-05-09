@@ -81,6 +81,12 @@ curl http://127.0.0.1:5050/v1/runtime/ledger
 curl 'http://127.0.0.1:5050/v1/runtime/trades?limit=10'
 ```
 
+`/v1/runtime/trades` is the global recent-trades feed used by the Runtime tab.
+Trade rows and active wallet-settlement state are durable SQLite records, so
+terminal trades and resumable active settlements can survive a backend restart.
+Pass `wallet=<address>` to scope the feed to the connected taker wallet, which
+is what the swap page history drawer uses.
+
 ## 6. Request a friendly RFQ
 
 The friendly request shape uses asset symbols and a decimal `amount`.
@@ -108,6 +114,14 @@ responses include a user-facing `message` and a `suggested_action`.
 
 The legacy mint/raw-amount request shape (`input_mint`, `output_mint`,
 `input_amount_raw`) keeps working for existing API consumers.
+
+During browser-wallet settlement, the app can recover an active trade with
+`POST /v1/trades/{trade_id}/resume`. Before any on-chain lock signature, it can
+abandon the unused settlement with `POST /v1/trades/{trade_id}/abandon` by
+sending the browser-held `secret_hash`. Expired pre-lock settlements are marked
+failed instead of receiving fresh lock transactions. After a locked settlement
+expires, it can prepare and record a refund with
+`POST /v1/trades/{trade_id}/taker-refund`.
 
 ## Live RFQ mode
 

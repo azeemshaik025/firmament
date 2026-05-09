@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 
 use crate::domain::events::RuntimeEvent;
+use crate::domain::settlement::SettlementLeg;
 use crate::domain::types::{
     AmountRaw, AssetId, AssetPair, BalanceSnapshot, ExternalHtlcInitiation, GatewayReceipt,
     GatewayRefillRequest, HtlcInitiation, HtlcReceipt, LedgerMovement, ReferencePrice,
@@ -150,6 +151,74 @@ pub trait HtlcClient: Send + Sync {
         Err(AppError::unsupported(
             "HTLC client does not support browser redeem recording",
         ))
+    }
+
+    /// Build an unsigned browser-funded HTLC refund transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the transaction cannot be constructed.
+    async fn build_external_refund(
+        &self,
+        trade_id: TradeId,
+        funder: WalletAddress,
+    ) -> Result<UnsignedWalletTransaction, AppError> {
+        let _ = trade_id;
+        let _ = funder;
+        Err(AppError::unsupported(
+            "HTLC client does not support browser refund construction",
+        ))
+    }
+
+    /// Record a submitted browser refund transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the signature cannot be validated or confirmed.
+    async fn record_external_refund(
+        &self,
+        trade_id: TradeId,
+        signature: TxSignature,
+    ) -> Result<HtlcReceipt, AppError> {
+        let _ = trade_id;
+        let _ = signature;
+        Err(AppError::unsupported(
+            "HTLC client does not support browser refund recording",
+        ))
+    }
+
+    /// Refund one specific server-owned HTLC leg.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the leg cannot be refunded.
+    async fn refund_leg(
+        &self,
+        trade_id: TradeId,
+        leg: SettlementLeg,
+    ) -> Result<HtlcReceipt, AppError> {
+        let _ = leg;
+        self.refund(trade_id).await
+    }
+
+    /// Restore known settlement legs into an adapter's in-memory cache after
+    /// process restart without submitting any transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the adapter cannot reconstruct leg metadata.
+    async fn restore_wallet_settlement(
+        &self,
+        taker_lock: ExternalHtlcInitiation,
+        maker_lock: HtlcInitiation,
+        taker_locked: bool,
+        maker_locked: bool,
+    ) -> Result<(), AppError> {
+        let _ = taker_lock;
+        let _ = maker_lock;
+        let _ = taker_locked;
+        let _ = maker_locked;
+        Ok(())
     }
 
     /// Redeem an HTLC escrow using a preimage.

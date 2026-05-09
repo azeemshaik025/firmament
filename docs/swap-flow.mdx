@@ -34,6 +34,8 @@ If protocol workers are disabled, RFQ routes return an unavailable error.
 ## 2. Start wallet settlement
 
 The browser creates a SHA-256 preimage commitment and calls wallet settlement for the accepted quote.
+Only the hash is sent to the backend at this step. The preimage itself stays in
+the browser until redeem time and is never persisted by the server.
 
 The backend creates a trade and returns an unsigned taker lock transaction. The
 response includes a `next_action` pointing at the taker-lock route.
@@ -48,14 +50,36 @@ The runtime can then reserve maker liquidity and advance settlement state.
 
 The taker reveals the preimage. If no redeem signature is supplied, the backend returns an unsigned taker redeem transaction. If a signature is supplied, the backend records the final taker redeem step.
 
-## 5. Read trade status
+## 5. Recover, abandon, or refund
+
+Trade and active wallet-settlement state are persisted in SQLite. A browser
+refresh or backend restart can call `POST /v1/trades/{trade_id}/resume` to get
+the latest persisted phase, known signatures, and the next unsigned wallet
+transaction when one is available.
+
+Before funds are locked, the app can call `POST /v1/trades/{trade_id}/abandon`
+with the browser-held `secret_hash` to mark the unused settlement failed and
+start over. If the quote expires before lock, resume/lock attempts fail the
+settlement instead of rebuilding a stale transaction. After the taker lock is on
+chain and the HTLC expiry has passed, the app can call
+`POST /v1/trades/{trade_id}/taker-refund` first without a signature to prepare
+the refund transaction, then again with the connected wallet's submitted refund
+signature.
+
+When the browser submits a lock, redeem, or refund signature, the backend waits
+for confirmation and validates the matching HTLC account effect before moving
+the settlement forward.
+
+## 6. Read trade status
 
 The trade route returns:
 
 - settlement status
-- observed transaction signatures
+- observed transaction signatures and typed signature kinds
 - legacy `amounts` envelope plus display-friendly `input` and `output` views
   (asset, amount, amount_raw, decimals, mint)
 - ledger summary
 
-Use it as the user-facing status source for a settlement.
+Use it as the user-facing status source for a settlement. The Runtime tab shows
+global recent trades; the swap page's wallet history drawer shows trades
+attributed to the connected wallet/browser.

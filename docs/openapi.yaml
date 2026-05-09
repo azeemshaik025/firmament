@@ -222,7 +222,11 @@ paths:
     post:
       tags: [Settlement]
       summary: Start wallet settlement
-      description: Creates a trade for an accepted quote and returns an unsigned taker lock transaction for browser-wallet signing.
+      description: |
+        Creates a durable trade for an accepted quote and returns an unsigned
+        taker lock transaction for browser-wallet signing. The request carries
+        only the browser-generated hash commitment; the preimage stays in the
+        browser until redeem time and is not persisted by the server.
       operationId: postWalletSettlement
       parameters:
         - $ref: "#/components/parameters/QuoteId"
@@ -244,6 +248,67 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/WalletSettlementResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+  /v1/trades/{trade_id}/resume:
+    post:
+      tags: [Settlement]
+      summary: Resume wallet settlement
+      description: |
+        Returns the latest persisted settlement phase for an active wallet
+        settlement after a browser refresh or backend restart. When the next
+        step needs a browser signature, the response includes a fresh unsigned
+        wallet transaction and a `next_action`.
+      operationId: postTradeResume
+      parameters:
+        - $ref: "#/components/parameters/TradeId"
+      responses:
+        "200":
+          description: Active settlement recovery state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WalletSettlementResumeResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+  /v1/trades/{trade_id}/abandon:
+    post:
+      tags: [Settlement]
+      summary: Abandon unused settlement
+      description: |
+        Marks an active wallet settlement failed before any on-chain lock
+        signature exists. Once funds are locked, callers should resume the
+        trade or use the refund-after-expiry path instead. The request must
+        include the browser-held `secret_hash` for the settlement; this is a
+        lightweight pre-lock guard, not wallet-message authentication.
+      operationId: postTradeAbandon
+      parameters:
+        - $ref: "#/components/parameters/TradeId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AbandonRequest"
+            examples:
+              abandon:
+                value:
+                  secret_hash: "1212121212121212121212121212121212121212121212121212121212121212"
+      responses:
+        "202":
+          description: Settlement abandoned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TradeResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
         "404":
@@ -316,6 +381,47 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/TakerRedeemResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/trades/{trade_id}/taker-refund:
+    post:
+      tags: [Settlement]
+      summary: Prepare or record taker refund
+      description: |
+        Prepares the unsigned taker refund transaction when the request body is
+        empty or omits a signature. Malformed JSON returns `400 invalid_json`.
+        Records the connected wallet's refund signature when a signature is
+        supplied. This path is for expired locked settlements.
+      operationId: postTakerRefund
+      parameters:
+        - $ref: "#/components/parameters/TradeId"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TakerRefundRequest"
+            examples:
+              prepareRefund:
+                value: {}
+              recordRefund:
+                value:
+                  signature: 3Rf2Kq8nV7mC6bX5zP4rT3yU2iO1pL9sA8dF7gH6jK5lM4nB
+      responses:
+        "200":
+          description: Unsigned taker refund transaction prepared.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TakerRefundResponse"
+        "202":
+          description: Taker refund recorded and settlement finalized.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TakerRefundResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
         "404":
@@ -404,7 +510,10 @@ paths:
     get:
       tags: [Runtime]
       summary: Get recent runtime trades
-      description: Returns recent in-memory trade summaries, newest first. Limit defaults to 10 and is capped at 100.
+      description: |
+        Returns global recent trade summaries, newest first. Limit defaults to
+        10 and is capped at 100. Terminal trades and active settlement recovery
+        rows are backed by SQLite.
       operationId: getRuntimeTrades
       parameters:
         - name: limit
@@ -416,6 +525,12 @@ paths:
             minimum: 1
             maximum: 100
             default: 10
+        - name: wallet
+          in: query
+          required: false
+          description: Optional taker wallet filter used by the swap page wallet-history drawer.
+          schema:
+            type: string
       responses:
         "200":
           description: Recent trade summaries.
@@ -783,7 +898,15 @@ components:
         secret_hash:
           type: string
           pattern: "^[0-9a-fA-F]{64}$"
-          description: Hex-encoded SHA-256 preimage commitment generated by the browser.
+          description: Hex-encoded SHA-256 preimage commitment generated by the browser. The preimage itself remains browser-local until redeem time.
+    AbandonRequest:
+      type: object
+      required: [secret_hash]
+      properties:
+        secret_hash:
+          type: string
+          pattern: "^[0-9a-fA-F]{64}$"
+          description: Browser-held hash commitment for the unused pre-lock settlement.
     WalletSettlementResponse:
       type: object
       required:
@@ -809,6 +932,67 @@ components:
           $ref: "#/components/schemas/IntegrationStatus"
         next_action:
           $ref: "#/components/schemas/NextAction"
+    WalletSettlementResumeResponse:
+      type: object
+      required:
+        - trade_id
+        - quote_id
+        - run_id
+        - settlement_phase
+        - settlement_status
+        - taker_lock_transaction
+        - taker_redeem_transaction
+        - taker_refund_transaction
+        - tx_signatures
+        - tx_signature_kinds
+        - expires_at
+        - integration_status
+      properties:
+        trade_id:
+          type: string
+          format: uuid
+        quote_id:
+          type: string
+          format: uuid
+        run_id:
+          type: string
+          format: uuid
+          description: Runtime invocation that created the settlement.
+        settlement_phase:
+          type: string
+          enum: [pending, started, taker_locked, maker_locked, taker_redeemed, complete, refunded, failed]
+        settlement_status:
+          $ref: "#/components/schemas/SettlementStatus"
+        taker_lock_transaction:
+          anyOf:
+            - $ref: "#/components/schemas/UnsignedWalletTransaction"
+            - type: "null"
+        taker_redeem_transaction:
+          anyOf:
+            - $ref: "#/components/schemas/UnsignedWalletTransaction"
+            - type: "null"
+        taker_refund_transaction:
+          anyOf:
+            - $ref: "#/components/schemas/UnsignedWalletTransaction"
+            - type: "null"
+        tx_signatures:
+          type: array
+          items:
+            $ref: "#/components/schemas/TxSignature"
+        tx_signature_kinds:
+          type: array
+          items:
+            $ref: "#/components/schemas/TradeSignature"
+        expires_at:
+          type: string
+          format: date-time
+        integration_status:
+          $ref: "#/components/schemas/IntegrationStatus"
+        next_action:
+          description: Next wallet action when another signature is needed.
+          anyOf:
+            - $ref: "#/components/schemas/NextAction"
+            - type: "null"
     TakerLockRequest:
       type: object
       required: [signature]
@@ -849,7 +1033,7 @@ components:
         preimage:
           type: string
           pattern: "^[0-9a-fA-F]{64}$"
-          description: Hex-encoded preimage revealed at redeem time.
+          description: Hex-encoded preimage revealed at redeem time. The server uses it to redeem HTLC legs and does not persist it.
         signature:
           $ref: "#/components/schemas/TxSignature"
     TakerRedeemResponse:
@@ -889,13 +1073,19 @@ components:
           anyOf:
             - $ref: "#/components/schemas/NextAction"
             - type: "null"
-    TradeResponse:
+    TakerRefundRequest:
+      type: object
+      properties:
+        signature:
+          $ref: "#/components/schemas/TxSignature"
+    TakerRefundResponse:
       type: object
       required:
         - trade_id
         - settlement_status
+        - taker_refund_transaction
+        - maker_refund_signature
         - tx_signatures
-        - amounts
         - ledger_summary
         - integration_status
       properties:
@@ -904,10 +1094,79 @@ components:
           format: uuid
         settlement_status:
           $ref: "#/components/schemas/SettlementStatus"
+        taker_refund_transaction:
+          anyOf:
+            - $ref: "#/components/schemas/UnsignedWalletTransaction"
+            - type: "null"
+        maker_refund_signature:
+          anyOf:
+            - $ref: "#/components/schemas/TxSignature"
+            - type: "null"
         tx_signatures:
           type: array
           items:
             $ref: "#/components/schemas/TxSignature"
+        ledger_summary:
+          $ref: "#/components/schemas/LedgerSummary"
+        integration_status:
+          $ref: "#/components/schemas/IntegrationStatus"
+        next_action:
+          description: Present while the prepared refund still needs wallet submission.
+          anyOf:
+            - $ref: "#/components/schemas/NextAction"
+            - type: "null"
+    TradeResponse:
+      type: object
+      required:
+        - trade_id
+        - quote_id
+        - run_id
+        - current_run
+        - created_at
+        - settlement_status
+        - tx_signatures
+        - tx_signature_kinds
+        - amounts
+        - ledger_summary
+        - integration_status
+      properties:
+        trade_id:
+          type: string
+          format: uuid
+        quote_id:
+          type: string
+          format: uuid
+        run_id:
+          type: string
+          format: uuid
+          description: Runtime invocation that created the trade.
+        current_run:
+          type: boolean
+          description: Whether the trade belongs to the currently running backend process.
+        taker_wallet:
+          description: Taker wallet that requested the trade when attribution is known.
+          anyOf:
+            - $ref: "#/components/schemas/WalletAddress"
+            - type: "null"
+        expires_at:
+          description: HTLC expiry timestamp when known.
+          anyOf:
+            - type: string
+              format: date-time
+            - type: "null"
+        created_at:
+          type: string
+          format: date-time
+        settlement_status:
+          $ref: "#/components/schemas/SettlementStatus"
+        tx_signatures:
+          type: array
+          items:
+            $ref: "#/components/schemas/TxSignature"
+        tx_signature_kinds:
+          type: array
+          items:
+            $ref: "#/components/schemas/TradeSignature"
         amounts:
           $ref: "#/components/schemas/TradeAmounts"
         input:
@@ -1033,7 +1292,7 @@ components:
           example: "1.000000"
     TradesResponse:
       type: object
-      required: [total_count, successful_count, trades]
+      required: [total_count, successful_count, active_count, refunded_count, failed_count, trades]
       properties:
         total_count:
           type: integer
@@ -1042,13 +1301,25 @@ components:
           type: integer
           minimum: 0
           description: Count of trades whose settlement status is redeemed.
+        active_count:
+          type: integer
+          minimum: 0
+          description: Count of active wallet settlements not yet terminal.
+        refunded_count:
+          type: integer
+          minimum: 0
+          description: Count of trades whose settlement status is refunded.
+        failed_count:
+          type: integer
+          minimum: 0
+          description: Count of trades whose settlement status is failed.
         trades:
           type: array
           items:
             $ref: "#/components/schemas/TradeSummary"
     TradeSummary:
       type: object
-      required: [trade_id, quote_id, settlement_status, input, output, tx_signatures]
+      required: [trade_id, quote_id, run_id, current_run, created_at, settlement_status, input, output, tx_signatures]
       properties:
         trade_id:
           type: string
@@ -1056,6 +1327,26 @@ components:
         quote_id:
           type: string
           format: uuid
+        run_id:
+          type: string
+          format: uuid
+        current_run:
+          type: boolean
+          description: Whether the trade belongs to the currently running backend process.
+        taker_wallet:
+          description: Taker wallet that requested the trade when attribution is known.
+          anyOf:
+            - $ref: "#/components/schemas/WalletAddress"
+            - type: "null"
+        expires_at:
+          description: HTLC expiry timestamp when known.
+          anyOf:
+            - type: string
+              format: date-time
+            - type: "null"
+        created_at:
+          type: string
+          format: date-time
         settlement_status:
           $ref: "#/components/schemas/SettlementStatus"
         input:

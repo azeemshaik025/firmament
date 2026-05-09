@@ -37,9 +37,21 @@ The quote engine combines reference price, spread, inventory skew, fees, and min
 
 The risk gate checks supported assets, supported pairs, notional caps, stale prices, allowlist policy, and available inventory.
 
-Settlement uses the browser wallet for taker signatures. The backend tracks trade state, observed signatures, and maker-side actions. Legacy local-signing taker keypairs exist for tests; they are not required for the web app.
+Settlement uses the browser wallet for taker signatures. The backend tracks
+trade state, observed signatures, and maker-side actions, and persists active
+wallet settlements so the app can recover after a browser refresh or backend
+restart. Legacy local-signing taker keypairs exist for tests; they are not
+required for the web app.
 
-SQLite stores ledger and P&L data. The public runtime endpoints expose derived ledger balances and recent trade summaries without wallet addresses or secrets.
+SQLite stores ledger, P&L, terminal trade summaries, and active settlement
+recovery state. The public runtime endpoints expose derived ledger balances and
+global recent trade summaries; trade rows include taker-wallet attribution when
+the browser-wallet flow supplied it. Ledger endpoints do not expose wallet
+addresses or secrets.
+
+The browser keeps the settlement preimage locally until redeem time. The server
+stores the hash commitment and signatures it needs to recover settlement state,
+but it does not persist the preimage.
 
 Jupiter and Circle Gateway are live adapters. They run only when protocol workers and required credentials are configured.
 

@@ -101,13 +101,30 @@ export type WalletSettlementResponse = {
   next_action?: NextAction;
 };
 
+export type WalletSettlementResumeResponse = {
+  trade_id: string;
+  quote_id: string;
+  run_id: string;
+  settlement_phase: string;
+  settlement_status: string;
+  taker_lock_transaction?: UnsignedWalletTransaction | null;
+  taker_redeem_transaction?: UnsignedWalletTransaction | null;
+  taker_refund_transaction?: UnsignedWalletTransaction | null;
+  tx_signatures?: string[];
+  tx_signature_kinds?: TradeSignature[];
+  expires_at?: string;
+  next_action?: NextAction | null;
+};
+
 export type TradeStepResponse = {
   trade_id: string;
   settlement_status: string;
   maker_lock_signature?: string;
   maker_redeem_signature?: string;
+  maker_refund_signature?: string;
   tx_signatures?: string[];
   taker_redeem_transaction?: UnsignedWalletTransaction;
+  taker_refund_transaction?: UnsignedWalletTransaction;
   next_action?: NextAction;
 };
 
@@ -197,6 +214,11 @@ export type TradeAmount = {
 export type RuntimeTrade = {
   trade_id: string;
   quote_id: string;
+  run_id?: string;
+  current_run?: boolean;
+  taker_wallet?: string;
+  expires_at?: string;
+  created_at?: string;
   settlement_status: string;
   input: TradeAmount;
   output: TradeAmount;
@@ -206,6 +228,9 @@ export type RuntimeTrade = {
 export type RuntimeTradesResponse = {
   total_count: number;
   successful_count: number;
+  active_count?: number;
+  refunded_count?: number;
+  failed_count?: number;
   trades: RuntimeTrade[];
 };
 
@@ -255,7 +280,15 @@ export const api = {
     const query = accountType ? `?account_type=${encodeURIComponent(accountType)}` : '';
     return request<RuntimeLedgerResponse>(`/v1/runtime/ledger${query}`);
   },
-  runtimeTrades: (limit = 10) => request<RuntimeTradesResponse>(`/v1/runtime/trades?limit=${limit}`),
+  runtimeTrades: (limit = 10, wallet?: string) => {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (wallet) params.set('wallet', wallet);
+    return request<RuntimeTradesResponse>(`/v1/runtime/trades?${params.toString()}`);
+  },
+  walletTrades: (wallet: string, limit = 25) => {
+    const params = new URLSearchParams({ limit: String(limit), wallet });
+    return request<RuntimeTradesResponse>(`/v1/runtime/trades?${params.toString()}`);
+  },
   requestRfq: (payload: RfqRequest) => request<RfqResponse>('/v1/rfq', {
     method: 'POST',
     body: JSON.stringify(payload)
@@ -264,11 +297,22 @@ export const api = {
     method: 'POST',
     body: JSON.stringify(payload)
   }),
+  resumeSettlement: (tradeId: string) => request<WalletSettlementResumeResponse>(`/v1/trades/${tradeId}/resume`, {
+    method: 'POST'
+  }),
+  abandonSettlement: (tradeId: string, payload: { secret_hash: string }) => request<unknown>(`/v1/trades/${tradeId}/abandon`, {
+    method: 'POST',
+    body: JSON.stringify(payload)
+  }),
   takerLock: (tradeId: string, payload: { signature: string }) => request<TradeStepResponse>(`/v1/trades/${tradeId}/taker-lock`, {
     method: 'POST',
     body: JSON.stringify(payload)
   }),
   takerRedeem: (tradeId: string, payload: { preimage: string; signature?: string }) => request<TradeStepResponse>(`/v1/trades/${tradeId}/taker-redeem`, {
+    method: 'POST',
+    body: JSON.stringify(payload)
+  }),
+  takerRefund: (tradeId: string, payload: { signature?: string }) => request<TradeStepResponse>(`/v1/trades/${tradeId}/taker-refund`, {
     method: 'POST',
     body: JSON.stringify(payload)
   })

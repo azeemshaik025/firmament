@@ -3,10 +3,13 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
+use rusqlite::{OptionalExtension, params};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use tokio::sync::RwLock;
+use uuid::Uuid;
 
 use crate::adapters::persistence::db::Db;
 use crate::adapters::persistence::ledger::{
@@ -36,11 +39,13 @@ use crate::domain::inventory::{
     InventoryPolicy, InventorySnapshot as ValuedInventorySnapshot, raw_to_units,
 };
 use crate::domain::quote_engine::InventorySnapshot as QuoteInventorySnapshot;
-use crate::domain::settlement::{SettlementTerms, TwoSidedSettlement};
+use crate::domain::settlement::{
+    SettlementLeg, SettlementPhase, SettlementTerms, TwoSidedSettlement,
+};
 use crate::domain::types::{
     AmountRaw, AssetId, BalanceSnapshot, ExecutionPath, ExternalHtlcInitiation,
-    GatewayRefillRequest, QuoteId, SettlementStatus, TokenAmount, TradeId, TxSignature,
-    UnsignedWalletTransaction, WalletAddress, WalletRole,
+    GatewayRefillRequest, QuoteId, RuntimeRunId, SettlementStatus, TokenAmount, TradeId,
+    TxSignature, UnsignedWalletTransaction, WalletAddress, WalletRole,
 };
 use crate::error::{AppError, AppResult};
 use crate::ports::{BalanceReader, GatewayClient, HtlcClient, PriceProvider, SwapExecutor};
@@ -199,6 +204,14 @@ pub struct RuntimeTrade {
     pub quote_id: QuoteId,
     /// Runtime trade identifier.
     pub trade_id: TradeId,
+    /// Runtime invocation that originally created this trade.
+    pub run_id: RuntimeRunId,
+    /// Browser wallet that requested the quote when attribution is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub taker_wallet: Option<WalletAddress>,
+    /// HTLC expiry for wallet settlements when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<OffsetDateTime>,
     /// Latest settlement status.
     pub settlement_status: SettlementStatus,
     /// Solana signatures observed during settlement.
@@ -216,6 +229,21 @@ pub struct RuntimeTrade {
     pub output_amount: TokenAmount,
     /// Resolved execution path. In-memory only — not persisted across restart.
     pub execution_path: ExecutionPath,
+}
+
+/// Aggregate counts for persisted and active runtime trades.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeTradeCounts {
+    /// Every terminal or active trade known to the runtime.
+    pub total_count: usize,
+    /// Terminal trades whose status is redeemed.
+    pub successful_count: usize,
+    /// Active wallet settlements not yet terminal.
+    pub active_count: usize,
+    /// Terminal trades whose status is refunded.
+    pub refunded_count: usize,
+    /// Terminal trades whose status is failed.
+    pub failed_count: usize,
 }
 
 /// Response returned when a browser-wallet settlement is started.
@@ -262,7 +290,52 @@ pub struct WalletTakerRedeemResult {
     pub maker_redeem_signature: Option<TxSignature>,
 }
 
-#[derive(Debug, Clone)]
+/// Response returned when a browser-wallet settlement is resumed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletSettlementResume {
+    /// Trade being resumed.
+    pub trade_id: TradeId,
+    /// Quote that created this settlement.
+    pub quote_id: QuoteId,
+    /// Runtime run that originally created this settlement.
+    pub run_id: RuntimeRunId,
+    /// Current pure settlement phase.
+    pub settlement_phase: SettlementPhase,
+    /// Coarse settlement status used by existing API/UI surfaces.
+    pub settlement_status: SettlementStatus,
+    /// Fresh taker lock transaction when the taker has not locked funds yet.
+    pub taker_lock_transaction: Option<UnsignedWalletTransaction>,
+    /// Fresh taker redeem transaction when a preimage was supplied separately.
+    pub taker_redeem_transaction: Option<UnsignedWalletTransaction>,
+    /// Fresh taker refund transaction once the taker lock is refundable.
+    pub taker_refund_transaction: Option<UnsignedWalletTransaction>,
+    /// Known raw signatures.
+    pub tx_signatures: Vec<TxSignature>,
+    /// Known typed signatures.
+    pub tx_signature_kinds: Vec<TradeSignature>,
+    /// Settlement expiry inherited from the quote.
+    pub expires_at: OffsetDateTime,
+}
+
+/// Response returned when a browser asks for a refund transaction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletTakerRefundPreparation {
+    /// Trade being refunded.
+    pub trade_id: TradeId,
+    /// Unsigned taker refund transaction for the connected wallet to sign.
+    pub taker_refund_transaction: UnsignedWalletTransaction,
+}
+
+/// Response returned when a browser taker refund signature is recorded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletTakerRefundResult {
+    /// Final runtime trade record.
+    pub trade: RuntimeTrade,
+    /// Maker refund signature submitted by the backend, when a maker leg was live.
+    pub maker_refund_signature: Option<TxSignature>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct WalletSettlementState {
     quote: FirmQuote,
     settlement: TwoSidedSettlement,
@@ -270,6 +343,7 @@ struct WalletSettlementState {
     taker_wallet: WalletAddress,
     tx_signatures: Vec<TxSignature>,
     tx_signature_kinds: Vec<TradeSignature>,
+    run_id: RuntimeRunId,
     created_at: OffsetDateTime,
 }
 
@@ -584,6 +658,230 @@ impl RuntimePersistence {
         })
     }
 
+    /// Persist a terminal trade and its typed signatures.
+    ///
+    /// # Errors
+    ///
+    /// Returns a persistence error when SQLite or serialization fails.
+    pub fn save_trade(&self, trade: &RuntimeTrade) -> AppResult<()> {
+        let trade_json = serde_json::to_string(trade)
+            .map_err(|error| AppError::persistence(format!("serialize runtime trade: {error}")))?;
+        let execution_path_json = serde_json::to_string(&trade.execution_path)
+            .map_err(|error| AppError::persistence(format!("serialize execution path: {error}")))?;
+        let created_at = format_runtime_timestamp(trade.created_at)?;
+        let updated_at = format_runtime_timestamp(OffsetDateTime::now_utc())?;
+        self.db.with_connection_mut(|connection| {
+            let transaction = connection
+                .transaction()
+                .map_err(crate::adapters::persistence::db::sqlite_error)?;
+            transaction
+                .execute(
+                    "INSERT INTO runtime_trades (
+                        trade_id, quote_id, run_id, taker_wallet, settlement_status,
+                        input_asset, input_amount_raw, output_asset, output_amount_raw,
+                        execution_path_json, trade_json, created_at, updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                     ON CONFLICT(trade_id) DO UPDATE SET
+                        quote_id = excluded.quote_id,
+                        run_id = excluded.run_id,
+                        taker_wallet = excluded.taker_wallet,
+                        settlement_status = excluded.settlement_status,
+                        input_asset = excluded.input_asset,
+                        input_amount_raw = excluded.input_amount_raw,
+                        output_asset = excluded.output_asset,
+                        output_amount_raw = excluded.output_amount_raw,
+                        execution_path_json = excluded.execution_path_json,
+                        trade_json = excluded.trade_json,
+                        created_at = excluded.created_at,
+                        updated_at = excluded.updated_at",
+                    params![
+                        trade.trade_id.to_string(),
+                        trade.quote_id.to_string(),
+                        trade.run_id.to_string(),
+                        trade.taker_wallet.as_ref().map(WalletAddress::as_str),
+                        settlement_status_label(trade.settlement_status),
+                        trade.input_amount.asset.as_str(),
+                        trade.input_amount.amount_raw.as_u64().to_string(),
+                        trade.output_amount.asset.as_str(),
+                        trade.output_amount.amount_raw.as_u64().to_string(),
+                        execution_path_json,
+                        trade_json,
+                        created_at,
+                        updated_at,
+                    ],
+                )
+                .map_err(crate::adapters::persistence::db::sqlite_error)?;
+            transaction
+                .execute(
+                    "DELETE FROM runtime_trade_signatures WHERE trade_id = ?1",
+                    params![trade.trade_id.to_string()],
+                )
+                .map_err(crate::adapters::persistence::db::sqlite_error)?;
+            for signature in &trade.tx_signature_kinds {
+                transaction
+                    .execute(
+                        "INSERT OR IGNORE INTO runtime_trade_signatures
+                         (id, trade_id, signature_kind, signature, created_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                        params![
+                            Uuid::now_v7().to_string(),
+                            trade.trade_id.to_string(),
+                            trade_signature_kind_label(signature.kind),
+                            signature.signature.as_str(),
+                            updated_at,
+                        ],
+                    )
+                    .map_err(crate::adapters::persistence::db::sqlite_error)?;
+            }
+            transaction
+                .commit()
+                .map_err(crate::adapters::persistence::db::sqlite_error)
+        })
+    }
+
+    /// Load a terminal trade by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns a persistence error when SQLite or deserialization fails.
+    pub fn trade(&self, trade_id: TradeId) -> AppResult<Option<RuntimeTrade>> {
+        self.db.with_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT trade_json FROM runtime_trades WHERE trade_id = ?1",
+                    params![trade_id.to_string()],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(crate::adapters::persistence::db::sqlite_error)?
+                .map(|json| runtime_trade_from_json(&json))
+                .transpose()
+        })
+    }
+
+    /// Load every terminal trade.
+    ///
+    /// # Errors
+    ///
+    /// Returns a persistence error when SQLite or deserialization fails.
+    pub fn load_trades(&self) -> AppResult<Vec<RuntimeTrade>> {
+        self.db.with_connection(|connection| {
+            let mut statement = connection
+                .prepare("SELECT trade_json FROM runtime_trades ORDER BY created_at DESC")
+                .map_err(crate::adapters::persistence::db::sqlite_error)?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(crate::adapters::persistence::db::sqlite_error)?;
+            let mut trades = Vec::new();
+            for row in rows {
+                trades.push(runtime_trade_from_json(
+                    &row.map_err(crate::adapters::persistence::db::sqlite_error)?,
+                )?);
+            }
+            Ok(trades)
+        })
+    }
+
+    /// Persist an active browser-wallet settlement.
+    ///
+    /// # Errors
+    ///
+    /// Returns a persistence error when SQLite or serialization fails.
+    fn save_wallet_settlement(&self, state: &WalletSettlementState) -> AppResult<()> {
+        let state_json = serde_json::to_string(state).map_err(|error| {
+            AppError::persistence(format!("serialize wallet settlement state: {error}"))
+        })?;
+        let created_at = format_runtime_timestamp(state.created_at)?;
+        let updated_at = format_runtime_timestamp(OffsetDateTime::now_utc())?;
+        self.db.with_connection_mut(|connection| {
+            connection
+                .execute(
+                    "INSERT INTO runtime_wallet_settlements (
+                        trade_id, quote_id, run_id, taker_wallet, settlement_phase, expires_at,
+                        input_asset, input_amount_raw, output_asset, output_amount_raw,
+                        state_json, created_at, updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                     ON CONFLICT(trade_id) DO UPDATE SET
+                        quote_id = excluded.quote_id,
+                        run_id = excluded.run_id,
+                        taker_wallet = excluded.taker_wallet,
+                        settlement_phase = excluded.settlement_phase,
+                        expires_at = excluded.expires_at,
+                        input_asset = excluded.input_asset,
+                        input_amount_raw = excluded.input_amount_raw,
+                        output_asset = excluded.output_asset,
+                        output_amount_raw = excluded.output_amount_raw,
+                        state_json = excluded.state_json,
+                        created_at = excluded.created_at,
+                        updated_at = excluded.updated_at",
+                    params![
+                        state.settlement.terms.trade_id.to_string(),
+                        state.quote.quote_id.to_string(),
+                        state.run_id.to_string(),
+                        state.taker_wallet.as_str(),
+                        settlement_phase_label(state.settlement.phase),
+                        format_runtime_timestamp(state.settlement.terms.expires_at)?,
+                        state.quote.input_amount.asset.as_str(),
+                        state.quote.input_amount.amount_raw.as_u64().to_string(),
+                        state.quote.output_amount.asset.as_str(),
+                        state.quote.output_amount.amount_raw.as_u64().to_string(),
+                        state_json,
+                        created_at,
+                        updated_at,
+                    ],
+                )
+                .map(|_| ())
+                .map_err(crate::adapters::persistence::db::sqlite_error)
+        })
+    }
+
+    /// Delete an active wallet settlement after terminalization.
+    ///
+    /// # Errors
+    ///
+    /// Returns a persistence error when SQLite fails.
+    fn delete_wallet_settlement(&self, trade_id: TradeId) -> AppResult<()> {
+        self.db.with_connection_mut(|connection| {
+            connection
+                .execute(
+                    "DELETE FROM runtime_wallet_settlements WHERE trade_id = ?1",
+                    params![trade_id.to_string()],
+                )
+                .map(|_| ())
+                .map_err(crate::adapters::persistence::db::sqlite_error)
+        })
+    }
+
+    /// Load active browser-wallet settlements.
+    ///
+    /// # Errors
+    ///
+    /// Returns a persistence error when SQLite or deserialization fails.
+    fn load_wallet_settlements(&self) -> AppResult<Vec<WalletSettlementState>> {
+        self.db.with_connection(|connection| {
+            let mut statement = connection
+                .prepare(
+                    "SELECT state_json FROM runtime_wallet_settlements ORDER BY created_at DESC",
+                )
+                .map_err(crate::adapters::persistence::db::sqlite_error)?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(crate::adapters::persistence::db::sqlite_error)?;
+            let mut states = Vec::new();
+            for row in rows {
+                let json = row.map_err(crate::adapters::persistence::db::sqlite_error)?;
+                states.push(
+                    serde_json::from_str::<WalletSettlementState>(&json).map_err(|error| {
+                        AppError::persistence(format!(
+                            "deserialize wallet settlement state: {error}"
+                        ))
+                    })?,
+                );
+            }
+            Ok(states)
+        })
+    }
+
     fn consume_pnl(&self, event: &RuntimeEvent) -> AppResult<usize> {
         match event {
             RuntimeEvent::Swap(SwapEvent::PriceObserved { price, .. }) => {
@@ -620,6 +918,185 @@ impl RuntimePersistence {
             _ => Ok(0),
         }
     }
+}
+
+fn runtime_trade_from_json(json: &str) -> AppResult<RuntimeTrade> {
+    serde_json::from_str(json)
+        .map_err(|error| AppError::persistence(format!("deserialize runtime trade: {error}")))
+}
+
+fn format_runtime_timestamp(timestamp: OffsetDateTime) -> AppResult<String> {
+    timestamp
+        .format(&Rfc3339)
+        .map_err(|error| AppError::persistence(format!("format timestamp: {error}")))
+}
+
+fn settlement_status_label(status: SettlementStatus) -> &'static str {
+    match status {
+        SettlementStatus::Pending => "pending",
+        SettlementStatus::Initiated => "initiated",
+        SettlementStatus::Redeemed => "redeemed",
+        SettlementStatus::Refunded => "refunded",
+        SettlementStatus::Failed => "failed",
+    }
+}
+
+fn settlement_phase_label(phase: SettlementPhase) -> &'static str {
+    match phase {
+        SettlementPhase::Pending => "pending",
+        SettlementPhase::Started => "started",
+        SettlementPhase::TakerLocked => "taker_locked",
+        SettlementPhase::MakerLocked => "maker_locked",
+        SettlementPhase::TakerRedeemed => "taker_redeemed",
+        SettlementPhase::Complete => "complete",
+        SettlementPhase::Refunded => "refunded",
+        SettlementPhase::Failed => "failed",
+    }
+}
+
+fn trade_signature_kind_label(kind: TradeSignatureKind) -> &'static str {
+    match kind {
+        TradeSignatureKind::TakerLock => "taker_lock",
+        TradeSignatureKind::TakerRedeem => "taker_redeem",
+        TradeSignatureKind::TakerRefund => "taker_refund",
+        TradeSignatureKind::MakerLock => "maker_lock",
+        TradeSignatureKind::MakerRedeem => "maker_redeem",
+        TradeSignatureKind::MakerRefund => "maker_refund",
+        TradeSignatureKind::GatewayBurn => "gateway_burn",
+        TradeSignatureKind::GatewayMint => "gateway_mint",
+        TradeSignatureKind::JupiterSwap => "jupiter_swap",
+    }
+}
+
+fn load_terminal_trades_for_startup(
+    persistence: &RuntimePersistence,
+) -> HashMap<TradeId, RuntimeTrade> {
+    match persistence.load_trades() {
+        Ok(trades) => trades
+            .into_iter()
+            .map(|trade| (trade.trade_id, trade))
+            .collect(),
+        Err(error) => {
+            tracing::warn!(?error, "failed to load persisted terminal trades");
+            HashMap::new()
+        }
+    }
+}
+
+fn load_active_wallet_settlements_for_startup(
+    persistence: &RuntimePersistence,
+) -> HashMap<TradeId, WalletSettlementState> {
+    let now = OffsetDateTime::now_utc();
+    let mut active = HashMap::new();
+    let states = match persistence.load_wallet_settlements() {
+        Ok(states) => states,
+        Err(error) => {
+            tracing::warn!(?error, "failed to load active wallet settlements");
+            return active;
+        }
+    };
+
+    for mut state in states {
+        let trade_id = state.settlement.terms.trade_id;
+        if state.tx_signature_kinds.is_empty() && state.settlement.terms.expires_at <= now {
+            let failure = state
+                .settlement
+                .fail(state.run_id, "quote_expired_before_lock");
+            let _ = failure;
+            let trade = runtime_trade_from_wallet_state(&state, SettlementStatus::Failed);
+            if let Err(error) = persistence.save_trade(&trade) {
+                tracing::warn!(?error, %trade_id, "failed to persist expired wallet settlement");
+            }
+            if let Err(error) = persistence.delete_wallet_settlement(trade_id) {
+                tracing::warn!(?error, %trade_id, "failed to delete expired wallet settlement");
+            }
+            continue;
+        }
+        active.insert(trade_id, state);
+    }
+
+    active
+}
+
+fn runtime_trade_from_wallet_state(
+    state: &WalletSettlementState,
+    status: SettlementStatus,
+) -> RuntimeTrade {
+    RuntimeTrade {
+        quote_id: state.quote.quote_id,
+        trade_id: state.settlement.terms.trade_id,
+        run_id: state.run_id,
+        taker_wallet: Some(state.taker_wallet.clone()),
+        expires_at: Some(state.settlement.terms.expires_at),
+        settlement_status: status,
+        tx_signatures: state.tx_signatures.clone(),
+        tx_signature_kinds: state.tx_signature_kinds.clone(),
+        created_at: state.created_at,
+        input_amount: state.quote.input_amount.clone(),
+        output_amount: state.quote.output_amount.clone(),
+        execution_path: state.quote.execution_path,
+    }
+}
+
+fn coarse_status_for_wallet_phase(phase: SettlementPhase) -> SettlementStatus {
+    match phase {
+        SettlementPhase::Complete => SettlementStatus::Redeemed,
+        SettlementPhase::Refunded => SettlementStatus::Refunded,
+        SettlementPhase::Failed => SettlementStatus::Failed,
+        SettlementPhase::TakerLocked
+        | SettlementPhase::MakerLocked
+        | SettlementPhase::TakerRedeemed => SettlementStatus::Initiated,
+        SettlementPhase::Pending | SettlementPhase::Started => SettlementStatus::Pending,
+    }
+}
+
+fn has_signature_kind(state: &WalletSettlementState, kind: TradeSignatureKind) -> bool {
+    state
+        .tx_signature_kinds
+        .iter()
+        .any(|signature| signature.kind == kind)
+}
+
+fn signature_for_kind(
+    state: &WalletSettlementState,
+    kind: TradeSignatureKind,
+) -> Option<TxSignature> {
+    state
+        .tx_signature_kinds
+        .iter()
+        .find(|signature| signature.kind == kind)
+        .map(|signature| TxSignature::new(signature.signature.clone()))
+}
+
+fn wallet_refund_available(state: &WalletSettlementState) -> bool {
+    state.settlement.terms.expires_at <= OffsetDateTime::now_utc()
+        && has_signature_kind(state, TradeSignatureKind::TakerLock)
+        && !has_signature_kind(state, TradeSignatureKind::TakerRedeem)
+        && !has_signature_kind(state, TradeSignatureKind::TakerRefund)
+}
+
+fn wallet_prelock_expired(state: &WalletSettlementState) -> bool {
+    state.settlement.terms.expires_at <= OffsetDateTime::now_utc()
+        && !has_signature_kind(state, TradeSignatureKind::TakerLock)
+}
+
+fn ensure_wallet_refundable(state: &WalletSettlementState) -> AppResult<()> {
+    if !has_signature_kind(state, TradeSignatureKind::TakerLock) {
+        return Err(AppError::validation(
+            "cannot refund before taker funds are locked",
+        ));
+    }
+    if has_signature_kind(state, TradeSignatureKind::TakerRedeem) {
+        return Err(AppError::validation(
+            "cannot refund after the taker redeem has been submitted",
+        ));
+    }
+    if state.settlement.terms.expires_at > OffsetDateTime::now_utc() {
+        return Err(AppError::validation(
+            "settlement is not refundable until the quote expiry passes",
+        ));
+    }
+    Ok(())
 }
 
 /// Event-driven runtime flow coordinator.
@@ -681,9 +1158,28 @@ impl RuntimeOrchestrator {
         persistence: Arc<RuntimePersistence>,
         options: RuntimeOrchestratorOptions,
     ) -> Self {
-        let mut orchestrator = Self::new(app_state, adapters, options);
-        orchestrator.persistence = Some(persistence);
-        orchestrator
+        let automation_state = AutomationState {
+            cumulative_spend_usd: options.initial_automation_spend_usd,
+            ..AutomationState::default()
+        };
+        let usd_prices = BTreeMap::from([(AssetId::from("USDC"), Decimal::ONE)]);
+        let trades = load_terminal_trades_for_startup(&persistence);
+        let wallet_settlements = load_active_wallet_settlements_for_startup(&persistence);
+
+        Self {
+            app_state,
+            adapters,
+            quotes: Arc::new(RwLock::new(HashMap::new())),
+            trades: Arc::new(RwLock::new(trades)),
+            wallet_settlements: Arc::new(RwLock::new(wallet_settlements)),
+            automation_state: Arc::new(RwLock::new(automation_state)),
+            automation_lock: Arc::new(tokio::sync::Mutex::new(())),
+            usd_prices: Arc::new(RwLock::new(usd_prices)),
+            persistence: Some(persistence),
+            last_accepted_quote: Arc::new(RwLock::new(None)),
+            demo_taker_wallet: options.demo_taker_wallet,
+            allow_local_taker_settlement: options.allow_local_taker_settlement,
+        }
     }
 
     /// Borrow the application config.
@@ -717,6 +1213,39 @@ impl RuntimeOrchestrator {
     #[must_use]
     pub fn persistence(&self) -> Option<Arc<RuntimePersistence>> {
         self.persistence.clone()
+    }
+
+    fn persist_trade(&self, trade: &RuntimeTrade) -> AppResult<()> {
+        if let Some(persistence) = &self.persistence {
+            persistence.save_trade(trade)?;
+        }
+        Ok(())
+    }
+
+    fn persist_wallet_settlement(&self, state: &WalletSettlementState) -> AppResult<()> {
+        if let Some(persistence) = &self.persistence {
+            persistence.save_wallet_settlement(state)?;
+        }
+        Ok(())
+    }
+
+    async fn persist_and_store_wallet_settlement(
+        &self,
+        state: &WalletSettlementState,
+    ) -> AppResult<()> {
+        self.persist_wallet_settlement(state)?;
+        self.wallet_settlements
+            .write()
+            .await
+            .insert(state.settlement.terms.trade_id, state.clone());
+        Ok(())
+    }
+
+    fn delete_persisted_wallet_settlement(&self, trade_id: TradeId) -> AppResult<()> {
+        if let Some(persistence) = &self.persistence {
+            persistence.delete_wallet_settlement(trade_id)?;
+        }
+        Ok(())
     }
 
     /// Read live wallet balances through the configured `BalanceReader` port.
@@ -1017,6 +1546,9 @@ impl RuntimeOrchestrator {
         let trade = RuntimeTrade {
             quote_id,
             trade_id,
+            run_id: self.app_state.run_id(),
+            taker_wallet: Some(quote.htlc_terms.taker_wallet.clone()),
+            expires_at: Some(quote.htlc_terms.expires_at),
             settlement_status: SettlementStatus::Redeemed,
             tx_signatures,
             tx_signature_kinds,
@@ -1025,6 +1557,7 @@ impl RuntimeOrchestrator {
             output_amount: quote.output_amount.clone(),
             execution_path: quote.execution_path,
         };
+        self.persist_trade(&trade)?;
         self.trades.write().await.insert(trade_id, trade.clone());
 
         self.refresh_inventory_and_automation().await?;
@@ -1073,6 +1606,9 @@ impl RuntimeOrchestrator {
                 let trade = RuntimeTrade {
                     quote_id: quote.quote_id,
                     trade_id,
+                    run_id: self.app_state.run_id(),
+                    taker_wallet: Some(quote.htlc_terms.taker_wallet.clone()),
+                    expires_at: Some(quote.htlc_terms.expires_at),
                     settlement_status: SettlementStatus::Failed,
                     tx_signatures: Vec::new(),
                     tx_signature_kinds: Vec::new(),
@@ -1081,6 +1617,7 @@ impl RuntimeOrchestrator {
                     output_amount: quote.output_amount.clone(),
                     execution_path: quote.execution_path,
                 };
+                self.persist_trade(&trade)?;
                 self.trades.write().await.insert(trade_id, trade);
                 Err(AppError::validation(format!(
                     "quote {} expired",
@@ -1148,6 +1685,18 @@ impl RuntimeOrchestrator {
         taker_wallet: WalletAddress,
         secret_hash: String,
     ) -> AppResult<WalletSettlementStart> {
+        let known_quote = self
+            .quotes
+            .read()
+            .await
+            .get(&quote_id)
+            .cloned()
+            .ok_or_else(|| AppError::validation(format!("unknown or rejected quote {quote_id}")))?;
+        if known_quote.htlc_terms.taker_wallet != taker_wallet {
+            return Err(AppError::validation(
+                "connected wallet does not match the RFQ taker wallet",
+            ));
+        }
         let quote = self.take_quote(quote_id).await?;
         if quote.htlc_terms.taker_wallet != taker_wallet {
             return Err(AppError::validation(
@@ -1190,18 +1739,20 @@ impl RuntimeOrchestrator {
             .await?;
         let expires_at = quote.htlc_terms.expires_at;
 
-        self.wallet_settlements.write().await.insert(
-            trade_id,
-            WalletSettlementState {
+        self.wallet_settlements.write().await.insert(trade_id, {
+            let state = WalletSettlementState {
                 quote,
                 settlement,
                 taker_lock_request,
                 taker_wallet,
                 tx_signatures: Vec::new(),
                 tx_signature_kinds: Vec::new(),
+                run_id: self.app_state.run_id(),
                 created_at: OffsetDateTime::now_utc(),
-            },
-        );
+            };
+            self.persist_wallet_settlement(&state)?;
+            state
+        });
 
         Ok(WalletSettlementStart {
             quote_id,
@@ -1222,82 +1773,101 @@ impl RuntimeOrchestrator {
         trade_id: TradeId,
         taker_lock_signature: TxSignature,
     ) -> AppResult<WalletTakerLockResult> {
+        if let Some(trade) = self.trades.read().await.get(&trade_id).cloned() {
+            if trade.tx_signature_kinds.iter().any(|signature| {
+                signature.kind == TradeSignatureKind::TakerLock
+                    && signature.signature == taker_lock_signature.as_str()
+            }) {
+                return Ok(WalletTakerLockResult {
+                    trade_id,
+                    settlement_status: trade.settlement_status,
+                    maker_lock_signature: trade
+                        .tx_signature_kinds
+                        .iter()
+                        .find(|signature| signature.kind == TradeSignatureKind::MakerLock)
+                        .map(|signature| TxSignature::new(signature.signature.clone())),
+                    tx_signatures: trade.tx_signatures,
+                });
+            }
+        }
         let mut state = self.wallet_settlement_state(trade_id).await?;
-        let taker_lock = self
-            .adapters
-            .htlc_client
-            .record_external_initiate(state.taker_lock_request.clone(), taker_lock_signature)
-            .await?;
-        push_trade_signature(
-            &mut state.tx_signatures,
-            &mut state.tx_signature_kinds,
-            &taker_lock,
-        );
-        let transition = state.settlement.record_taker_lock(
-            self.app_state.run_id(),
-            taker_lock.signature.as_ref().map(ToString::to_string),
-        );
-        self.publish(RuntimeEvent::Settlement(transition.event))
-            .await?;
-        // TODO(v0.2): wire real confirmation polling for the wallet flow.
-        // The browser-driven path posts the signed taker tx via
-        // `record_external_initiate`, which already confirms the signature
-        // before returning, so for v1 we treat the submission as confirmed.
-        let confirmation = state
-            .settlement
-            .confirm_taker_lock(self.app_state.run_id())?;
-        self.publish(RuntimeEvent::Settlement(confirmation.event))
-            .await?;
+        if wallet_prelock_expired(&state) {
+            self.fail_expired_prelock_wallet_settlement(state).await?;
+            return Err(AppError::validation(
+                "wallet settlement expired before funds were locked",
+            ));
+        }
+        if !has_signature_kind(&state, TradeSignatureKind::TakerLock) {
+            let taker_lock = self
+                .adapters
+                .htlc_client
+                .record_external_initiate(state.taker_lock_request.clone(), taker_lock_signature)
+                .await?;
+            push_trade_signature(
+                &mut state.tx_signatures,
+                &mut state.tx_signature_kinds,
+                &taker_lock,
+            );
+            let transition = state.settlement.record_taker_lock(
+                self.app_state.run_id(),
+                taker_lock.signature.as_ref().map(ToString::to_string),
+            );
+            self.publish(RuntimeEvent::Settlement(transition.event))
+                .await?;
+            // TODO(v0.2): wire real confirmation polling for the wallet flow.
+            // The browser-driven path posts the signed taker tx via
+            // `record_external_initiate`, which already confirms and validates
+            // the expected HTLC account before returning.
+            let confirmation = state
+                .settlement
+                .confirm_taker_lock(self.app_state.run_id())?;
+            self.publish(RuntimeEvent::Settlement(confirmation.event))
+                .await?;
+            self.persist_and_store_wallet_settlement(&state).await?;
+        }
 
-        // Gateway-backed paths run real burn/mint (and Jupiter spend slice
-        // for non-USDC outputs) before the maker leg, threading on-chain
-        // signatures into the wallet settlement state.
-        self.run_gateway_backed_input_slice(
-            &state.quote,
-            trade_id,
-            &mut state.tx_signatures,
-            &mut state.tx_signature_kinds,
-        )
-        .await?;
+        if !has_signature_kind(&state, TradeSignatureKind::MakerLock) {
+            // Gateway-backed paths run real burn/mint (and Jupiter spend slice
+            // for non-USDC outputs) before the maker leg, threading on-chain
+            // signatures into the wallet settlement state.
+            self.ensure_gateway_backed_input_slice(&mut state).await?;
 
-        let maker_lock = self
-            .adapters
-            .htlc_client
-            .initiate_with_external_redeemer(
-                state.settlement.terms.maker_lock_request(),
-                state.taker_wallet.clone(),
-            )
-            .await?;
-        push_trade_signature(
-            &mut state.tx_signatures,
-            &mut state.tx_signature_kinds,
-            &maker_lock,
-        );
-        let transition = state.settlement.record_maker_lock(
-            self.app_state.run_id(),
-            maker_lock.signature.as_ref().map(ToString::to_string),
-        );
-        self.publish(RuntimeEvent::Settlement(transition.event))
-            .await?;
-        // TODO(v0.2): wire real confirmation polling for the wallet flow.
-        // The maker leg uses `initiate_with_external_redeemer` which submits
-        // and signs locally; for v1 we treat the submission as confirmed.
-        let confirmation = state
-            .settlement
-            .confirm_maker_lock(self.app_state.run_id())?;
-        self.publish(RuntimeEvent::Settlement(confirmation.event))
-            .await?;
+            let maker_lock = self
+                .adapters
+                .htlc_client
+                .initiate_with_external_redeemer(
+                    state.settlement.terms.maker_lock_request(),
+                    state.taker_wallet.clone(),
+                )
+                .await?;
+            push_trade_signature(
+                &mut state.tx_signatures,
+                &mut state.tx_signature_kinds,
+                &maker_lock,
+            );
+            let transition = state.settlement.record_maker_lock(
+                self.app_state.run_id(),
+                maker_lock.signature.as_ref().map(ToString::to_string),
+            );
+            self.publish(RuntimeEvent::Settlement(transition.event))
+                .await?;
+            // TODO(v0.2): wire real confirmation polling for the wallet flow.
+            // The maker leg uses `initiate_with_external_redeemer` which submits
+            // and signs locally; for v1 we treat the submission as confirmed.
+            let confirmation = state
+                .settlement
+                .confirm_maker_lock(self.app_state.run_id())?;
+            self.publish(RuntimeEvent::Settlement(confirmation.event))
+                .await?;
+            self.persist_and_store_wallet_settlement(&state).await?;
+        }
 
         let response = WalletTakerLockResult {
             trade_id,
             settlement_status: SettlementStatus::Initiated,
-            maker_lock_signature: maker_lock.signature,
+            maker_lock_signature: signature_for_kind(&state, TradeSignatureKind::MakerLock),
             tx_signatures: state.tx_signatures.clone(),
         };
-        self.wallet_settlements
-            .write()
-            .await
-            .insert(trade_id, state);
         Ok(response)
     }
 
@@ -1337,36 +1907,68 @@ impl RuntimeOrchestrator {
         preimage: String,
         taker_redeem_signature: TxSignature,
     ) -> AppResult<WalletTakerRedeemResult> {
+        if let Some(trade) = self.trades.read().await.get(&trade_id).cloned() {
+            if trade.settlement_status == SettlementStatus::Redeemed {
+                return Ok(WalletTakerRedeemResult {
+                    maker_redeem_signature: trade
+                        .tx_signature_kinds
+                        .iter()
+                        .find(|signature| signature.kind == TradeSignatureKind::MakerRedeem)
+                        .map(|signature| TxSignature::new(signature.signature.clone())),
+                    trade,
+                });
+            }
+        }
         let mut state = self.wallet_settlement_state(trade_id).await?;
-        let taker_redeem = self
-            .adapters
-            .htlc_client
-            .record_external_redeem(trade_id, taker_redeem_signature)
-            .await?;
-        push_trade_signature(
-            &mut state.tx_signatures,
-            &mut state.tx_signature_kinds,
-            &taker_redeem,
-        );
-        let transition = state.settlement.record_taker_redeem(
-            self.app_state.run_id(),
-            taker_redeem.signature.as_ref().map(ToString::to_string),
-        );
-        self.publish(RuntimeEvent::Settlement(transition.event))
-            .await?;
+        if has_signature_kind(&state, TradeSignatureKind::TakerRedeem)
+            && has_signature_kind(&state, TradeSignatureKind::MakerRedeem)
+        {
+            let trade = runtime_trade_from_wallet_state(&state, SettlementStatus::Redeemed);
+            self.persist_trade(&trade)?;
+            self.trades.write().await.insert(trade_id, trade.clone());
+            self.wallet_settlements.write().await.remove(&trade_id);
+            self.delete_persisted_wallet_settlement(trade_id)?;
+            return Ok(WalletTakerRedeemResult {
+                trade,
+                maker_redeem_signature: signature_for_kind(&state, TradeSignatureKind::MakerRedeem),
+            });
+        }
+        self.restore_wallet_settlement_htlc(&state).await?;
+        if !has_signature_kind(&state, TradeSignatureKind::TakerRedeem) {
+            let taker_redeem = self
+                .adapters
+                .htlc_client
+                .record_external_redeem(trade_id, taker_redeem_signature)
+                .await?;
+            push_trade_signature(
+                &mut state.tx_signatures,
+                &mut state.tx_signature_kinds,
+                &taker_redeem,
+            );
+            let transition = state.settlement.record_taker_redeem(
+                self.app_state.run_id(),
+                taker_redeem.signature.as_ref().map(ToString::to_string),
+            );
+            self.publish(RuntimeEvent::Settlement(transition.event))
+                .await?;
+            self.persist_and_store_wallet_settlement(&state).await?;
+        }
 
-        let maker_redeem = self.adapters.htlc_client.redeem(trade_id, preimage).await?;
-        push_trade_signature(
-            &mut state.tx_signatures,
-            &mut state.tx_signature_kinds,
-            &maker_redeem,
-        );
-        let transition = state.settlement.record_maker_redeem(
-            self.app_state.run_id(),
-            maker_redeem.signature.as_ref().map(ToString::to_string),
-        );
-        self.publish(RuntimeEvent::Settlement(transition.event))
-            .await?;
+        if !has_signature_kind(&state, TradeSignatureKind::MakerRedeem) {
+            let maker_redeem = self.adapters.htlc_client.redeem(trade_id, preimage).await?;
+            push_trade_signature(
+                &mut state.tx_signatures,
+                &mut state.tx_signature_kinds,
+                &maker_redeem,
+            );
+            let transition = state.settlement.record_maker_redeem(
+                self.app_state.run_id(),
+                maker_redeem.signature.as_ref().map(ToString::to_string),
+            );
+            self.publish(RuntimeEvent::Settlement(transition.event))
+                .await?;
+            self.persist_and_store_wallet_settlement(&state).await?;
+        }
         self.publish(RuntimeEvent::Settlement(SettlementEvent::StatusChanged {
             metadata: EventMetadata::new(self.app_state.run_id()),
             trade_id,
@@ -1377,6 +1979,9 @@ impl RuntimeOrchestrator {
         let trade = RuntimeTrade {
             quote_id: state.quote.quote_id,
             trade_id,
+            run_id: state.run_id,
+            taker_wallet: Some(state.taker_wallet.clone()),
+            expires_at: Some(state.settlement.terms.expires_at),
             settlement_status: SettlementStatus::Redeemed,
             tx_signatures: state.tx_signatures.clone(),
             tx_signature_kinds: state.tx_signature_kinds.clone(),
@@ -1385,13 +1990,218 @@ impl RuntimeOrchestrator {
             output_amount: state.quote.output_amount.clone(),
             execution_path: state.quote.execution_path,
         };
+        self.persist_trade(&trade)?;
         self.trades.write().await.insert(trade_id, trade.clone());
         self.wallet_settlements.write().await.remove(&trade_id);
+        self.delete_persisted_wallet_settlement(trade_id)?;
         self.refresh_inventory_and_automation().await?;
 
         Ok(WalletTakerRedeemResult {
             trade,
-            maker_redeem_signature: maker_redeem.signature,
+            maker_redeem_signature: signature_for_kind(&state, TradeSignatureKind::MakerRedeem),
+        })
+    }
+
+    /// Resume an active browser-wallet settlement after a page or backend restart.
+    ///
+    /// # Errors
+    ///
+    /// Returns validation errors for unknown terminal trades or adapter errors
+    /// while rebuilding fresh unsigned wallet transactions.
+    pub async fn resume_wallet_settlement(
+        &self,
+        trade_id: TradeId,
+    ) -> AppResult<WalletSettlementResume> {
+        let state = self.wallet_settlement_state(trade_id).await?;
+        if wallet_prelock_expired(&state) {
+            self.fail_expired_prelock_wallet_settlement(state).await?;
+            return Err(AppError::validation(
+                "wallet settlement expired before funds were locked",
+            ));
+        }
+        self.restore_wallet_settlement_htlc(&state).await?;
+        let taker_lock_transaction = if has_signature_kind(&state, TradeSignatureKind::TakerLock) {
+            None
+        } else {
+            Some(
+                self.adapters
+                    .htlc_client
+                    .build_external_initiate(state.taker_lock_request.clone())
+                    .await?,
+            )
+        };
+        let taker_refund_transaction = if wallet_refund_available(&state) {
+            Some(
+                self.adapters
+                    .htlc_client
+                    .build_external_refund(trade_id, state.taker_wallet.clone())
+                    .await?,
+            )
+        } else {
+            None
+        };
+
+        Ok(WalletSettlementResume {
+            trade_id,
+            quote_id: state.quote.quote_id,
+            run_id: state.run_id,
+            settlement_phase: state.settlement.phase,
+            settlement_status: coarse_status_for_wallet_phase(state.settlement.phase),
+            taker_lock_transaction,
+            taker_redeem_transaction: None,
+            taker_refund_transaction,
+            tx_signatures: state.tx_signatures.clone(),
+            tx_signature_kinds: state.tx_signature_kinds.clone(),
+            expires_at: state.settlement.terms.expires_at,
+        })
+    }
+
+    /// Abandon a pre-lock browser-wallet settlement.
+    ///
+    /// # Errors
+    ///
+    /// Returns conflict once any on-chain signature exists.
+    pub async fn abandon_wallet_settlement(
+        &self,
+        trade_id: TradeId,
+        secret_hash: String,
+    ) -> AppResult<RuntimeTrade> {
+        let mut state = self.wallet_settlement_state(trade_id).await?;
+        if state.settlement.terms.secret_hash != secret_hash {
+            return Err(AppError::validation(
+                "secret_hash does not match the wallet settlement",
+            ));
+        }
+        if !state.tx_signature_kinds.is_empty() {
+            return Err(AppError::conflict(
+                "cannot start over after funds are on-chain; continue or refund after expiry",
+            ));
+        }
+        let failure = state
+            .settlement
+            .fail(self.app_state.run_id(), "user_abandoned");
+        self.publish(RuntimeEvent::Settlement(failure.event))
+            .await?;
+        let trade = runtime_trade_from_wallet_state(&state, SettlementStatus::Failed);
+        self.persist_trade(&trade)?;
+        self.trades.write().await.insert(trade_id, trade.clone());
+        self.wallet_settlements.write().await.remove(&trade_id);
+        self.delete_persisted_wallet_settlement(trade_id)?;
+        Ok(trade)
+    }
+
+    /// Build an unsigned taker refund transaction for an expired locked settlement.
+    ///
+    /// # Errors
+    ///
+    /// Returns validation errors when the settlement is not refundable yet.
+    pub async fn prepare_wallet_taker_refund(
+        &self,
+        trade_id: TradeId,
+    ) -> AppResult<WalletTakerRefundPreparation> {
+        let state = self.wallet_settlement_state(trade_id).await?;
+        ensure_wallet_refundable(&state)?;
+        if has_signature_kind(&state, TradeSignatureKind::TakerRefund) {
+            return Err(AppError::validation("taker refund is already recorded"));
+        }
+        self.restore_wallet_settlement_htlc(&state).await?;
+        let taker_refund_transaction = self
+            .adapters
+            .htlc_client
+            .build_external_refund(trade_id, state.taker_wallet)
+            .await?;
+        Ok(WalletTakerRefundPreparation {
+            trade_id,
+            taker_refund_transaction,
+        })
+    }
+
+    /// Record a browser taker refund and refund the maker leg when needed.
+    ///
+    /// # Errors
+    ///
+    /// Returns validation or adapter errors when refunding is not possible.
+    pub async fn complete_wallet_taker_refund(
+        &self,
+        trade_id: TradeId,
+        taker_refund_signature: TxSignature,
+    ) -> AppResult<WalletTakerRefundResult> {
+        if let Some(trade) = self.trades.read().await.get(&trade_id).cloned() {
+            if trade.settlement_status == SettlementStatus::Refunded {
+                return Ok(WalletTakerRefundResult {
+                    maker_refund_signature: trade
+                        .tx_signature_kinds
+                        .iter()
+                        .find(|signature| signature.kind == TradeSignatureKind::MakerRefund)
+                        .map(|signature| TxSignature::new(signature.signature.clone())),
+                    trade,
+                });
+            }
+        }
+        let mut state = self.wallet_settlement_state(trade_id).await?;
+        ensure_wallet_refundable(&state)?;
+        self.restore_wallet_settlement_htlc(&state).await?;
+
+        if !has_signature_kind(&state, TradeSignatureKind::TakerRefund) {
+            let taker_refund = self
+                .adapters
+                .htlc_client
+                .record_external_refund(trade_id, taker_refund_signature)
+                .await?;
+            push_trade_signature(
+                &mut state.tx_signatures,
+                &mut state.tx_signature_kinds,
+                &taker_refund,
+            );
+            let transition = state.settlement.record_refund(
+                self.app_state.run_id(),
+                SettlementLeg::TakerInput,
+                taker_refund.signature.as_ref().map(ToString::to_string),
+            );
+            self.publish(RuntimeEvent::Settlement(transition.event))
+                .await?;
+            self.persist_and_store_wallet_settlement(&state).await?;
+        }
+
+        if has_signature_kind(&state, TradeSignatureKind::MakerLock)
+            && !has_signature_kind(&state, TradeSignatureKind::MakerRefund)
+            && !has_signature_kind(&state, TradeSignatureKind::MakerRedeem)
+        {
+            let maker_refund = self
+                .adapters
+                .htlc_client
+                .refund_leg(trade_id, SettlementLeg::MakerOutput)
+                .await?;
+            push_trade_signature(
+                &mut state.tx_signatures,
+                &mut state.tx_signature_kinds,
+                &maker_refund,
+            );
+            let transition = state.settlement.record_refund(
+                self.app_state.run_id(),
+                SettlementLeg::MakerOutput,
+                maker_refund.signature.as_ref().map(ToString::to_string),
+            );
+            self.publish(RuntimeEvent::Settlement(transition.event))
+                .await?;
+            self.persist_and_store_wallet_settlement(&state).await?;
+        }
+        self.publish(RuntimeEvent::Settlement(SettlementEvent::StatusChanged {
+            metadata: EventMetadata::new(self.app_state.run_id()),
+            trade_id,
+            status: SettlementStatus::Refunded,
+        }))
+        .await?;
+
+        let trade = runtime_trade_from_wallet_state(&state, SettlementStatus::Refunded);
+        self.persist_trade(&trade)?;
+        self.trades.write().await.insert(trade_id, trade.clone());
+        self.wallet_settlements.write().await.remove(&trade_id);
+        self.delete_persisted_wallet_settlement(trade_id)?;
+
+        Ok(WalletTakerRefundResult {
+            trade,
+            maker_refund_signature: signature_for_kind(&state, TradeSignatureKind::MakerRefund),
         })
     }
 
@@ -1404,6 +2214,41 @@ impl RuntimeOrchestrator {
             .ok_or_else(|| {
                 AppError::validation(format!("unknown wallet settlement trade {trade_id}"))
             })
+    }
+
+    async fn fail_expired_prelock_wallet_settlement(
+        &self,
+        mut state: WalletSettlementState,
+    ) -> AppResult<RuntimeTrade> {
+        let trade_id = state.settlement.terms.trade_id;
+        let failure = state
+            .settlement
+            .fail(self.app_state.run_id(), "quote_expired_before_lock");
+        self.publish(RuntimeEvent::Settlement(failure.event))
+            .await?;
+        let trade = runtime_trade_from_wallet_state(&state, SettlementStatus::Failed);
+        self.persist_trade(&trade)?;
+        self.trades.write().await.insert(trade_id, trade.clone());
+        self.wallet_settlements.write().await.remove(&trade_id);
+        self.delete_persisted_wallet_settlement(trade_id)?;
+        Ok(trade)
+    }
+
+    async fn restore_wallet_settlement_htlc(&self, state: &WalletSettlementState) -> AppResult<()> {
+        let taker_locked = has_signature_kind(state, TradeSignatureKind::TakerLock);
+        let maker_locked = has_signature_kind(state, TradeSignatureKind::MakerLock);
+        if !taker_locked && !maker_locked {
+            return Ok(());
+        }
+        self.adapters
+            .htlc_client
+            .restore_wallet_settlement(
+                state.taker_lock_request.clone(),
+                state.settlement.terms.maker_lock_request(),
+                taker_locked,
+                maker_locked,
+            )
+            .await
     }
 
     async fn run_settlement_locks(
@@ -1539,6 +2384,51 @@ impl RuntimeOrchestrator {
     ///    `pending_dex_spend → working_custody`.
     ///
     /// Inventory-only paths skip the entire helper.
+    async fn ensure_gateway_backed_input_slice(
+        &self,
+        state: &mut WalletSettlementState,
+    ) -> AppResult<()> {
+        if state.quote.execution_path != ExecutionPath::GatewayToDex {
+            return Ok(());
+        }
+
+        let trade_id = state.settlement.terms.trade_id;
+        let usdc = AssetId::from("USDC");
+        let usdc_amount = if state.quote.output_amount.asset == usdc {
+            state.quote.output_amount.clone()
+        } else {
+            TokenAmount::new(usdc.clone(), state.quote.input_amount.amount_raw)
+        };
+
+        if !has_signature_kind(state, TradeSignatureKind::GatewayMint) {
+            self.run_gateway_burn_mint_slice(
+                trade_id,
+                &usdc_amount,
+                &mut state.tx_signatures,
+                &mut state.tx_signature_kinds,
+            )
+            .await?;
+            self.persist_and_store_wallet_settlement(state).await?;
+        }
+
+        if state.quote.output_amount.asset != usdc
+            && !has_signature_kind(state, TradeSignatureKind::JupiterSwap)
+        {
+            self.run_trade_jupiter_swap_slice(
+                trade_id,
+                &usdc,
+                &usdc_amount,
+                &state.quote.output_amount.asset,
+                &mut state.tx_signatures,
+                &mut state.tx_signature_kinds,
+            )
+            .await?;
+            self.persist_and_store_wallet_settlement(state).await?;
+        }
+
+        Ok(())
+    }
+
     async fn run_gateway_backed_input_slice(
         &self,
         quote: &FirmQuote,
@@ -1790,28 +2680,127 @@ impl RuntimeOrchestrator {
 
     /// Return a stored trade record.
     pub async fn trade(&self, trade_id: TradeId) -> Option<RuntimeTrade> {
-        self.trades.read().await.get(&trade_id).cloned()
+        if let Some(trade) = self.trades.read().await.get(&trade_id).cloned() {
+            return Some(trade);
+        }
+        self.wallet_settlements
+            .read()
+            .await
+            .get(&trade_id)
+            .map(|state| {
+                runtime_trade_from_wallet_state(
+                    state,
+                    coarse_status_for_wallet_phase(state.settlement.phase),
+                )
+            })
     }
 
-    /// Return up to `limit` of the most recently created in-memory trades,
+    /// Return up to `limit` of the most recently created trades,
     /// sorted newest-first by `created_at`.
     pub async fn recent_trades(&self, limit: usize) -> Vec<RuntimeTrade> {
-        let mut trades: Vec<RuntimeTrade> = self.trades.read().await.values().cloned().collect();
+        self.recent_trades_filtered(None, limit).await
+    }
+
+    /// Return up to `limit` of the most recently created trades for a taker
+    /// wallet, sorted newest-first by `created_at`.
+    pub async fn recent_trades_for_wallet(
+        &self,
+        wallet: &WalletAddress,
+        limit: usize,
+    ) -> Vec<RuntimeTrade> {
+        self.recent_trades_filtered(Some(wallet), limit).await
+    }
+
+    async fn recent_trades_filtered(
+        &self,
+        wallet: Option<&WalletAddress>,
+        limit: usize,
+    ) -> Vec<RuntimeTrade> {
+        let wallet = wallet.cloned();
+        let mut trades = self.all_runtime_trades().await;
+        if let Some(wallet) = wallet {
+            trades.retain(|trade| trade.taker_wallet.as_ref() == Some(&wallet));
+        }
         trades.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         trades.truncate(limit);
         trades
     }
 
-    /// Return `(total, successful)` counts where `successful` counts trades
-    /// whose settlement status is [`SettlementStatus::Redeemed`].
-    pub async fn trade_counts(&self) -> (usize, usize) {
+    /// Return aggregate counts for terminal and active trades.
+    pub async fn trade_counts(&self) -> RuntimeTradeCounts {
+        self.trade_counts_filtered(None).await
+    }
+
+    /// Return aggregate counts scoped to one taker wallet.
+    pub async fn trade_counts_for_wallet(&self, wallet: &WalletAddress) -> RuntimeTradeCounts {
+        self.trade_counts_filtered(Some(wallet)).await
+    }
+
+    async fn trade_counts_filtered(&self, wallet: Option<&WalletAddress>) -> RuntimeTradeCounts {
+        let wallet = wallet.cloned();
         let trades = self.trades.read().await;
-        let total = trades.len();
-        let successful = trades
+        let wallet_settlements = self.wallet_settlements.read().await;
+        let active_count = wallet_settlements
             .values()
+            .filter(|state| {
+                wallet
+                    .as_ref()
+                    .is_none_or(|wallet| &state.taker_wallet == wallet)
+            })
+            .count();
+        let successful_count = trades
+            .values()
+            .filter(|trade| {
+                wallet
+                    .as_ref()
+                    .is_none_or(|wallet| trade.taker_wallet.as_ref() == Some(wallet))
+            })
             .filter(|trade| trade.settlement_status == SettlementStatus::Redeemed)
             .count();
-        (total, successful)
+        let refunded_count = trades
+            .values()
+            .filter(|trade| {
+                wallet
+                    .as_ref()
+                    .is_none_or(|wallet| trade.taker_wallet.as_ref() == Some(wallet))
+            })
+            .filter(|trade| trade.settlement_status == SettlementStatus::Refunded)
+            .count();
+        let failed_count = trades
+            .values()
+            .filter(|trade| {
+                wallet
+                    .as_ref()
+                    .is_none_or(|wallet| trade.taker_wallet.as_ref() == Some(wallet))
+            })
+            .filter(|trade| trade.settlement_status == SettlementStatus::Failed)
+            .count();
+        let terminal_count = trades
+            .values()
+            .filter(|trade| {
+                wallet
+                    .as_ref()
+                    .is_none_or(|wallet| trade.taker_wallet.as_ref() == Some(wallet))
+            })
+            .count();
+        RuntimeTradeCounts {
+            total_count: terminal_count + active_count,
+            successful_count,
+            active_count,
+            refunded_count,
+            failed_count,
+        }
+    }
+
+    async fn all_runtime_trades(&self) -> Vec<RuntimeTrade> {
+        let mut trades: Vec<RuntimeTrade> = self.trades.read().await.values().cloned().collect();
+        trades.extend(self.wallet_settlements.read().await.values().map(|state| {
+            runtime_trade_from_wallet_state(
+                state,
+                coarse_status_for_wallet_phase(state.settlement.phase),
+            )
+        }));
+        trades
     }
 
     /// Return the resolved [`ExecutionPath`] for a known trade. Wallet-flow
@@ -2420,6 +3409,9 @@ impl RuntimeOrchestrator {
         let trade = RuntimeTrade {
             quote_id: quote.quote_id,
             trade_id: settlement.terms.trade_id,
+            run_id: self.app_state.run_id(),
+            taker_wallet: Some(quote.htlc_terms.taker_wallet.clone()),
+            expires_at: Some(settlement.terms.expires_at),
             settlement_status: SettlementStatus::Failed,
             tx_signatures: tx_signatures.to_vec(),
             tx_signature_kinds: Vec::new(),
@@ -2428,6 +3420,7 @@ impl RuntimeOrchestrator {
             output_amount: quote.output_amount.clone(),
             execution_path: quote.execution_path,
         };
+        self.persist_trade(&trade)?;
         self.trades
             .write()
             .await
@@ -2689,12 +3682,6 @@ impl RuntimeOrchestrator {
     }
 }
 
-fn push_signature(signatures: &mut Vec<TxSignature>, signature: Option<&TxSignature>) {
-    if let Some(signature) = signature {
-        signatures.push(signature.clone());
-    }
-}
-
 /// Append a signature plus its kind discriminator derived from the receipt's
 /// `(leg, status)` pair. No-op when the receipt has no signature or the
 /// kind is not a trade-summary state.
@@ -2703,15 +3690,24 @@ fn push_trade_signature(
     kinded: &mut Vec<TradeSignature>,
     receipt: &crate::domain::types::HtlcReceipt,
 ) {
-    push_signature(plain, receipt.signature.as_ref());
+    if let Some(signature) = receipt.signature.as_ref() {
+        if !plain.iter().any(|existing| existing == signature) {
+            plain.push(signature.clone());
+        }
+    }
     if let (Some(signature), Some(kind)) = (
         receipt.signature.as_ref(),
         TradeSignatureKind::from_htlc_receipt(receipt.leg, receipt.status),
     ) {
-        kinded.push(TradeSignature {
-            kind,
-            signature: signature.as_str().to_owned(),
-        });
+        if !kinded
+            .iter()
+            .any(|existing| existing.kind == kind && existing.signature == signature.as_str())
+        {
+            kinded.push(TradeSignature {
+                kind,
+                signature: signature.as_str().to_owned(),
+            });
+        }
     }
 }
 
@@ -2726,10 +3722,17 @@ fn push_kinded_signature(
     kind: TradeSignatureKind,
 ) {
     if let Some(signature) = signature {
-        plain.push(signature.clone());
-        kinded.push(TradeSignature {
-            kind,
-            signature: signature.as_str().to_owned(),
-        });
+        if !plain.iter().any(|existing| existing == signature) {
+            plain.push(signature.clone());
+        }
+        if !kinded
+            .iter()
+            .any(|existing| existing.kind == kind && existing.signature == signature.as_str())
+        {
+            kinded.push(TradeSignature {
+                kind,
+                signature: signature.as_str().to_owned(),
+            });
+        }
     }
 }

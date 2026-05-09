@@ -113,11 +113,15 @@ async fn response_json(response: axum::response::Response) -> Value {
 }
 
 fn rfq_request() -> Value {
+    rfq_request_for_wallet("DemoTaker111111111111111111111111111111111111")
+}
+
+fn rfq_request_for_wallet(wallet: &str) -> Value {
     json!({
         "input_mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
         "output_mint": "So11111111111111111111111111111111111111112",
         "input_amount_raw": 1000,
-        "taker_wallet": "DemoTaker111111111111111111111111111111111111",
+        "taker_wallet": wallet,
         "expiry_seconds": 30
     })
 }
@@ -703,6 +707,10 @@ async fn ledger_endpoint_marks_unhealthy_on_negative_protected_account() {
 }
 
 async fn drive_completed_trade(app: axum::Router) -> serde_json::Value {
+    drive_completed_trade_for_wallet(app, "DemoTaker111111111111111111111111111111111111").await
+}
+
+async fn drive_completed_trade_for_wallet(app: axum::Router, wallet: &str) -> serde_json::Value {
     let response = app
         .clone()
         .oneshot(
@@ -710,7 +718,7 @@ async fn drive_completed_trade(app: axum::Router) -> serde_json::Value {
                 .method(Method::POST)
                 .uri("/v1/rfq")
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(rfq_request().to_string()))
+                .body(Body::from(rfq_request_for_wallet(wallet).to_string()))
                 .expect("request"),
         )
         .await
@@ -730,7 +738,7 @@ async fn drive_completed_trade(app: axum::Router) -> serde_json::Value {
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
                     json!({
-                        "taker_wallet": "DemoTaker111111111111111111111111111111111111",
+                        "taker_wallet": wallet,
                         "secret_hash": "0000000000000000000000000000000000000000000000000000000000000000"
                     })
                     .to_string(),
@@ -783,6 +791,45 @@ async fn drive_completed_trade(app: axum::Router) -> serde_json::Value {
     response_json(response).await
 }
 
+async fn drive_active_wallet_settlement_for_wallet(app: axum::Router, wallet: &str) -> String {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v1/rfq")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(rfq_request_for_wallet(wallet).to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    let quote_body = response_json(response).await;
+    let quote_id = quote_body["quote_id"].as_str().expect("quote id");
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/v1/quotes/{quote_id}/wallet-settlement"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "taker_wallet": wallet,
+                        "secret_hash": "1111111111111111111111111111111111111111111111111111111111111111"
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    response_json(response).await["trade_id"]
+        .as_str()
+        .expect("trade id")
+        .to_owned()
+}
+
 #[tokio::test]
 async fn trades_endpoint_returns_recent_trades() {
     let app = test_orchestrator_router().await;
@@ -813,6 +860,62 @@ async fn trades_endpoint_returns_recent_trades() {
     assert_eq!(trades[0]["output"]["asset"], "SOL");
     assert!(trades[0]["output"]["amount_raw"].is_string());
     assert_eq!(trades[0]["output"]["decimals"].as_u64(), Some(9));
+}
+
+#[tokio::test]
+async fn trades_endpoint_filters_by_wallet_and_includes_taker_wallet() {
+    let app = test_orchestrator_router().await;
+    let wallet_one = "DemoTaker111111111111111111111111111111111111";
+    let wallet_two = "OtherTaker11111111111111111111111111111111111";
+    let _ = drive_completed_trade_for_wallet(app.clone(), wallet_one).await;
+    let _ = drive_completed_trade_for_wallet(app.clone(), wallet_two).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/runtime/trades?wallet={wallet_one}&limit=25"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_json(response).await;
+    assert_eq!(body["total_count"], 1);
+    assert_eq!(body["successful_count"], 1);
+    let trades = body["trades"].as_array().expect("trades array");
+    assert_eq!(trades.len(), 1);
+    assert_eq!(trades[0]["taker_wallet"], wallet_one);
+}
+
+#[tokio::test]
+async fn trades_endpoint_wallet_filter_includes_active_settlements() {
+    let app = test_orchestrator_router().await;
+    let wallet_one = "DemoTaker111111111111111111111111111111111111";
+    let wallet_two = "OtherTaker11111111111111111111111111111111111";
+    let active_trade_id = drive_active_wallet_settlement_for_wallet(app.clone(), wallet_one).await;
+    let _ = drive_completed_trade_for_wallet(app.clone(), wallet_two).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/runtime/trades?wallet={wallet_one}&limit=25"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_json(response).await;
+    assert_eq!(body["total_count"], 1);
+    assert_eq!(body["active_count"], 1);
+    let trades = body["trades"].as_array().expect("trades array");
+    assert_eq!(trades.len(), 1);
+    assert_eq!(trades[0]["trade_id"], active_trade_id);
+    assert_eq!(trades[0]["taker_wallet"], wallet_one);
+    assert_eq!(trades[0]["settlement_status"], "pending");
 }
 
 #[tokio::test]
@@ -1343,6 +1446,31 @@ async fn api_settlement_responses_include_next_action() {
             .contains("/taker-lock")
     );
 
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/v1/trades/{trade_id}/resume"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let resume_body = response_json(response).await;
+    assert_eq!(resume_body["trade_id"], trade_id);
+    assert_eq!(resume_body["quote_id"], quote_id);
+    assert!(resume_body["run_id"].is_string());
+    assert!(resume_body["taker_lock_transaction"].is_object());
+    assert!(resume_body["taker_refund_transaction"].is_null());
+    assert!(
+        resume_body["tx_signature_kinds"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+
     let lock_signature = "5".repeat(88);
     let response = app
         .clone()
@@ -1366,6 +1494,184 @@ async fn api_settlement_responses_include_next_action() {
             .expect("path string")
             .contains("/taker-redeem")
     );
+}
+
+#[tokio::test]
+async fn api_abandon_requires_matching_secret_hash() {
+    let app = test_orchestrator_router().await;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v1/rfq")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(rfq_request().to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    let quote_body = response_json(response).await;
+    let quote_id = quote_body["quote_id"]
+        .as_str()
+        .expect("quote id")
+        .to_owned();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/v1/quotes/{quote_id}/wallet-settlement"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "taker_wallet": "DemoTaker111111111111111111111111111111111111",
+                        "secret_hash": "1212121212121212121212121212121212121212121212121212121212121212"
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    let settlement_body = response_json(response).await;
+    let trade_id = settlement_body["trade_id"].as_str().expect("trade id");
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/v1/trades/{trade_id}/abandon"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/v1/trades/{trade_id}/abandon"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({ "secret_hash": "3434343434343434343434343434343434343434343434343434343434343434" })
+                        .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/v1/trades/{trade_id}/abandon"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({ "secret_hash": "1212121212121212121212121212121212121212121212121212121212121212" })
+                        .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+}
+
+#[tokio::test]
+async fn api_taker_refund_rejects_malformed_json_but_allows_empty_prepare() {
+    let app = test_orchestrator_router().await;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v1/trades/018f5f9e-0000-7000-8000-000000000001/taker-refund")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{"))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = response_json(response).await;
+    assert_eq!(body["error"]["code"], "invalid_json");
+
+    let mut rfq = rfq_request();
+    rfq["expiry_seconds"] = json!(1);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v1/rfq")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(rfq.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    let quote_body = response_json(response).await;
+    let quote_id = quote_body["quote_id"].as_str().expect("quote id");
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/v1/quotes/{quote_id}/wallet-settlement"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "taker_wallet": "DemoTaker111111111111111111111111111111111111",
+                        "secret_hash": "5656565656565656565656565656565656565656565656565656565656565656"
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    let settlement_body = response_json(response).await;
+    let trade_id = settlement_body["trade_id"].as_str().expect("trade id");
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/v1/trades/{trade_id}/taker-lock"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({ "signature": "7".repeat(88) }).to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/v1/trades/{trade_id}/taker-refund"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_json(response).await;
+    assert!(body["taker_refund_transaction"].is_object());
 }
 
 #[tokio::test]
@@ -1398,6 +1704,11 @@ async fn api_trade_response_includes_friendly_amounts() {
     assert!(body["input"]["amount_raw"].is_string());
     assert_eq!(body["output"]["asset"], "SOL");
     assert_eq!(body["output"]["decimals"], 9);
+    assert!(body["quote_id"].is_string());
+    assert!(body["run_id"].is_string());
+    assert_eq!(body["current_run"], true);
+    assert!(body["created_at"].is_string());
+    assert!(body["tx_signature_kinds"].as_array().unwrap().len() >= 4);
     // Legacy `amounts` envelope preserved.
     assert!(body["amounts"].is_object());
 }
@@ -1629,6 +1940,65 @@ impl HtlcClient for FakeHtlcClient {
             amount,
             status: SettlementStatus::Redeemed,
             signature: Some(signature),
+        })
+    }
+
+    async fn build_external_refund(
+        &self,
+        _trade_id: firmament::types::TradeId,
+        _funder: WalletAddress,
+    ) -> Result<UnsignedWalletTransaction, firmament::AppError> {
+        Ok(UnsignedWalletTransaction {
+            transaction_base64: "AA==".to_owned(),
+            recent_blockhash: "fake-blockhash".to_owned(),
+        })
+    }
+
+    async fn record_external_refund(
+        &self,
+        trade_id: firmament::types::TradeId,
+        signature: TxSignature,
+    ) -> Result<HtlcReceipt, firmament::AppError> {
+        let initiated = self.initiated.lock().expect("htlc lock");
+        let init = initiated
+            .iter()
+            .find(|init| init.trade_id == trade_id && init.funder == WalletRole::Taker)
+            .ok_or_else(|| {
+                firmament::AppError::validation(format!(
+                    "fake htlc client: no taker-funded leg for trade {trade_id}"
+                ))
+            })?;
+        let amount = init.amount.clone();
+        Ok(HtlcReceipt {
+            trade_id,
+            leg: SettlementLeg::TakerInput,
+            amount,
+            status: SettlementStatus::Refunded,
+            signature: Some(signature),
+        })
+    }
+
+    async fn refund_leg(
+        &self,
+        trade_id: firmament::types::TradeId,
+        leg: SettlementLeg,
+    ) -> Result<HtlcReceipt, firmament::AppError> {
+        let initiated = self.initiated.lock().expect("htlc lock");
+        let init = initiated
+            .iter()
+            .find(|init| init.trade_id == trade_id && fake_leg_for_funder(init.funder) == leg)
+            .ok_or_else(|| {
+                firmament::AppError::validation(format!(
+                    "fake htlc client: no {leg:?} leg for trade {trade_id}"
+                ))
+            })?;
+        let amount = init.amount.clone();
+        Ok(HtlcReceipt {
+            trade_id,
+            leg,
+            amount,
+            status: SettlementStatus::Refunded,
+            signature: Some(TxSignature::new(format!("refund-{leg:?}"))),
         })
     }
 

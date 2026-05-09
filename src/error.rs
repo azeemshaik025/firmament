@@ -28,6 +28,10 @@ pub enum AppError {
     #[error("persistence error: {0}")]
     Persistence(String),
 
+    /// Current resource state conflicts with the requested operation.
+    #[error("conflict: {0}")]
+    Conflict(String),
+
     /// The requested operation is outside the current runtime capability.
     #[error("unsupported operation: {0}")]
     Unsupported(String),
@@ -70,6 +74,12 @@ impl AppError {
     #[must_use]
     pub fn persistence(message: impl Into<String>) -> Self {
         Self::Persistence(message.into())
+    }
+
+    /// Build a conflict error from displayable context.
+    #[must_use]
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self::Conflict(message.into())
     }
 
     /// Build an unsupported-operation error from displayable context.

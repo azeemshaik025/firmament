@@ -16,7 +16,8 @@ maker wallet, verified asset mints, and explicit caps.
 - Rust single crate for the maker runtime and Axum HTTP API.
 - Vite React web app in `web/app`.
 - Next.js landing page in `landing`.
-- SQLite persistence through `rusqlite`.
+- SQLite persistence through `rusqlite` for ledger, P&L, and trade/settlement
+  recovery state.
 - Domain modules for assets, inventory, quote math, risk, settlement, events,
   ledger, and P&L projection.
 - Adapters for Solana wallets/HTLCs, Jupiter Swap API V2, and Circle Gateway.
@@ -107,8 +108,11 @@ Full maker setup lives in [docs/maker-setup.mdx](/Users/azeemshaik/work/hackatho
 - `GET /health`
 - `POST /v1/rfq`
 - `POST /v1/quotes/{quote_id}/wallet-settlement`
+- `POST /v1/trades/{trade_id}/resume`
+- `POST /v1/trades/{trade_id}/abandon`
 - `POST /v1/trades/{trade_id}/taker-lock`
 - `POST /v1/trades/{trade_id}/taker-redeem`
+- `POST /v1/trades/{trade_id}/taker-refund`
 - `GET /v1/trades/{trade_id}`
 - `GET /v1/runtime/state`
 - `GET /v1/runtime/events`
@@ -123,9 +127,15 @@ unavailable response instead of pretending to settle.
 The web app is intentionally minimal:
 
 - `/app` is the swap demo surface.
-- `/app/runtime` is the public read-only Live Runtime summary.
+- `/app/runtime` is the public read-only Live Runtime summary with global recent
+  trades.
 - Public takers connect a Solana browser wallet and use the wallet-settlement
   endpoints.
+- The swap view keeps browser-local recovery state for the connected wallet,
+  including a wallet-specific trade history drawer. Preimages stay in the
+  browser and are never persisted by the server.
+- Wallet-submitted lock/redeem/refund signatures are accepted only after the
+  backend confirms the expected Solana HTLC account effect.
 
 The backend does not serve frontend files. Keep `cargo run` and `npm run dev`
 running in separate terminals during demos.
