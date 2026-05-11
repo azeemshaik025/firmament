@@ -1419,10 +1419,12 @@ impl RuntimeOrchestrator {
             .price_provider
             .reference_price(usdc_to_asset)
             .await
-            && price.output_per_input > Decimal::ZERO
-            && let Some(inverse) = Decimal::ONE.checked_div(price.output_per_input)
         {
-            prices.insert(asset.id.clone(), inverse);
+            if price.output_per_input > Decimal::ZERO {
+                if let Some(inverse) = Decimal::ONE.checked_div(price.output_per_input) {
+                    prices.insert(asset.id.clone(), inverse);
+                }
+            }
         }
     }
 
