@@ -152,23 +152,6 @@ pub enum RfqResponse {
     },
 }
 
-/// Response body for `POST /v1/quotes/{quote_id}/accept`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct QuoteAcceptResponse {
-    /// Quote accepted by the operator.
-    pub quote_id: QuoteId,
-    /// Trade created for settlement tracking.
-    pub trade_id: TradeId,
-    /// Current settlement status.
-    pub settlement_status: SettlementStatus,
-    /// Solana transaction signatures observed so far.
-    pub tx_signatures: Vec<TxSignature>,
-    /// Ledger summary once persistence is integrated.
-    pub ledger_summary: LedgerSummary,
-    /// Integration status for the route handler.
-    pub integration_status: IntegrationStatus,
-}
-
 /// Public asset metadata returned to the web app and direct API consumers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssetResponse {

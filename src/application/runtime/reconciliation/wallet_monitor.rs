@@ -1,18 +1,18 @@
 //! Wallet-side reconciliation: `working_custody` + `reserved` + `pending_dex_spend`
 //! vs. on-chain.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use time::OffsetDateTime;
 
 use crate::adapters::persistence::ledger::{LedgerAccountId, LedgerAccountType};
-use crate::application::runtime::orchestrator::RuntimeOrchestrator;
+use crate::application::runtime::orchestrator::{RuntimeOrchestrator, RuntimePersistence};
 use crate::config::ReconciliationConfig;
 use crate::domain::events::{
     EventMetadata, ReconciliationEvent, ReconciliationOutcome, ReconciliationScope, RuntimeEvent,
 };
 use crate::domain::types::{AmountRaw, AssetId, TokenAmount, WalletRole};
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 
 use super::drift::{DriftOutcome, DriftWindow};
 use super::{SequenceMap, format_utc_date};
@@ -159,9 +159,7 @@ impl WalletMonitor {
         orchestrator: &RuntimeOrchestrator,
         asset: &AssetId,
     ) -> AppResult<u128> {
-        let persistence = orchestrator
-            .persistence_handle()
-            .expect("reconciliation requires persistence");
+        let persistence = required_persistence(orchestrator.persistence_handle())?;
 
         let working = persistence.account_balance(&LedgerAccountId::working(asset.clone()))?;
         let reserved = persistence.aggregate_balance_by_type(LedgerAccountType::Reserved, asset)?;
@@ -226,6 +224,12 @@ fn i128_from_u128(value: u128) -> i128 {
     i128::try_from(value).unwrap_or(i128::MAX)
 }
 
+fn required_persistence(
+    persistence: Option<Arc<RuntimePersistence>>,
+) -> AppResult<Arc<RuntimePersistence>> {
+    persistence.ok_or_else(|| AppError::persistence("reconciliation requires persistence"))
+}
+
 async fn read_on_chain_balance(
     orchestrator: &RuntimeOrchestrator,
     asset: &AssetId,
@@ -242,9 +246,7 @@ fn trade_in_flight_reason(
     orchestrator: &RuntimeOrchestrator,
     asset: &AssetId,
 ) -> AppResult<Option<String>> {
-    let persistence = orchestrator
-        .persistence_handle()
-        .expect("reconciliation requires persistence");
+    let persistence = required_persistence(orchestrator.persistence_handle())?;
 
     let pending_escrow =
         persistence.aggregate_balance_by_type(LedgerAccountType::PendingEscrow, asset)?;
@@ -267,9 +269,7 @@ fn post_wallet_adjustment(
     drift: i128,
     idempotency_key: &str,
 ) -> AppResult<bool> {
-    let persistence = orchestrator
-        .persistence_handle()
-        .expect("reconciliation requires persistence");
+    let persistence = required_persistence(orchestrator.persistence_handle())?;
     let magnitude_u64 = u64::try_from(drift.unsigned_abs().min(u128::from(u64::MAX))).unwrap_or(0);
     if magnitude_u64 == 0 {
         return Ok(false);
@@ -307,4 +307,23 @@ fn post_wallet_adjustment(
         outcome,
         crate::adapters::persistence::ledger::LedgerSaveOutcome::Inserted { .. }
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::error::AppError;
+
+    use super::required_persistence;
+
+    #[test]
+    fn missing_persistence_returns_error_instead_of_panicking() {
+        let Err(error) = required_persistence(None) else {
+            panic!("missing persistence should error");
+        };
+
+        assert!(matches!(
+            error,
+            AppError::Persistence(message) if message == "reconciliation requires persistence"
+        ));
+    }
 }

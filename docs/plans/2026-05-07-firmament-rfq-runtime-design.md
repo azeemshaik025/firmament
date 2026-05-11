@@ -1,5 +1,9 @@
 # Firmament RFQ Maker Runtime — Production-Readiness Design
 
+> Archived implementation planning note. This file records the May 7 design
+> path and should not be read as the current runtime status. For current setup,
+> API, and operations guidance, use `README.md` and `docs/maker-setup.mdx`.
+
 **Date:** 2026-05-07
 **Branch:** v0.1.0
 **Scope:** Solana-only. Port ledger, RFQ lifecycle, reconciliation, and public-API ideas from the Munger reference repo into Firmament without changing schema or adding dependencies.

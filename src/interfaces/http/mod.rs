@@ -45,7 +45,7 @@ use crate::interfaces::http::auth::{
 use crate::interfaces::http::types::{
     AbandonRequest, AdminLoginRequest, AdminMeResponse, AdminSummaryResponse, AmountView,
     AssetResponse, ErrorBody, ErrorResponse, HtlcAcceptanceTerms, IntegrationStatus, LedgerSummary,
-    NextAction, PairResponse, PairsResponse, QuoteAcceptResponse, RfqPair, RfqRequest, RfqResponse,
+    NextAction, PairResponse, PairsResponse, RfqPair, RfqRequest, RfqResponse,
     RuntimeEventsResponse, RuntimeStateResponse, TakerLockRequest, TakerLockResponse,
     TakerRedeemRequest, TakerRedeemResponse, TakerRefundRequest, TakerRefundResponse, TradeAmounts,
     TradeResponse, WalletSettlementRequest, WalletSettlementResponse,
@@ -60,9 +60,6 @@ const ADMIN_COOKIE_NAME: &str = "firmament_admin";
 pub trait RfqApiService: Send + Sync {
     /// Handle an RFQ request.
     async fn request_quote(&self, request: RfqRequest) -> Result<RfqResponse, ApiError>;
-
-    /// Accept an existing quote and create a trade shell.
-    async fn accept_quote(&self, quote_id: QuoteId) -> Result<QuoteAcceptResponse, ApiError>;
 
     /// Start a connected-wallet settlement for an accepted quote.
     async fn start_wallet_settlement(
@@ -167,7 +164,6 @@ fn build_router(context: Arc<ApiContext>) -> Router {
         .route("/v1/runtime/ledger", get(runtime_read::get_ledger))
         .route("/v1/runtime/trades", get(runtime_read::get_trades))
         .route("/v1/rfq", post(post_rfq))
-        .route("/v1/quotes/{quote_id}/accept", post(post_quote_accept))
         .route(
             "/v1/quotes/{quote_id}/wallet-settlement",
             post(post_wallet_settlement),
@@ -288,16 +284,6 @@ impl DisabledRfqApiService {
 impl RfqApiService for DisabledRfqApiService {
     async fn request_quote(&self, request: RfqRequest) -> Result<RfqResponse, ApiError> {
         let _ = request;
-        Err(ApiError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "orchestrator_unavailable",
-            self.message.as_ref(),
-            Vec::new(),
-        ))
-    }
-
-    async fn accept_quote(&self, quote_id: QuoteId) -> Result<QuoteAcceptResponse, ApiError> {
-        let _ = quote_id;
         Err(ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "orchestrator_unavailable",
@@ -491,16 +477,6 @@ impl RfqApiService for OrchestratorRfqApiService {
             }
         }
         Ok(domain_to_api_rfq(response, fallback_output_mint, config))
-    }
-
-    async fn accept_quote(&self, quote_id: QuoteId) -> Result<QuoteAcceptResponse, ApiError> {
-        let _ = quote_id;
-        Err(ApiError::new(
-            StatusCode::NOT_IMPLEMENTED,
-            "wallet_settlement_required",
-            "server-side taker settlement is disabled; use /v1/quotes/{quote_id}/wallet-settlement",
-            Vec::new(),
-        ))
     }
 
     async fn start_wallet_settlement(
@@ -766,15 +742,6 @@ async fn post_rfq(
     let Json(request) = payload.map_err(|error| ApiError::from_json_rejection(&error))?;
     let response = context.service.request_quote(request).await?;
     Ok(Json(response).into_response())
-}
-
-async fn post_quote_accept(
-    State(context): State<Arc<ApiContext>>,
-    path: Result<Path<QuoteId>, PathRejection>,
-) -> Result<Response<Body>, ApiError> {
-    let Path(quote_id) = path.map_err(|error| ApiError::from_path_rejection(&error))?;
-    let response = context.service.accept_quote(quote_id).await?;
-    Ok((StatusCode::ACCEPTED, Json(response)).into_response())
 }
 
 async fn post_wallet_settlement(

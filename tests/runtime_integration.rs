@@ -562,7 +562,7 @@ async fn wallet_taker_lock_retry_continues_missing_maker_lock_after_restart() {
     );
     seed_working_custody(&persistence, &sol(), 400_000_000);
     seed_working_custody(&persistence, &usdc(), 20_000_000);
-    let htlc = FakeHtlcClient::with_failure(HtlcFailure::MakerInitiateOnce);
+    let htlc = FakeHtlcClient::with_failure(HtlcFailure::InitiateOnce);
     let orchestrator = persistent_harness_with_persistence(
         FakePriceProvider::default(),
         htlc.clone(),
@@ -625,7 +625,7 @@ async fn wallet_taker_redeem_retry_continues_missing_maker_redeem_after_restart(
     );
     seed_working_custody(&persistence, &sol(), 400_000_000);
     seed_working_custody(&persistence, &usdc(), 20_000_000);
-    let htlc = FakeHtlcClient::with_failure(HtlcFailure::MakerRedeemOnce);
+    let htlc = FakeHtlcClient::with_failure(HtlcFailure::RedeemOnce);
     let orchestrator = persistent_harness_with_persistence(
         FakePriceProvider::default(),
         htlc.clone(),
@@ -696,7 +696,7 @@ async fn wallet_taker_refund_retry_continues_missing_maker_refund_after_restart(
     );
     seed_working_custody(&persistence, &sol(), 400_000_000);
     seed_working_custody(&persistence, &usdc(), 20_000_000);
-    let htlc = FakeHtlcClient::with_failure(HtlcFailure::MakerRefundOnce);
+    let htlc = FakeHtlcClient::with_failure(HtlcFailure::RefundOnce);
     let orchestrator = persistent_harness_with_config(
         config.clone(),
         FakePriceProvider::default(),
@@ -1022,7 +1022,7 @@ async fn runtime_request_rfq_expires_stored_quotes_before_new_quote() {
 
 #[tokio::test]
 async fn runtime_settlement_failure_emits_failure_and_skips_rebalance() {
-    let htlc = FakeHtlcClient::with_failure(HtlcFailure::MakerInitiate);
+    let htlc = FakeHtlcClient::with_failure(HtlcFailure::Initiate);
     let swap = FakeSwapExecutor::default();
     let orchestrator = harness(
         FakePriceProvider::default(),
@@ -1991,10 +1991,10 @@ fn fake_leg_for_funder(funder: WalletRole) -> SettlementLeg {
 
 #[derive(Debug, Clone, Copy)]
 enum HtlcFailure {
-    MakerInitiate,
-    MakerInitiateOnce,
-    MakerRedeemOnce,
-    MakerRefundOnce,
+    Initiate,
+    InitiateOnce,
+    RedeemOnce,
+    RefundOnce,
 }
 
 impl FakeHtlcClient {
@@ -2033,10 +2033,10 @@ impl HtlcClient for FakeHtlcClient {
 
     async fn initiate(&self, request: HtlcInitiation) -> Result<HtlcReceipt, AppError> {
         let mut state = self.inner.lock().expect("htlc lock");
-        if matches!(state.failure, Some(HtlcFailure::MakerInitiate)) && state.initiated.len() == 1 {
+        if matches!(state.failure, Some(HtlcFailure::Initiate)) && state.initiated.len() == 1 {
             return Err(AppError::solana("maker initiate failed"));
         }
-        if matches!(state.failure, Some(HtlcFailure::MakerInitiateOnce))
+        if matches!(state.failure, Some(HtlcFailure::InitiateOnce))
             && request.funder == WalletRole::Maker
         {
             state.failure = None;
@@ -2200,7 +2200,7 @@ impl HtlcClient for FakeHtlcClient {
         leg: SettlementLeg,
     ) -> Result<HtlcReceipt, AppError> {
         let mut state = self.inner.lock().expect("htlc lock");
-        if matches!(state.failure, Some(HtlcFailure::MakerRefundOnce))
+        if matches!(state.failure, Some(HtlcFailure::RefundOnce))
             && leg == SettlementLeg::MakerOutput
         {
             state.failure = None;
@@ -2266,7 +2266,7 @@ impl HtlcClient for FakeHtlcClient {
 
     async fn redeem(&self, trade_id: TradeId, preimage: String) -> Result<HtlcReceipt, AppError> {
         let mut state = self.inner.lock().expect("htlc lock");
-        if matches!(state.failure, Some(HtlcFailure::MakerRedeemOnce)) {
+        if matches!(state.failure, Some(HtlcFailure::RedeemOnce)) {
             state.failure = None;
             return Err(AppError::solana("maker redeem failed once"));
         }

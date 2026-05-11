@@ -167,54 +167,6 @@ async fn api_runtime_events_endpoint_success() {
 }
 
 #[tokio::test]
-async fn api_legacy_accept_route_requires_wallet_settlement() {
-    let app = test_orchestrator_router().await;
-
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri("/v1/rfq")
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(rfq_request().to_string()))
-                .expect("request"),
-        )
-        .await
-        .expect("response");
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let quote_body = response_json(response).await;
-    assert_eq!(quote_body["status"], "accepted");
-    assert_eq!(quote_body["integration_status"], "runtime_orchestrated");
-    assert_ne!(quote_body["quoted_output_amount_raw"], 0);
-    assert!(quote_body["expires_at"].is_string());
-    assert!(quote_body["htlc_terms"]["expires_at"].is_string());
-    let quote_id = quote_body["quote_id"].as_str().expect("quote id");
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri(format!("/v1/quotes/{quote_id}/accept"))
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("response");
-
-    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
-    let accept_body = response_json(response).await;
-    assert_eq!(accept_body["error"]["code"], "wallet_settlement_required");
-    assert!(
-        accept_body["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("wallet-settlement")
-    );
-}
-
-#[tokio::test]
 async fn api_wallet_settlement_serializes_expiry_as_rfc3339_string() {
     let app = test_orchestrator_router().await;
 

@@ -662,7 +662,7 @@ impl RuntimePersistence {
     ///
     /// # Errors
     ///
-    /// Returns a persistence error when SQLite or serialization fails.
+    /// Returns a persistence error when `SQLite` or serialization fails.
     pub fn save_trade(&self, trade: &RuntimeTrade) -> AppResult<()> {
         let trade_json = serde_json::to_string(trade)
             .map_err(|error| AppError::persistence(format!("serialize runtime trade: {error}")))?;
@@ -743,7 +743,7 @@ impl RuntimePersistence {
     ///
     /// # Errors
     ///
-    /// Returns a persistence error when SQLite or deserialization fails.
+    /// Returns a persistence error when `SQLite` or deserialization fails.
     pub fn trade(&self, trade_id: TradeId) -> AppResult<Option<RuntimeTrade>> {
         self.db.with_connection(|connection| {
             connection
@@ -763,7 +763,7 @@ impl RuntimePersistence {
     ///
     /// # Errors
     ///
-    /// Returns a persistence error when SQLite or deserialization fails.
+    /// Returns a persistence error when `SQLite` or deserialization fails.
     pub fn load_trades(&self) -> AppResult<Vec<RuntimeTrade>> {
         self.db.with_connection(|connection| {
             let mut statement = connection
@@ -786,7 +786,7 @@ impl RuntimePersistence {
     ///
     /// # Errors
     ///
-    /// Returns a persistence error when SQLite or serialization fails.
+    /// Returns a persistence error when `SQLite` or serialization fails.
     fn save_wallet_settlement(&self, state: &WalletSettlementState) -> AppResult<()> {
         let state_json = serde_json::to_string(state).map_err(|error| {
             AppError::persistence(format!("serialize wallet settlement state: {error}"))
@@ -839,7 +839,7 @@ impl RuntimePersistence {
     ///
     /// # Errors
     ///
-    /// Returns a persistence error when SQLite fails.
+    /// Returns a persistence error when `SQLite` fails.
     fn delete_wallet_settlement(&self, trade_id: TradeId) -> AppResult<()> {
         self.db.with_connection_mut(|connection| {
             connection
@@ -856,7 +856,7 @@ impl RuntimePersistence {
     ///
     /// # Errors
     ///
-    /// Returns a persistence error when SQLite or deserialization fails.
+    /// Returns a persistence error when `SQLite` or deserialization fails.
     fn load_wallet_settlements(&self) -> AppResult<Vec<WalletSettlementState>> {
         self.db.with_connection(|connection| {
             let mut statement = connection
@@ -1814,10 +1814,10 @@ impl RuntimeOrchestrator {
             );
             self.publish(RuntimeEvent::Settlement(transition.event))
                 .await?;
-            // TODO(v0.2): wire real confirmation polling for the wallet flow.
-            // The browser-driven path posts the signed taker tx via
-            // `record_external_initiate`, which already confirms and validates
-            // the expected HTLC account before returning.
+            // Current wallet-flow confirmation boundary: the browser-driven
+            // path posts the signed taker tx via `record_external_initiate`,
+            // which confirms and validates the expected HTLC account before
+            // returning.
             let confirmation = state
                 .settlement
                 .confirm_taker_lock(self.app_state.run_id())?;
@@ -1851,9 +1851,9 @@ impl RuntimeOrchestrator {
             );
             self.publish(RuntimeEvent::Settlement(transition.event))
                 .await?;
-            // TODO(v0.2): wire real confirmation polling for the wallet flow.
-            // The maker leg uses `initiate_with_external_redeemer` which submits
-            // and signs locally; for v1 we treat the submission as confirmed.
+            // Current wallet-flow confirmation boundary: the maker leg uses
+            // `initiate_with_external_redeemer`, which submits, signs, and
+            // confirms the locally controlled maker tx before returning.
             let confirmation = state
                 .settlement
                 .confirm_maker_lock(self.app_state.run_id())?;
@@ -3559,9 +3559,8 @@ fn convert_usdc_to_asset_raw(
 
 impl RuntimeOrchestrator {
     /// Treat FREE Gateway USDC as additional supply for the requested output
-    /// asset. T9 scope: this only widens the gate the inventory-first risk
-    /// rule sees — it does not yet formalize an `ExecutionPath` enum or wire a
-    /// distinct settlement path (that is worktree C, T-C1).
+    /// asset while the path resolver decides whether the quote is inventory
+    /// backed or Gateway backed.
     ///
     /// Behaviour:
     /// * No persistence wired -> nothing to do.

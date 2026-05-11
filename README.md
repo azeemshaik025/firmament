@@ -106,6 +106,8 @@ Full maker setup lives in [docs/maker-setup.mdx](/Users/azeemshaik/work/hackatho
 ## HTTP API
 
 - `GET /health`
+- `GET /v1/assets`
+- `GET /v1/pairs`
 - `POST /v1/rfq`
 - `POST /v1/quotes/{quote_id}/wallet-settlement`
 - `POST /v1/trades/{trade_id}/resume`
@@ -182,8 +184,8 @@ the required opt-in env vars before running them.
 
 ## External References
 
-- [Jupiter Swap API V2 Order & Execute](https://developers.jup.ag/docs/swap/order-and-execute)
-- [Jupiter Swap API V2 Build](https://developers.jup.ag/docs/swap/build)
+- [Jupiter Swap API V2 Order & Execute](https://developers.jup.ag/docs/swap/v2/order-and-execute)
+- [Jupiter Swap API V2 Build](https://developers.jup.ag/docs/swap/v2/build)
 - [Circle Gateway Solana Quickstart](https://developers.circle.com/gateway/quickstarts/unified-balance-solana)
 - [Circle Gateway Technical Guide](https://developers.circle.com/gateway/references/technical-guide)
 - [Coinbase cbBTC network addresses](https://www.coinbase.com/cbbtc)

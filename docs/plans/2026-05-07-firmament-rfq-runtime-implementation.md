@@ -1,5 +1,9 @@
 # Firmament RFQ Maker Runtime Implementation Plan
 
+> Archived implementation planning note. This file records the May 7 build plan
+> and should not be read as the current runtime status. For current setup, API,
+> and operations guidance, use `README.md` and `docs/maker-setup.mdx`.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Bring Firmament's Solana-only RFQ Maker Runtime to production-ready state by porting Munger's ledger/RFQ/reconciliation patterns: 4 new ledger account types, full lifecycle wiring per the design, always-on reconciliation worker, 3 public read endpoints, and frontend alignment.

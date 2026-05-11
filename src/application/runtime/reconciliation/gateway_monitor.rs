@@ -1,22 +1,19 @@
 //! Gateway-side reconciliation: `gateway` + `sum(gateway_reserved:*)` vs.
 //! Circle Gateway-reported balance.
 
-use std::collections::HashMap;
-
-use time::OffsetDateTime;
-
+use super::drift::{DriftOutcome, DriftWindow};
+use super::wallet_monitor::ObservationOutcome;
+use super::{SequenceMap, format_utc_date};
 use crate::adapters::persistence::ledger::{LedgerAccountId, LedgerAccountType};
-use crate::application::runtime::orchestrator::RuntimeOrchestrator;
+use crate::application::runtime::orchestrator::{RuntimeOrchestrator, RuntimePersistence};
 use crate::config::ReconciliationConfig;
 use crate::domain::events::{
     EventMetadata, ReconciliationEvent, ReconciliationOutcome, ReconciliationScope, RuntimeEvent,
 };
 use crate::domain::types::{AmountRaw, AssetId};
-use crate::error::AppResult;
-
-use super::drift::{DriftOutcome, DriftWindow};
-use super::wallet_monitor::ObservationOutcome;
-use super::{SequenceMap, format_utc_date};
+use crate::error::{AppError, AppResult};
+use std::{collections::HashMap, sync::Arc};
+use time::OffsetDateTime;
 
 /// One Gateway observation result.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,7 +88,7 @@ impl GatewayMonitor {
                 ObservationOutcome::Building { observations }
             }
             DriftOutcome::Trigger { drift } => {
-                let reserved_active = gateway_reserved_active(orchestrator, asset).unwrap_or(false);
+                let reserved_active = gateway_reserved_active(orchestrator, asset)?;
                 if drift < 0 && reserved_active {
                     window.reset();
                     ObservationOutcome::Skipped {
@@ -138,9 +135,7 @@ impl GatewayMonitor {
         orchestrator: &RuntimeOrchestrator,
         asset: &AssetId,
     ) -> AppResult<i128> {
-        let persistence = orchestrator
-            .persistence_handle()
-            .expect("reconciliation requires persistence");
+        let persistence = required_persistence(orchestrator.persistence_handle())?;
 
         let gateway = persistence.account_balance(&LedgerAccountId::gateway(asset.clone()))?;
         let reserved =
@@ -206,9 +201,7 @@ async fn read_gateway_balance(
 }
 
 fn gateway_reserved_active(orchestrator: &RuntimeOrchestrator, asset: &AssetId) -> AppResult<bool> {
-    let persistence = orchestrator
-        .persistence_handle()
-        .expect("reconciliation requires persistence");
+    let persistence = required_persistence(orchestrator.persistence_handle())?;
     let reserved =
         persistence.aggregate_balance_by_type(LedgerAccountType::GatewayReserved, asset)?;
     Ok(reserved > 0)
@@ -220,9 +213,7 @@ fn post_gateway_adjustment(
     drift: i128,
     idempotency_key: &str,
 ) -> AppResult<bool> {
-    let persistence = orchestrator
-        .persistence_handle()
-        .expect("reconciliation requires persistence");
+    let persistence = required_persistence(orchestrator.persistence_handle())?;
     let magnitude_u64 = u64::try_from(drift.unsigned_abs().min(u128::from(u64::MAX))).unwrap_or(0);
     if magnitude_u64 == 0 {
         return Ok(false);
@@ -260,4 +251,29 @@ fn post_gateway_adjustment(
         outcome,
         crate::adapters::persistence::ledger::LedgerSaveOutcome::Inserted { .. }
     ))
+}
+
+fn required_persistence(
+    persistence: Option<Arc<RuntimePersistence>>,
+) -> AppResult<Arc<RuntimePersistence>> {
+    persistence.ok_or_else(|| AppError::persistence("reconciliation requires persistence"))
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::error::AppError;
+
+    use super::required_persistence;
+
+    #[test]
+    fn missing_persistence_returns_error_instead_of_panicking() {
+        let Err(error) = required_persistence(None) else {
+            panic!("missing persistence should error");
+        };
+
+        assert!(matches!(
+            error,
+            AppError::Persistence(message) if message == "reconciliation requires persistence"
+        ));
+    }
 }
