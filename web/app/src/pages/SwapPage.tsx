@@ -62,7 +62,7 @@ const nativeSolMint = 'So11111111111111111111111111111111111111112';
 const assetLogoUrls: Record<string, string> = {
   sol: 'https://garden.imgix.net/chain_images/solana.png',
   usdc: 'https://garden.imgix.net/token-images/usdc.svg',
-  cbbtc: 'https://garden.imgix.net/token-images/cbBTC.svg'
+  cbbtc: 'https://gardenfi.imgix.net/catalog/token-images/cbBTC.svg'
 };
 
 type PersistedSwapState = {
