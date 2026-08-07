@@ -1,14 +1,20 @@
-# Firmament RFQ Maker Runtime
+# Firmament — Solana RFQ Maker Runtime
 
-Firmament is a Solana RFQ maker runtime for managed liquidity demos.
+Firmament is a Solana RFQ maker runtime. It keeps a USDC reserve, sources
+configured assets through Jupiter, quotes RFQs under policy, settles on Solana
+HTLCs, and repairs inventory after each fill.
 
-The project is focused on the backend solver/runtime, not on making a full
-consumer DEX product. The web app is a minimal demo surface that proves the
-runtime can request firm quotes, drive wallet settlement, and expose read-only
-operator stats.
+It is open source and meant to be run yourself. There is no hosted instance to
+sign into — you clone the repo and run the backend and web app on your own
+machine. The only thing deployed publicly is the landing page, which is
+informational.
 
-Default local mode is safe: it starts the API and runtime projection with live
-protocol workers disabled. Live maker mode requires real credentials, a funded
+The focus is the backend solver/runtime, not a full consumer DEX. The web app is
+a small surface that shows the runtime requesting firm quotes, driving wallet
+settlement, and exposing read-only operator stats.
+
+Default local mode is safe: the API and runtime projection start with live
+protocol workers disabled. Live maker mode needs real credentials, a funded
 maker wallet, verified asset mints, and explicit caps.
 
 ## What Is In This Repo
@@ -24,7 +30,20 @@ maker wallet, verified asset mints, and explicit caps.
 - Unit and integration tests that run without live credentials.
 - Env-gated live smoke tests for mainnet-only tiny-amount checks.
 
+## Prerequisites
+
+- Rust 1.85+ (edition 2024) with Cargo
+- Node.js 18+ and npm — for the web app and landing page
+- A Solana RPC endpoint for anything beyond the default offline mode
+
 ## Running Locally
+
+Clone the repo:
+
+```bash
+git clone https://github.com/azeemshaik025/firmament.git
+cd firmament
+```
 
 Start the backend API/runtime:
 
@@ -101,7 +120,7 @@ With that default, the backend boots the local projection/API without attaching
 live protocol workers. Enable protocol workers only after configuring wallets,
 RPC, API keys, caps, and a verified cbBTC Solana mint.
 
-Full maker setup lives in [docs/maker-setup.mdx](/Users/azeemshaik/work/hackathons/firmament/docs/maker-setup.mdx).
+Full maker setup lives in [docs/maker-setup.mdx](docs/maker-setup.mdx).
 
 ## HTTP API
 
@@ -126,12 +145,12 @@ unavailable response instead of pretending to settle.
 
 ## Web App
 
-The web app is intentionally minimal:
+The web app is intentionally minimal, and runs locally alongside the backend:
 
 - `/app` is the swap demo surface.
-- `/app/runtime` is the public read-only Live Runtime summary with global recent
+- `/app/runtime` is the read-only Live Runtime summary with global recent
   trades.
-- Public takers connect a Solana browser wallet and use the wallet-settlement
+- Takers connect a Solana browser wallet and use the wallet-settlement
   endpoints.
 - The swap view keeps browser-local recovery state for the connected wallet,
   including a wallet-specific trade history drawer. Preimages stay in the
@@ -140,13 +159,13 @@ The web app is intentionally minimal:
   backend confirms the expected Solana HTLC account effect.
 
 The backend does not serve frontend files. Keep `cargo run` and `npm run dev`
-running in separate terminals during demos.
+running in separate terminals.
 
 ## Landing
 
 The landing page lives in `landing/` as part of this monorepo. It is a Next.js
-project used for project positioning and submission material. It is not served
-by the Rust backend.
+project used for project positioning, and it is the only piece meant to be
+deployed publicly. It is not served by the Rust backend.
 
 Useful commands:
 
@@ -189,3 +208,8 @@ the required opt-in env vars before running them.
 - [Circle Gateway Solana Quickstart](https://developers.circle.com/gateway/quickstarts/unified-balance-solana)
 - [Circle Gateway Technical Guide](https://developers.circle.com/gateway/references/technical-guide)
 - [Coinbase cbBTC network addresses](https://www.coinbase.com/cbbtc)
+
+## License
+
+Dual-licensed under either [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at
+your option.
