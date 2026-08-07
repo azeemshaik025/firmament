@@ -4,10 +4,9 @@ Firmament is a Solana RFQ maker runtime. It keeps a USDC reserve, sources
 configured assets through Jupiter, quotes RFQs under policy, settles on Solana
 HTLCs, and repairs inventory after each fill.
 
-It is open source and meant to be run yourself. There is no hosted instance to
-sign into — you clone the repo and run the backend and web app on your own
-machine. The only thing deployed publicly is the landing page, which is
-informational.
+You run it yourself. Clone the repo and bring the runtime up on your own machine
+or your own cloud — the maker wallet, keys, and policy stay entirely under your
+control.
 
 The focus is the backend solver/runtime, not a full consumer DEX. The web app is
 a small surface that shows the runtime requesting firm quotes, driving wallet
