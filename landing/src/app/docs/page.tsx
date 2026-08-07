@@ -52,8 +52,8 @@ export default function DocsPage() {
           </span>
           <span>Firmament</span>
         </Link>
-        <a className="nav-action" href="/app" target="_blank" rel="noreferrer">
-          <span>Launch app</span>
+        <a className="nav-action" href="https://github.com/azeemshaik025/firmament" target="_blank" rel="noreferrer">
+          <span>GitHub</span>
           <span className="button-arrow" aria-hidden="true">
             {"\u2192"}
           </span>

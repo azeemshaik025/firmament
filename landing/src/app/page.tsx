@@ -1,7 +1,7 @@
 import { DemoSequence } from "@/components/demo-sequence";
 
-const appHref = "/app";
-const runtimeHref = "/app/runtime";
+const repoHref = "https://github.com/azeemshaik025/firmament";
+const runtimeHref = "https://github.com/azeemshaik025/firmament/blob/v0.1.0/docs/runtime-proof.mdx";
 const docsHref = "/docs";
 
 const proofPoints = [
@@ -119,11 +119,11 @@ export default function Home() {
         </nav>
         <a
           className="nav-action"
-          href={appHref}
+          href={repoHref}
           target="_blank"
           rel="noreferrer"
         >
-          <span>Launch app</span>
+          <span>GitHub</span>
           <span className="button-arrow" aria-hidden="true">
             {"\u2192"}
           </span>
@@ -148,11 +148,11 @@ export default function Home() {
           <div className="hero-actions">
             <a
               className="button button-primary"
-              href={appHref}
+              href={repoHref}
               target="_blank"
               rel="noreferrer"
             >
-              <span>Launch app</span>
+              <span>View on GitHub</span>
               <span className="button-arrow" aria-hidden="true">
                 {"\u2192"}
               </span>
@@ -349,8 +349,8 @@ export default function Home() {
             </div>
           </div>
           <div className="footer-actions" aria-label="Footer links">
-            <a href={appHref} target="_blank" rel="noreferrer">
-              <span>Launch app</span>
+            <a href={repoHref} target="_blank" rel="noreferrer">
+              <span>GitHub</span>
               <span className="button-arrow" aria-hidden="true">
                 {"\u2192"}
               </span>
