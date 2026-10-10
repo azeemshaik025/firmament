@@ -648,7 +648,7 @@ fn cap_notional_for_pair(
 }
 
 fn is_non_native_non_stable_asset(asset: &AssetId) -> bool {
-    !matches!(asset.as_str(), "USDC" | "SOL")
+    !crate::domain::assets::uses_stable_notional_limit(asset)
 }
 
 fn inventory_policy_from_limits(limits: &AutomationLimits) -> InventoryPolicy {

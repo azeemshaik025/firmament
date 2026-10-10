@@ -86,7 +86,7 @@ impl RfqContext {
                 .supported
                 .iter()
                 .map(|asset| {
-                    let limit = if matches!(asset.id.as_str(), "USDC" | "SOL") {
+                    let limit = if crate::domain::assets::uses_stable_notional_limit(&asset.id) {
                         config.risk.max_trade_notional_usd
                     } else {
                         config.risk.max_non_stable_asset_notional_usd

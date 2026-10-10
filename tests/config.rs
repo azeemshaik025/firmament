@@ -24,9 +24,9 @@ fn config_example_parses_and_validates() {
     let config = example_config();
 
     config.validate().expect("config.example.toml validates");
-    assert_eq!(config.assets.supported.len(), 3);
+    assert_eq!(config.assets.supported.len(), 4);
     assert!(config.assets.blacklisted_pairs.is_empty());
-    assert_eq!(config.assets.enabled_pairs().len(), 6);
+    assert_eq!(config.assets.enabled_pairs().len(), 12);
     assert_eq!(config.solana.cluster, "mainnet-beta");
 }
 
@@ -272,4 +272,47 @@ event_capacity = 64
         config.reconciliation.dust.get("USDC").copied(),
         Some(10_000)
     );
+}
+
+#[test]
+fn config_example_enables_eurc_on_the_circle_mint() {
+    let config = example_config();
+    let eurc = config
+        .assets
+        .supported
+        .iter()
+        .find(|asset| asset.id.as_str() == "EURC")
+        .expect("EURC row");
+    assert!(eurc.enabled);
+    assert_eq!(
+        eurc.mint.as_str(),
+        "HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr"
+    );
+    assert_eq!(eurc.decimals, 6);
+    let weights: Decimal = config
+        .assets
+        .supported
+        .iter()
+        .map(|asset| asset.target_weight)
+        .sum();
+    assert_eq!(weights, Decimal::ONE);
+}
+
+#[test]
+fn stablecoins_and_sol_use_the_stable_notional_limit() {
+    use firmament::assets::uses_stable_notional_limit;
+    use firmament::types::AssetId;
+
+    for (asset, expected) in [
+        ("USDC", true),
+        ("EURC", true),
+        ("SOL", true),
+        ("cbBTC", false),
+    ] {
+        assert_eq!(
+            uses_stable_notional_limit(&AssetId::from(asset)),
+            expected,
+            "{asset}"
+        );
+    }
 }

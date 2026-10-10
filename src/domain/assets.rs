@@ -23,6 +23,17 @@ pub const CBBTC_ID: &str = "cbBTC";
 pub const USDC_MINT: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 /// Coinbase cbBTC mint on Solana mainnet.
 pub const CBBTC_MINT: &str = "cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij";
+/// Stable asset identifier for Circle's euro stablecoin.
+pub const EURC_ID: &str = "EURC";
+/// Circle EURC mint on Solana mainnet.
+pub const EURC_MINT: &str = "HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr";
+
+/// True for assets whose notional is capped by the stable trade limit rather
+/// than the non-stable exception: the stablecoins and native SOL.
+#[must_use]
+pub fn uses_stable_notional_limit(asset: &AssetId) -> bool {
+    matches!(asset.as_str(), USDC_ID | EURC_ID | SOL_ID)
+}
 
 /// Whether an asset is native SOL or an SPL-compatible token mint.
 #[derive(Debug, Clone, PartialEq, Eq)]

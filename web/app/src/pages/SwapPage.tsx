@@ -28,6 +28,7 @@ const noticeTimeoutMs: Record<NoticeTone, number> = {
 const fallbackAssets: Asset[] = [
   { id: 'USDC', symbol: 'USDC', name: 'USD Coin', mint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', decimals: 6, min_trade_amount: '1', max_trade_amount: '2' },
   { id: 'SOL', symbol: 'SOL', name: 'Solana', mint: 'So11111111111111111111111111111111111111112', decimals: 9, min_trade_amount: '0.01', max_trade_amount: '0.02' },
+  { id: 'EURC', symbol: 'EURC', name: 'Euro Coin', mint: 'HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr', decimals: 6, min_trade_amount: '1', max_trade_amount: '2' },
   { id: 'cbBTC', symbol: 'cbBTC', name: 'Coinbase Wrapped BTC', mint: 'cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij', decimals: 8, min_trade_amount: '0.00001', max_trade_amount: '0.00002' }
 ];
 

@@ -115,11 +115,18 @@ enabled = true
 Coinbase currently lists that address for cbBTC on Solana. Check Jupiter
 liquidity and route minimums before a cbBTC demo.
 
+EURC is Circle's euro stablecoin on Solana (mint
+`HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr`, 6 decimals, legacy Token
+program). The maker must hold EURC working inventory to quote USDC→EURC; buy it
+through Jupiter or send it from a wallet. Rebalancing treats EURC like USDC and
+SOL for notional caps.
+
 ## 4. Choose pairs
 
 Every enabled asset can quote against every other enabled asset by default:
 
 - USDC to SOL and SOL to USDC
+- USDC to EURC and EURC to USDC
 - USDC to cbBTC and cbBTC to USDC
 - SOL to cbBTC and cbBTC to SOL
 
