@@ -237,6 +237,13 @@ export function PayPage() {
         writeStored(null);
         setPhase({ kind: 'form' });
       } catch (error) {
+        // A finished trade has no settlement to resume; the trade record says how it ended.
+        const trade = await api.trade(stored.tradeId).catch(() => null);
+        if (trade?.settlement_status === 'redeemed' || trade?.settlement_status === 'refunded') {
+          writeStored(null);
+          setPhase({ kind: trade.settlement_status === 'redeemed' ? 'paid' : 'refunded', tradeId: stored.tradeId, signatures: trade.tx_signatures ?? [] });
+          return;
+        }
         setPhase({ kind: 'failed', message: walletFailure(error, 'Could not resume the payment.') });
       }
     })();

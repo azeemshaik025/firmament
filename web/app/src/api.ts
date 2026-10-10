@@ -115,6 +115,12 @@ export type WalletSettlementResumeResponse = {
   next_action?: NextAction | null;
 };
 
+export type TradeLookupResponse = {
+  trade_id: string;
+  settlement_status: string;
+  tx_signatures?: string[];
+};
+
 export type TradeStepResponse = {
   trade_id: string;
   settlement_status: string;
@@ -297,6 +303,7 @@ export const api = {
     method: 'POST',
     body: JSON.stringify(payload)
   }),
+  trade: (tradeId: string) => request<TradeLookupResponse>(`/v1/trades/${tradeId}`),
   resumeSettlement: (tradeId: string) => request<WalletSettlementResumeResponse>(`/v1/trades/${tradeId}/resume`, {
     method: 'POST'
   }),
