@@ -5,7 +5,7 @@ description: "A firm-quote FX maker for stablecoin payments on Solana."
 
 # Firmament
 
-Firmament is a self-hosted maker runtime for stablecoin payments. A payment app asks for an exact recipient amount (say 89.30 EURC), gets the USDC cost held for the quote window, and settles both legs atomically over Solana HTLCs, to the sender or to a named recipient. The runtime handles quote decisions, risk checks, wallet settlement state, ledger entries, inventory repair, and public runtime reads.
+Firmament is a self-hosted maker runtime for stablecoin payments. A payment app asks for an exact recipient amount (say 89.30 EURC), gets the USDC cost held for the quote window, and settles both legs through Solana HTLCs under one secret, to the sender or to a named recipient. The runtime handles quote decisions, risk checks, wallet settlement state, ledger entries, inventory repair, and public runtime reads.
 
 The web app has a Pay page, the original swap demo, and a read-only maker page. The main work lives in the Rust backend.
 

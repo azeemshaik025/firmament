@@ -2,7 +2,7 @@
 
 The rate you promise is the rate they get. A payment app asks Firmament for an
 exact recipient amount in EURC, gets the USDC cost held for 30 seconds, and
-settles both legs atomically over Solana HTLCs, to the sender or to a named
+settles both legs through Solana HTLCs under one secret, to the sender or to a named
 recipient. Underneath is a self-hosted maker runtime: policy-gated RFQs,
 USDC/EURC/SOL working inventory, Jupiter rebalancing, Circle Gateway USDC
 refill, and a double-entry ledger.

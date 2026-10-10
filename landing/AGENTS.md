@@ -4,8 +4,8 @@
 
 Firmament is a firm-quote FX maker for stablecoin payments on Solana. A payment
 app asks for an exact recipient amount in EURC, gets the USDC cost held for 30
-seconds, and settles both legs atomically over Solana HTLCs, to the sender or
-to a named recipient. Underneath: policy-gated RFQs, EURC/USDC/SOL working
+seconds, and settles both legs through Solana HTLCs under one secret, to the
+sender or to a named recipient. Underneath: policy-gated RFQs, EURC/USDC/SOL working
 inventory, Jupiter rebalancing, Circle Gateway USDC refill, and a double-entry
 SQLite ledger.
 
@@ -25,8 +25,8 @@ Optimize all landing and submission copy for Colosseum's judging criteria:
 - **Functionality:** a live mainnet payment with exact recipient amounts.
 - **Potential impact:** the FX leg under every multi-currency stablecoin
   payment app on Solana.
-- **Novelty:** exact-output firm quotes with atomic settlement; nobody else is
-  the maker under the payment.
+- **Novelty:** exact-output firm quotes settled through paired escrows; nobody
+  else is the maker under the payment.
 - **UX:** the number shown before signing is the number delivered.
 - **Open-source/composability:** MIT/Apache runtime any app can self-host; a
   two-call HTTP API.

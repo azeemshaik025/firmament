@@ -13,7 +13,7 @@ const steps = [
   },
   {
     title: "Deliver",
-    copy: "The sender reveals the secret. The recipient's EURC and the maker's USDC clear together, or both locks refund.",
+    copy: "The sender reveals the secret to release the recipient's EURC; the maker collects the USDC with the same secret. An unmatched lock refunds after expiry.",
   },
 ];
 

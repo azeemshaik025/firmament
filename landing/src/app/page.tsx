@@ -26,8 +26,8 @@ const lanes = [
 const spec = [
   ["Assets", "USDC, EURC, SOL"],
   ["Quote", "Exact output amount, cost held for 30 seconds"],
-  ["Recipient", "Any Solana address; the token account is created if missing"],
-  ["Settlement", "Two Solana HTLCs under one secret: both legs clear or both refund"],
+  ["Recipient", "Any Solana wallet address; the token account is created if missing"],
+  ["Settlement", "Two Solana HTLCs under one secret: the recipient's leg releases first, the maker collects with the same secret, an unmatched lock refunds after expiry"],
   ["Inventory", "The maker's own wallet, rebalanced through Jupiter Swap API v2, USDC refilled through Circle Gateway"],
   ["Accounting", "Double-entry SQLite ledger with per-trade P&L"],
   ["Interface", "HTTP API: POST /v1/rfq with output_amount, then wallet-settlement with recipient"],
@@ -53,7 +53,7 @@ const faq = [
   },
   {
     q: "What if the maker never locks its side?",
-    a: "The sender refunds after expiry. The maker can never take USDC without the EURC leg clearing in the same step.",
+    a: "The sender refunds after expiry. The maker can only collect the USDC with the secret the sender reveals to collect the EURC, so the maker is never paid before the recipient.",
   },
   {
     q: "What is new for the Crypto World's Fair?",
@@ -89,8 +89,9 @@ export default function Home() {
           <h1 id="hero-title">The rate you promise is the rate they get.</h1>
           <p className="hero-lede">
             Firmament quotes an exact EURC amount for the recipient, holds the
-            USDC cost for 30 seconds, and settles both legs atomically. The
-            number shown before signing is the number delivered.
+            USDC cost for 30 seconds, and settles both legs through escrows
+            that open with one secret. The number shown before signing is the
+            number delivered.
           </p>
           <div className="hero-actions">
             <a className="button button-primary" href={demoHref}>
