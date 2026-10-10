@@ -13,8 +13,11 @@ const demoSigner: Plugin = {
   name: 'firmament-demo-signer',
   apply: 'serve',
   configureServer(server) {
-    server.middlewares.use('/__demo-signer', (_request, response) => {
-      if (!demoSignerPath) {
+    server.middlewares.use('/__demo-signer', (request, response) => {
+      // This runs ahead of Vite's host check, so refuse anything but the loopback host
+      // ourselves; a DNS-rebinding page must not be able to read the keypair.
+      const loopback = /^(127\.0\.0\.1|localhost)(:\d+)?$/.test(request.headers.host ?? '');
+      if (!demoSignerPath || !loopback) {
         response.statusCode = 404;
         response.end();
         return;
