@@ -1,8 +1,8 @@
 import { DemoSequence } from "@/components/demo-sequence";
 
 const repoHref = "https://github.com/azeemshaik025/firmament";
-const appHref = process.env.NEXT_PUBLIC_APP_URL ?? "/app";
-const makerHref = `${appHref}/runtime`;
+const demoHref = process.env.NEXT_PUBLIC_DEMO_URL ?? "#proof";
+const makerHref = `${repoHref}/blob/main/docs/runtime-proof.mdx`;
 const docsHref = "/docs";
 
 const proofPoints = [
@@ -118,8 +118,13 @@ export default function Home() {
           <a href="#api">API</a>
           <a href={docsHref}>Docs</a>
         </nav>
-        <a className="nav-action" href={appHref}>
-          <span>Try a payment</span>
+        <a
+          className="nav-action"
+          href={repoHref}
+          target="_blank"
+          rel="noreferrer"
+        >
+          <span>GitHub</span>
           <span className="button-arrow" aria-hidden="true">
             {"→"}
           </span>
@@ -142,8 +147,8 @@ export default function Home() {
             settles both legs atomically on Solana.
           </p>
           <div className="hero-actions">
-            <a className="button button-primary" href={appHref}>
-              <span>Try a payment</span>
+            <a className="button button-primary" href={demoHref}>
+              <span>Watch a payment</span>
               <span className="button-arrow" aria-hidden="true">
                 {"→"}
               </span>
@@ -264,8 +269,13 @@ export default function Home() {
               <span>Read-only</span>
               <span>Ledger-backed</span>
             </div>
-            <a className="button button-primary runtime-button" href={makerHref}>
-              Open the maker page
+            <a
+              className="button button-primary runtime-button"
+              href={makerHref}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Read the runtime proof
             </a>
           </div>
         </div>
@@ -347,7 +357,9 @@ export default function Home() {
                 {"→"}
               </span>
             </a>
-            <a href={makerHref}>Maker</a>
+            <a href={makerHref} target="_blank" rel="noreferrer">
+              Runtime proof
+            </a>
             <a href={docsHref}>Docs</a>
           </div>
         </div>
