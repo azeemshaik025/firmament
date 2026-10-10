@@ -1550,9 +1550,12 @@ fn rejection_message(reason: &RejectionReason) -> (&'static str, &'static str) {
             "The amount is below the per-asset minimum.",
             "Try a larger amount.",
         ),
-        RejectionReason::InventoryBelowQuoteableThreshold
-        | RejectionReason::ExposureLimitExceeded => (
-            "No liquidity sources found.",
+        RejectionReason::InventoryBelowQuoteableThreshold => (
+            "The maker does not hold enough of that asset to quote.",
+            "Try a smaller amount or wait for the maker to rebalance.",
+        ),
+        RejectionReason::ExposureLimitExceeded => (
+            "The maker's exposure limit for this pair is reached.",
             "Try a smaller amount or a different pair.",
         ),
         RejectionReason::StalePrice => (
