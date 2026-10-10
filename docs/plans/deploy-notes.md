@@ -2,11 +2,11 @@
 
 Live surfaces (Crypto World's Fair entry):
 
-- Landing: https://firmament-landing.vercel.app (Vercel project `firmament-landing`, static export, `NEXT_PUBLIC_APP_URL` set)
-- Web app: https://firmament-app.vercel.app/app (Vercel project `firmament-app`, `VITE_SOLANA_RPC_URL` = PublicNode; `/v1/*` and `/health` rewrite to the API)
-- API: https://firmament-api.fly.dev (Fly.io app `firmament-api`, region bom, 256MB shared-cpu-1x, 1GB volume at `/data`)
+- Landing: https://firmament-landing.vercel.app (Vercel project `firmament-landing`, static export; links to the repo and the runtime-proof doc)
+- Web app: https://firmament-app.vercel.app/app is deployed but unlinked; its `/v1/*` rewrite targets `firmament-api.fly.dev`, which does not exist. The demo runs the API and app locally.
+- API: local only for the hackathon (`cargo run` with `.env` + `config.toml`, bind 127.0.0.1:5050). RPC is `https://api.mainnet-beta.solana.com`: PublicNode returns 403 for token-account methods and dRPC 400.
 
-API deploy sequence (after a payment method exists on the Fly account):
+Optional Fly.io deploy (`fly.toml` is committed; the account needs a payment method):
 
 ```bash
 flyctl apps create firmament-api --org personal
