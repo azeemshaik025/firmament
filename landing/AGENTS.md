@@ -2,42 +2,47 @@
 
 ## Product Summary
 
-Firmament is a Solana-only RFQ maker runtime. It is backend liquidity
-infrastructure for apps and treasuries that need managed USDC, SOL, and cbBTC
-working inventory, firm quotes, risk-aware rejection, browser-wallet Solana HTLC
-settlement, Jupiter-based rebalancing, Circle Gateway USDC refill, and local
-SQLite ledger/P&L projection.
+Firmament is a firm-quote FX maker for stablecoin payments on Solana. A payment
+app asks for an exact recipient amount in EURC, gets the USDC cost held for 30
+seconds, and settles both legs atomically over Solana HTLCs, to the sender or
+to a named recipient. Underneath: policy-gated RFQs, EURC/USDC/SOL working
+inventory, Jupiter rebalancing, Circle Gateway USDC refill, and a double-entry
+SQLite ledger.
 
-The landing page is a submission narrative surface. The runtime and demo swap
-flow remain the proof.
+The landing page is a submission narrative surface. The Pay page and the maker
+page remain the proof.
 
 ## Colosseum Submission Positioning
 
-This project targets the **Solana Frontier Hackathon** by Colosseum, running
-April 6-May 11, 2026. Submissions are judged as startup products, not bounty
-entries: there are no Frontier tracks or sponsor bounties to optimize for.
+This project is entered in the **Crypto World's Fair** hackathon by Colosseum
+(Sep 14–Oct 12, 2026), category Payments & Remittance. Everything built before
+Sep 14, 2026 was built for the Solana Frontier Hackathon and is disclosed as
+prior work; the World's Fair entry adds EURC, exact-output quotes, third-party
+recipients, the Pay page, and the redeploy.
 
 Optimize all landing and submission copy for Colosseum's judging criteria:
 
-- **Functionality:** a working Solana runtime with a crisp demo path.
-- **Potential impact:** embedded liquidity infrastructure for Solana apps and
-  treasuries.
-- **Novelty:** managed inventory, firm RFQs, risk-aware rejection, rebalancing,
-  Gateway refill, ledger/P&L, and operator supervision.
-- **UX:** a simple taker flow plus a public read-only Runtime surface that
-  proves the runtime.
-- **Open-source/composability:** clear HTTP API and reusable runtime modules.
-- **Business plan:** sell to apps, treasuries, protocols, and payment/commerce
-  teams that need controlled liquidity without building maker ops in-house.
+- **Functionality:** a live mainnet payment with exact recipient amounts.
+- **Potential impact:** the FX leg under every multi-currency stablecoin
+  payment app on Solana.
+- **Novelty:** exact-output firm quotes with atomic settlement; nobody else is
+  the maker under the payment.
+- **UX:** the number shown before signing is the number delivered.
+- **Open-source/composability:** MIT/Apache runtime any app can self-host; a
+  two-call HTTP API.
+- **Business plan:** spread on conversions; payment, payroll, and remittance
+  apps as customers; makers can run their own desk.
 
 The core submission claim:
 
-> Firmament turns Solana liquidity from ad hoc swap routing into managed
-> inventory infrastructure for apps and treasuries.
+> The rate you promise is the rate they get.
+
+The insight to repeat: USDC has ~$465M of Solana DEX liquidity and EURC ~$0.7M
+(Jupiter, Oct 2026), so any app promising a euro amount through an AMM is
+guessing.
 
 For pitch/video language, spend less time on "we integrated Jupiter/Circle/HTLC"
-and more time on why the liquidity-operations layer is valuable, repeatable, and
-business-shaped.
+and more time on the promise a payment app can finally make.
 
 ## Monorepo Context
 
@@ -50,7 +55,7 @@ business-shaped.
 
 ## Messaging Principles
 
-- Lead with "Solana RFQ Maker Runtime" and "managed liquidity operations."
+- Lead with "firm FX for stablecoin payments" and the exact-amount promise.
 - Explain inventory-first fills: quote from working inventory, then repair the
   book with rebalancing and Gateway refill.
 - Use terms like "firm quotes," "risk-aware quoting," "Solana HTLC settlement,"
