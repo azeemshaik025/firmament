@@ -174,6 +174,69 @@ pub fn calculate_quote(
     })
 }
 
+/// Calculate a deterministic quote for a fixed output amount.
+///
+/// Payments fix what the recipient receives; this computes what the taker
+/// must pay. Every rounding step rounds the input up so the maker never
+/// pays more than `calculate_quote` would for the same input.
+///
+/// # Errors
+///
+/// Returns a quote math error when amounts, prices, or spread values are
+/// outside safe raw-token boundaries.
+pub fn calculate_quote_exact_output(
+    pair: AssetPair,
+    output_amount_raw: AmountRaw,
+    reference_price: ReferencePrice,
+    input_decimals: u8,
+    output_decimals: u8,
+    inventory: &InventorySnapshot,
+    config: &QuoteEngineConfig,
+) -> Result<QuoteComputation, QuoteMathError> {
+    if output_amount_raw.is_zero() {
+        return Err(QuoteMathError::AmountTooSmall);
+    }
+
+    if reference_price.pair != pair || reference_price.output_per_input <= Decimal::ZERO {
+        return Err(QuoteMathError::InvalidReferencePrice);
+    }
+
+    let output_ui = raw_to_decimal(output_amount_raw, output_decimals)?;
+    let reference_input_ui = output_ui / reference_price.output_per_input;
+    let reference_input_raw = decimal_to_raw_ceil(reference_input_ui, input_decimals)?;
+    if reference_input_raw.is_zero() {
+        return Err(QuoteMathError::AmountTooSmall);
+    }
+
+    let inventory_skew_bps = inventory_skew_bps(&pair, inventory, config);
+    let total_before_floor = config.base_spread_bps + config.fee_bps + inventory_skew_bps;
+    let total_spread_bps = total_before_floor.max(config.min_profit_bps).max(0);
+    if total_spread_bps >= 10_000 {
+        return Err(QuoteMathError::SpreadTooWide);
+    }
+
+    let retained_bps = Decimal::from(10_000 - total_spread_bps) / Decimal::from(10_000);
+    let input_amount_raw = decimal_to_raw_ceil(
+        Decimal::from(reference_input_raw.as_u64()) / retained_bps,
+        0,
+    )?;
+
+    Ok(QuoteComputation {
+        pair: pair.clone(),
+        input_amount: TokenAmount::new(pair.input, input_amount_raw),
+        output_amount: TokenAmount::new(pair.output, output_amount_raw),
+        breakdown: QuoteBreakdown {
+            reference_output_amount_raw: output_amount_raw,
+            base_spread_bps: config.base_spread_bps,
+            inventory_skew_bps,
+            fee_bps: config.fee_bps,
+            min_profit_bps: config.min_profit_bps,
+            total_spread_bps,
+            reference_price,
+        },
+    })
+}
+
 fn raw_to_decimal(amount: AmountRaw, decimals: u8) -> Result<Decimal, QuoteMathError> {
     Ok(Decimal::from(amount.as_u64()) / decimal_factor(decimals)?)
 }
@@ -184,6 +247,16 @@ fn decimal_to_raw_floor(value: Decimal, decimals: u8) -> Result<AmountRaw, Quote
     }
 
     let scaled = (value * decimal_factor(decimals)?).trunc();
+    let raw = scaled.to_u64().ok_or(QuoteMathError::AmountOverflow)?;
+    Ok(AmountRaw::new(raw))
+}
+
+fn decimal_to_raw_ceil(value: Decimal, decimals: u8) -> Result<AmountRaw, QuoteMathError> {
+    if value.is_sign_negative() {
+        return Err(QuoteMathError::AmountTooSmall);
+    }
+
+    let scaled = (value * decimal_factor(decimals)?).ceil();
     let raw = scaled.to_u64().ok_or(QuoteMathError::AmountOverflow)?;
     Ok(AmountRaw::new(raw))
 }
@@ -344,5 +417,123 @@ mod tests {
         assert!(quote.breakdown.inventory_skew_bps > 0);
         assert_eq!(quote.breakdown.total_spread_bps, 60);
         assert_eq!(quote.output_amount.amount_raw, AmountRaw::new(9_940_000));
+    }
+
+    fn check_exact_output_round_trip(output_raw: u64, price: Decimal, sol_balance: u64) {
+        let pair = AssetPair::new(usdc(), sol());
+        let reference = ReferencePrice {
+            pair: pair.clone(),
+            output_per_input: price,
+            observed_at: now(),
+        };
+        let config = QuoteEngineConfig::default();
+        let inventory = inventory(sol_balance, 1_000_000_000);
+
+        let exact = calculate_quote_exact_output(
+            pair.clone(),
+            AmountRaw::new(output_raw),
+            reference.clone(),
+            6,
+            9,
+            &inventory,
+            &config,
+        )
+        .expect("exact-output quote");
+        assert_eq!(exact.output_amount.amount_raw, AmountRaw::new(output_raw));
+        assert_eq!(
+            exact.breakdown.reference_output_amount_raw,
+            AmountRaw::new(output_raw)
+        );
+
+        let replay = calculate_quote(
+            pair,
+            exact.input_amount.amount_raw,
+            reference,
+            6,
+            9,
+            &inventory,
+            &config,
+        )
+        .expect("replayed exact-input quote");
+        assert!(
+            replay.output_amount.amount_raw.as_u64() >= output_raw,
+            "output {output_raw} at price {price} with SOL balance {sol_balance}: replaying input {} pays only {}",
+            exact.input_amount.amount_raw.as_u64(),
+            replay.output_amount.amount_raw.as_u64()
+        );
+    }
+
+    #[test]
+    fn exact_output_quote_rounds_the_input_up() {
+        let config = QuoteEngineConfig {
+            base_spread_bps: 30,
+            fee_bps: 5,
+            min_profit_bps: 20,
+            max_inventory_skew_bps: 50,
+        };
+
+        // 0.01 SOL at 0.01 SOL per USDC is 1 USDC before spread; 35 bps on top
+        // is 1 / 0.9965 = 1_003_512.29 raw, rounded up.
+        let quote = calculate_quote_exact_output(
+            AssetPair::new(usdc(), sol()),
+            AmountRaw::new(10_000_000),
+            reference_price(),
+            6,
+            9,
+            &inventory(1_000_000_000, 1_000_000_000),
+            &config,
+        )
+        .expect("quote should calculate");
+
+        assert_eq!(quote.input_amount.amount_raw, AmountRaw::new(1_003_513));
+        assert_eq!(quote.output_amount.amount_raw, AmountRaw::new(10_000_000));
+        assert_eq!(quote.breakdown.total_spread_bps, 35);
+    }
+
+    #[test]
+    fn exact_output_quote_widens_when_output_inventory_is_under_target() {
+        let config = QuoteEngineConfig {
+            base_spread_bps: 30,
+            fee_bps: 5,
+            min_profit_bps: 20,
+            max_inventory_skew_bps: 50,
+        };
+
+        let quote = calculate_quote_exact_output(
+            AssetPair::new(usdc(), sol()),
+            AmountRaw::new(10_000_000),
+            reference_price(),
+            6,
+            9,
+            &inventory(500_000_000, 1_000_000_000),
+            &config,
+        )
+        .expect("quote should calculate");
+
+        assert_eq!(quote.breakdown.total_spread_bps, 60);
+        assert_eq!(quote.input_amount.amount_raw, AmountRaw::new(1_006_037));
+    }
+
+    #[test]
+    fn exact_output_quote_never_under_collects() {
+        check_exact_output_round_trip(10_000_000, Decimal::new(1, 2), 1_000_000_000);
+        check_exact_output_round_trip(1, Decimal::new(1, 2), 1_000_000_000);
+        check_exact_output_round_trip(123_456_789, Decimal::new(73, 4), 500_000_000);
+        check_exact_output_round_trip(10_000_000, Decimal::new(1, 2), 2_000_000_000);
+        check_exact_output_round_trip(999_999_999_999, Decimal::new(1_234_567, 8), 1_000_000_000);
+    }
+
+    #[test]
+    fn exact_output_quote_rejects_zero_output() {
+        let result = calculate_quote_exact_output(
+            AssetPair::new(usdc(), sol()),
+            AmountRaw::new(0),
+            reference_price(),
+            6,
+            9,
+            &inventory(1_000_000_000, 1_000_000_000),
+            &QuoteEngineConfig::default(),
+        );
+        assert_eq!(result, Err(QuoteMathError::AmountTooSmall));
     }
 }
