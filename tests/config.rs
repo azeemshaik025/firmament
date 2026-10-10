@@ -318,6 +318,7 @@ fn stablecoins_and_sol_use_the_stable_notional_limit() {
 }
 
 #[test]
+#[allow(unsafe_code)]
 fn live_guard_does_not_require_a_jupiter_api_key() {
     let mut config = AppConfig::default();
     config.runtime.enable_protocol_workers = true;
