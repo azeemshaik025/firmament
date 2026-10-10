@@ -61,7 +61,7 @@ const checks = [
       !read("web/app/index.html").includes("fonts.googleapis.com") &&
       read("web/app/index.html").includes("/fonts/bangers-latin.woff2") &&
       read("web/app/src/styles.css").includes("@font-face") &&
-      read("landing/vercel.json").includes("/fonts/:path*"),
+      read("web/app/vercel.json").includes("/fonts/:path*"),
     detail: "Use local font files and route them from the landing domain so the app does not depend on Google Fonts at first paint.",
   },
   {
