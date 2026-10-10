@@ -1,7 +1,7 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useConnection, useWallet } from '@solana/wallet-adapter-react';
 import { useWalletModal } from '@solana/wallet-adapter-react-ui';
-import { PublicKey } from '@solana/web3.js';
+import { PublicKey, SystemProgram } from '@solana/web3.js';
 import { api, Asset, RfqAcceptedResponse, TradeStepResponse, WalletSettlementResumeResponse } from '../api';
 import { bytesToHex, parseAmountRaw, shortValue } from '../lib/format';
 import { isWalletCancellation, signAndSubmit, walletFailure, walletFundingIssue } from '../lib/wallet';
@@ -9,6 +9,8 @@ import { isWalletCancellation, signAndSubmit, walletFailure, walletFundingIssue 
 const payAsset = 'USDC';
 const receiveAsset = 'EURC';
 const quoteExpirySeconds = 30;
+// A lock signed this close to expiry can land after the quote is dead, so the page stops offering it.
+const minSecondsToPay = 8;
 const quoteDebounceMs = 500;
 const storageKey = 'firmament.pay.v1';
 
@@ -17,6 +19,7 @@ type Phase =
   | { kind: 'quoting' }
   | { kind: 'quoted'; quote: RfqAcceptedResponse; secondsLeft: number }
   | { kind: 'rejected'; message: string }
+  | { kind: 'resuming'; tradeId: string }
   | { kind: 'locking'; tradeId: string }
   | { kind: 'maker_locking'; tradeId: string }
   | { kind: 'redeeming'; tradeId: string }
@@ -34,10 +37,15 @@ type StoredPayment = {
   tradeId: string;
   preimage: string;
   lockSignature: string | null;
+  redeemSignature: string | null;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
+}
+
+function optionalString(value: unknown) {
+  return typeof value === 'string' ? value : null;
 }
 
 function readStored(): StoredPayment | null {
@@ -46,18 +54,19 @@ function readStored(): StoredPayment | null {
     if (!raw) return null;
     const parsed: unknown = JSON.parse(raw);
     if (!isRecord(parsed)) return null;
-    const { version, wallet, recipient, eurAmount, tradeId, preimage, lockSignature } = parsed;
+    const { version, wallet, recipient, eurAmount, tradeId, preimage, lockSignature, redeemSignature } = parsed;
     if (version !== 1 || typeof wallet !== 'string' || typeof tradeId !== 'string' || typeof preimage !== 'string') {
       return null;
     }
     return {
       version: 1,
       wallet,
-      recipient: typeof recipient === 'string' ? recipient : '',
-      eurAmount: typeof eurAmount === 'string' ? eurAmount : '',
+      recipient: optionalString(recipient) ?? '',
+      eurAmount: optionalString(eurAmount) ?? '',
       tradeId,
       preimage,
-      lockSignature: typeof lockSignature === 'string' ? lockSignature : null
+      lockSignature: optionalString(lockSignature),
+      redeemSignature: optionalString(redeemSignature)
     };
   } catch {
     return null;
@@ -73,12 +82,11 @@ function writeStored(value: StoredPayment | null) {
   }
 }
 
-function isValidAddress(value: string) {
+function parseAddress(value: string) {
   try {
-    new PublicKey(value.trim());
-    return true;
+    return new PublicKey(value.trim());
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -90,11 +98,11 @@ function signaturesOf(step: TradeStepResponse) {
   return step.tx_signatures ?? [];
 }
 
-function hasKind(resume: WalletSettlementResumeResponse, kind: string) {
-  return (resume.tx_signature_kinds ?? []).some((entry) => entry.kind === kind);
+function signatureOfKind(resume: WalletSettlementResumeResponse, kind: string) {
+  return (resume.tx_signature_kinds ?? []).find((entry) => entry.kind === kind)?.signature ?? null;
 }
 
-const settlingPhases = new Set<Phase['kind']>(['locking', 'maker_locking', 'redeeming', 'paid', 'expired', 'refunding', 'refunded', 'failed']);
+const settlingPhases = new Set<Phase['kind']>(['resuming', 'locking', 'maker_locking', 'redeeming', 'paid', 'expired', 'refunding', 'refunded', 'failed']);
 
 const steps: Array<{ label: string; doneAt: Phase['kind'][]; nowAt: Phase['kind'][] }> = [
   { label: 'Quote locked at a firm rate', doneAt: ['quoted', 'locking', 'maker_locking', 'redeeming', 'paid'], nowAt: ['quoting'] },
@@ -110,6 +118,7 @@ export function PayPage() {
   const [assets, setAssets] = useState<Asset[]>([]);
   const [eurAmount, setEurAmount] = useState('');
   const [recipient, setRecipient] = useState('');
+  const [recipientProblem, setRecipientProblem] = useState<string | null>(null);
   const [phase, setPhase] = useState<Phase>({ kind: 'form' });
   const [preimage, setPreimage] = useState<string | null>(null);
   const [quoteNonce, setQuoteNonce] = useState(0);
@@ -121,12 +130,34 @@ export function PayPage() {
   const usdc = useMemo(() => assets.find((asset) => asset.id === payAsset), [assets]);
   const amountCheck = useMemo(() => (eurAmount.trim() ? parseAmountRaw(eurAmount, eurc?.decimals ?? 6) : null), [eurAmount, eurc]);
   const amountOk = amountCheck?.ok === true;
-  const recipientOk = recipient.trim() === '' || isValidAddress(recipient);
+  const recipientKey = useMemo(() => (recipient.trim() ? parseAddress(recipient) : null), [recipient]);
+  const recipientOk = recipient.trim() === '' || (recipientKey !== null && recipientProblem === null);
   const inFlight = settlingPhases.has(phase.kind);
 
   useEffect(() => {
     api.assets().then(setAssets).catch(() => setAssets([]));
   }, []);
+
+  // A pasted token account or program would swallow the EURC; only a wallet can receive it.
+  useEffect(() => {
+    if (!recipientKey) {
+      setRecipientProblem(null);
+      return undefined;
+    }
+    let active = true;
+    connection
+      .getAccountInfo(recipientKey)
+      .then((info) => {
+        if (!active) return;
+        setRecipientProblem(info && !info.owner.equals(SystemProgram.programId) ? 'That address is a token account or program, not a wallet.' : null);
+      })
+      .catch(() => {
+        if (active) setRecipientProblem(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [connection, recipientKey]);
 
   // Quote whenever the amount changes and nothing is settling.
   useEffect(() => {
@@ -179,6 +210,12 @@ export function PayPage() {
     return () => window.clearInterval(tick);
   }, [quotedExpiresAt]);
 
+  const finish = useCallback(async (tradeId: string, secret: string, signature: string) => {
+    const done = await api.takerRedeem(tradeId, { preimage: secret, signature });
+    writeStored(null);
+    setPhase({ kind: 'paid', tradeId, signatures: signaturesOf(done) });
+  }, []);
+
   const redeem = useCallback(async (tradeId: string, secret: string) => {
     if (!signTransaction) throw new Error('Connected wallet cannot sign transactions.');
     setPhase({ kind: 'redeeming', tradeId });
@@ -189,71 +226,82 @@ export function PayPage() {
       return;
     }
     const signature = await signAndSubmit(connection, signTransaction, prepared.taker_redeem_transaction.transaction_base64);
-    const done = await api.takerRedeem(tradeId, { preimage: secret, signature });
-    writeStored(null);
-    setPhase({ kind: 'paid', tradeId, signatures: signaturesOf(done) });
-  }, [connection, signTransaction]);
-
-  // Resume an interrupted payment once the paying wallet reconnects.
-  useEffect(() => {
-    if (resumedRef.current || !walletAddress) return;
+    // The redeem is on chain now; keep its signature so a dropped request can be replayed.
     const stored = readStored();
-    if (!stored) return;
-    resumedRef.current = true;
-    if (stored.wallet !== walletAddress) {
-      writeStored(null);
-      return;
-    }
+    if (stored) writeStored({ ...stored, redeemSignature: signature });
+    await finish(tradeId, secret, signature);
+  }, [connection, finish, signTransaction]);
+
+  // Pick an interrupted payment up from whatever the chain and the maker already have.
+  const resumeStored = useCallback(async (stored: StoredPayment) => {
+    quoteSeq.current += 1;
+    setPhase({ kind: 'resuming', tradeId: stored.tradeId });
     setRecipient(stored.recipient);
     setEurAmount(stored.eurAmount);
     setPreimage(stored.preimage);
-    void (async () => {
-      try {
-        const resume = await api.resumeSettlement(stored.tradeId);
-        if (hasKind(resume, 'taker_redeem') || resume.settlement_status === 'redeemed') {
-          writeStored(null);
-          setPhase({ kind: 'paid', tradeId: stored.tradeId, signatures: resume.tx_signatures ?? [] });
-          return;
-        }
-        if (hasKind(resume, 'taker_refund') || resume.settlement_status === 'refunded') {
-          writeStored(null);
-          setPhase({ kind: 'refunded', tradeId: stored.tradeId, signatures: resume.tx_signatures ?? [] });
-          return;
-        }
-        if (resume.taker_refund_transaction) {
-          setPhase({ kind: 'expired', tradeId: stored.tradeId });
-          return;
-        }
-        if (hasKind(resume, 'maker_lock')) {
-          await redeem(stored.tradeId, stored.preimage);
-          return;
-        }
-        if (stored.lockSignature) {
-          setPhase({ kind: 'maker_locking', tradeId: stored.tradeId });
-          await api.takerLock(stored.tradeId, { signature: stored.lockSignature });
-          await redeem(stored.tradeId, stored.preimage);
-          return;
-        }
+    try {
+      const resume = await api.resumeSettlement(stored.tradeId);
+      const takerRedeem = signatureOfKind(resume, 'taker_redeem');
+      if (resume.settlement_status === 'redeemed' || (takerRedeem && signatureOfKind(resume, 'maker_redeem'))) {
         writeStored(null);
-        setPhase({ kind: 'form' });
-      } catch (error) {
-        // A finished trade has no settlement to resume; the trade record says how it ended.
-        const trade = await api.trade(stored.tradeId).catch(() => null);
-        if (trade?.settlement_status === 'redeemed' || trade?.settlement_status === 'refunded') {
-          writeStored(null);
-          setPhase({ kind: trade.settlement_status === 'redeemed' ? 'paid' : 'refunded', tradeId: stored.tradeId, signatures: trade.tx_signatures ?? [] });
-          return;
-        }
-        setPhase({ kind: 'failed', message: walletFailure(error, 'Could not resume the payment.') });
+        setPhase({ kind: 'paid', tradeId: stored.tradeId, signatures: resume.tx_signatures ?? [] });
+        return;
       }
-    })();
-  }, [walletAddress, redeem]);
+      if (signatureOfKind(resume, 'taker_refund') || resume.settlement_status === 'refunded') {
+        writeStored(null);
+        setPhase({ kind: 'refunded', tradeId: stored.tradeId, signatures: resume.tx_signatures ?? [] });
+        return;
+      }
+      // The recipient is paid but the maker has not collected: finish the maker side.
+      const redeemSignature = takerRedeem ?? stored.redeemSignature;
+      if (redeemSignature) {
+        setPhase({ kind: 'redeeming', tradeId: stored.tradeId });
+        await finish(stored.tradeId, stored.preimage, redeemSignature);
+        return;
+      }
+      if (resume.taker_refund_transaction) {
+        setPhase({ kind: 'expired', tradeId: stored.tradeId });
+        return;
+      }
+      if (signatureOfKind(resume, 'maker_lock')) {
+        await redeem(stored.tradeId, stored.preimage);
+        return;
+      }
+      if (stored.lockSignature) {
+        setPhase({ kind: 'maker_locking', tradeId: stored.tradeId });
+        await api.takerLock(stored.tradeId, { signature: stored.lockSignature });
+        await redeem(stored.tradeId, stored.preimage);
+        return;
+      }
+      writeStored(null);
+      setPhase({ kind: 'form' });
+    } catch (error) {
+      // A finished trade has no settlement to resume; the trade record says how it ended.
+      const trade = await api.trade(stored.tradeId).catch(() => null);
+      if (trade?.settlement_status === 'redeemed' || trade?.settlement_status === 'refunded') {
+        writeStored(null);
+        setPhase({ kind: trade.settlement_status === 'redeemed' ? 'paid' : 'refunded', tradeId: stored.tradeId, signatures: trade.tx_signatures ?? [] });
+        return;
+      }
+      setPhase({ kind: 'failed', message: walletFailure(error, 'Could not resume the payment.') });
+    }
+  }, [finish, redeem]);
+
+  useEffect(() => {
+    if (resumedRef.current || !walletAddress) return;
+    const stored = readStored();
+    // Another wallet's payment stays stored until that wallet comes back.
+    if (!stored || stored.wallet !== walletAddress) return;
+    resumedRef.current = true;
+    void resumeStored(stored);
+  }, [walletAddress, resumeStored]);
 
   async function pay() {
     if (phase.kind !== 'quoted' || !publicKey || !signTransaction || !usdc) return;
     const quote = phase.quote;
-    if (recipient.trim() && !isValidAddress(recipient)) return;
+    if (!recipientOk) return;
     quoteSeq.current += 1;
+    let locked = false;
     try {
       const funding = await walletFundingIssue(connection, publicKey, usdc, quote.input.amount_raw);
       if (funding) {
@@ -276,17 +324,20 @@ export function PayPage() {
         eurAmount,
         tradeId: settlement.trade_id,
         preimage: secret,
-        lockSignature: null
+        lockSignature: null,
+        redeemSignature: null
       };
       writeStored(stored);
       setPhase({ kind: 'locking', tradeId: settlement.trade_id });
       const lockSignature = await signAndSubmit(connection, signTransaction, settlement.taker_lock_transaction.transaction_base64);
+      locked = true;
       writeStored({ ...stored, lockSignature });
       setPhase({ kind: 'maker_locking', tradeId: settlement.trade_id });
       await api.takerLock(settlement.trade_id, { signature: lockSignature });
       await redeem(settlement.trade_id, secret);
     } catch (error) {
-      if (isWalletCancellation(error)) {
+      // Before the lock nothing has moved; after it, the stored payment is the way back in.
+      if (isWalletCancellation(error) && !locked) {
         writeStored(null);
         setPhase({ kind: 'form' });
         setQuoteNonce((nonce) => nonce + 1);
@@ -316,6 +367,11 @@ export function PayPage() {
     }
   }
 
+  function retry() {
+    const stored = readStored();
+    if (stored) void resumeStored(stored);
+  }
+
   function startOver() {
     writeStored(null);
     setPreimage(null);
@@ -338,18 +394,23 @@ export function PayPage() {
     ? (Number(phase.quote.output.amount) / Number(phase.quote.input.amount)).toFixed(4)
     : null;
   const lockFraction = phase.kind === 'quoted' ? phase.secondsLeft / quoteExpirySeconds : 1;
+  const tooLate = phase.kind === 'quoted' && phase.secondsLeft < minSecondsToPay;
+  // A failed payment with funds in escrow keeps its stored state; retrying resumes, never restarts.
+  const stuck = phase.kind === 'failed' && readStored()?.lockSignature != null;
   const terminal = phase.kind === 'paid' || phase.kind === 'refunded' || phase.kind === 'failed';
   const primaryLabel = !walletAddress
     ? 'Connect wallet'
-    : phase.kind === 'locking'
-      ? 'Confirm in wallet…'
-      : phase.kind === 'maker_locking'
-        ? 'Maker locking EURC…'
-        : phase.kind === 'redeeming'
-          ? 'Delivering…'
-          : cost
-            ? `Pay ${cost} USDC`
-            : 'Pay';
+    : phase.kind === 'resuming'
+      ? 'Resuming…'
+      : phase.kind === 'locking'
+        ? 'Confirm in wallet…'
+        : phase.kind === 'maker_locking'
+          ? 'Maker locking EURC…'
+          : phase.kind === 'redeeming'
+            ? 'Delivering…'
+            : cost
+              ? `Pay ${cost} USDC`
+              : 'Pay';
 
   return (
     <main className="pay-page">
@@ -357,7 +418,7 @@ export function PayPage() {
         <div>
           <p className="page-kicker">Firm FX</p>
           <h1>Pay in euros.</h1>
-          <p className="lede">The rate you see is the rate they get. Held for {quoteExpirySeconds} seconds, settled atomically.</p>
+          <p className="lede">The rate you see is the rate they get. Held for {quoteExpirySeconds} seconds, settled through escrow.</p>
         </div>
         <div className="wallet-actions">
           <button className="wallet-button" onClick={() => setWalletModalVisible(true)} type="button">
@@ -395,7 +456,8 @@ export function PayPage() {
               onChange={(event) => setRecipient(event.target.value)}
             />
           </label>
-          {!recipientOk && <p className="field-error">That is not a Solana address.</p>}
+          {recipient.trim() !== '' && !recipientKey && <p className="field-error">That is not a Solana address.</p>}
+          {recipientProblem && <p className="field-error">{recipientProblem}</p>}
 
           <div className="pay-quote">
             <span>You pay</span>
@@ -417,16 +479,18 @@ export function PayPage() {
           {phase.kind === 'rejected' && <p className="field-error">{phase.message}</p>}
           {phase.kind === 'failed' && <p className="field-error">{phase.message}</p>}
 
-          {terminal ? (
+          {stuck ? (
+            <button type="button" className="pay-submit" onClick={retry}>Retry</button>
+          ) : terminal ? (
             <button type="button" className="pay-submit is-reset" onClick={startOver}>New payment</button>
           ) : phase.kind === 'expired' ? (
             <button type="button" className="pay-submit" onClick={() => void refund()}>Lock expired, refund my USDC</button>
           ) : (
             <button
               className="pay-submit"
-              disabled={inFlight || (walletAddress !== '' && (phase.kind !== 'quoted' || !recipientOk))}
+              disabled={inFlight || (walletAddress !== '' && (phase.kind !== 'quoted' || !recipientOk || tooLate))}
             >
-              {primaryLabel}
+              {tooLate ? 'Refreshing the rate…' : primaryLabel}
             </button>
           )}
         </form>
@@ -463,7 +527,7 @@ export function PayPage() {
             <p className="locked-note">Keep this tab open until delivery completes; it holds the secret that releases the EURC.</p>
           )}
           <p className="locked-note">
-            {eurc ? `This maker quotes up to ${eurc.max_trade_amount ?? '?'} EURC per payment.` : 'EURC is not enabled on this maker.'}
+            {eurc ? 'This demo maker takes small payments only, about 5 USD each.' : 'EURC is not enabled on this maker.'}
           </p>
         </aside>
       </section>
