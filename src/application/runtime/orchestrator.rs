@@ -2265,9 +2265,20 @@ impl RuntimeOrchestrator {
     }
 
     async fn restore_wallet_settlement_htlc(&self, state: &WalletSettlementState) -> AppResult<()> {
-        let taker_locked = has_signature_kind(state, TradeSignatureKind::TakerLock);
-        let maker_locked = has_signature_kind(state, TradeSignatureKind::MakerLock);
-        if !taker_locked && !maker_locked {
+        // Each lock is redeemed by the other side, so a recorded redeem tells
+        // the adapter which restored leg is already finished.
+        let leg_status = |lock: TradeSignatureKind, redeem: TradeSignatureKind| {
+            has_signature_kind(state, lock).then(|| {
+                if has_signature_kind(state, redeem) {
+                    SettlementStatus::Redeemed
+                } else {
+                    SettlementStatus::Initiated
+                }
+            })
+        };
+        let taker_leg = leg_status(TradeSignatureKind::TakerLock, TradeSignatureKind::MakerRedeem);
+        let maker_leg = leg_status(TradeSignatureKind::MakerLock, TradeSignatureKind::TakerRedeem);
+        if taker_leg.is_none() && maker_leg.is_none() {
             return Ok(());
         }
         self.adapters
@@ -2276,8 +2287,8 @@ impl RuntimeOrchestrator {
                 state.taker_lock_request.clone(),
                 state.settlement.terms.maker_lock_request(),
                 state.recipient().clone(),
-                taker_locked,
-                maker_locked,
+                taker_leg,
+                maker_leg,
             )
             .await
     }

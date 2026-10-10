@@ -208,14 +208,14 @@ pub trait HtlcClient: Send + Sync {
         taker_lock: ExternalHtlcInitiation,
         maker_lock: HtlcInitiation,
         maker_redeemer: WalletAddress,
-        taker_locked: bool,
-        maker_locked: bool,
+        taker_leg: Option<SettlementStatus>,
+        maker_leg: Option<SettlementStatus>,
     ) -> Result<(), AppError> {
         let _ = taker_lock;
         let _ = maker_lock;
         let _ = maker_redeemer;
-        let _ = taker_locked;
-        let _ = maker_locked;
+        let _ = taker_leg;
+        let _ = maker_leg;
         Ok(())
     }
 

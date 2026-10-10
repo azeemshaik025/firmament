@@ -689,6 +689,90 @@ async fn wallet_taker_redeem_retry_continues_missing_maker_redeem_after_restart(
 }
 
 #[tokio::test]
+async fn wallet_taker_redeem_retry_after_process_restart_redeems_the_taker_leg() {
+    let persistence = Arc::new(
+        RuntimePersistence::open_in_memory(AssetRegistry::from_config(&relaxed_default_config()))
+            .expect("open persistence"),
+    );
+    seed_working_custody(&persistence, &sol(), 400_000_000);
+    seed_working_custody(&persistence, &usdc(), 20_000_000);
+    let htlc = FakeHtlcClient::with_failure(HtlcFailure::RedeemOnce);
+    let orchestrator = persistent_harness_with_persistence(
+        FakePriceProvider::default(),
+        htlc.clone(),
+        FakeSwapExecutor::default(),
+        FakeGatewayClient::default(),
+        FakeBalanceReader::new(vec![quote_inventory(), quote_inventory()]),
+        RuntimeOrchestratorOptions::default(),
+        Arc::clone(&persistence),
+    )
+    .await;
+
+    let quote = orchestrator
+        .request_rfq(rfq(1_000_000))
+        .await
+        .expect("request quote");
+    let quote_id = match quote {
+        RfqResponse::Accepted(quote) => quote.quote_id,
+        RfqResponse::Rejected(rejection) => panic!("expected accepted quote: {rejection:?}"),
+    };
+    let started = orchestrator
+        .start_wallet_settlement(quote_id, taker_wallet(), None, "ab".repeat(32))
+        .await
+        .expect("start wallet settlement");
+    orchestrator
+        .record_wallet_taker_lock(started.trade_id, TxSignature::new("taker-lock-sig"))
+        .await
+        .expect("record taker lock");
+    orchestrator
+        .complete_wallet_taker_redeem(
+            started.trade_id,
+            "11".repeat(32),
+            TxSignature::new("taker-redeem-sig"),
+        )
+        .await
+        .expect_err("maker redeem fails after the taker redeem was recorded");
+
+    // A process restart loses the adapter's memory of the taker redeem; only
+    // the persisted signatures tell the fresh adapter which leg is left.
+    let fresh_htlc = FakeHtlcClient::default();
+    let restarted = persistent_harness_with_persistence(
+        FakePriceProvider::default(),
+        fresh_htlc.clone(),
+        FakeSwapExecutor::default(),
+        FakeGatewayClient::default(),
+        FakeBalanceReader::new(vec![quote_inventory()]),
+        RuntimeOrchestratorOptions::default(),
+        Arc::clone(&persistence),
+    )
+    .await;
+    let completed = restarted
+        .complete_wallet_taker_redeem(
+            started.trade_id,
+            "11".repeat(32),
+            TxSignature::new("taker-redeem-sig"),
+        )
+        .await
+        .expect("retry redeems the remaining taker leg");
+
+    assert_eq!(
+        fresh_htlc.restored_legs(started.trade_id),
+        Some((
+            Some(SettlementStatus::Initiated),
+            Some(SettlementStatus::Redeemed)
+        )),
+        "the maker leg is restored as already redeemed"
+    );
+    assert_eq!(
+        fresh_htlc.redeemed_legs(started.trade_id),
+        vec![SettlementLeg::MakerOutput, SettlementLeg::TakerInput],
+        "the maker redeem runs on the taker-funded leg"
+    );
+    assert_eq!(completed.trade.settlement_status, SettlementStatus::Redeemed);
+    assert!(completed.maker_redeem_signature.is_some());
+}
+
+#[tokio::test]
 async fn wallet_taker_refund_retry_continues_missing_maker_refund_after_restart() {
     let config = relaxed_default_config();
     let persistence = Arc::new(
@@ -1980,6 +2064,7 @@ struct FakeHtlcState {
     externally_refunded: HashMap<TradeId, TxSignature>,
     refunded_legs: HashMap<TradeId, Vec<SettlementLeg>>,
     restored: Vec<TradeId>,
+    restored_legs: HashMap<TradeId, (Option<SettlementStatus>, Option<SettlementStatus>)>,
     external_redeemers: HashMap<TradeId, WalletAddress>,
     redeem_requests: Vec<ExternalRedeemRequest>,
     failure: Option<HtlcFailure>,
@@ -2016,6 +2101,25 @@ impl FakeHtlcClient {
 
     fn redeemed_count(&self) -> usize {
         self.inner.lock().expect("htlc lock").redeemed.len()
+    }
+
+    fn restored_legs(&self, trade_id: TradeId) -> Option<(Option<SettlementStatus>, Option<SettlementStatus>)> {
+        self.inner
+            .lock()
+            .expect("htlc lock")
+            .restored_legs
+            .get(&trade_id)
+            .copied()
+    }
+
+    fn redeemed_legs(&self, trade_id: TradeId) -> Vec<SettlementLeg> {
+        self.inner
+            .lock()
+            .expect("htlc lock")
+            .redeemed_legs
+            .get(&trade_id)
+            .cloned()
+            .unwrap_or_default()
     }
 
     fn restored_count(&self) -> usize {
@@ -2258,13 +2362,25 @@ impl HtlcClient for FakeHtlcClient {
         taker_lock: ExternalHtlcInitiation,
         maker_lock: HtlcInitiation,
         _maker_redeemer: WalletAddress,
-        taker_locked: bool,
-        maker_locked: bool,
+        taker_leg: Option<SettlementStatus>,
+        maker_leg: Option<SettlementStatus>,
     ) -> Result<(), AppError> {
         let mut state = self.inner.lock().expect("htlc lock");
         let trade_id = taker_lock.trade_id;
+        state.restored_legs.insert(trade_id, (taker_leg, maker_leg));
+        for (leg, status) in [
+            (SettlementLeg::TakerInput, taker_leg),
+            (SettlementLeg::MakerOutput, maker_leg),
+        ] {
+            if status == Some(SettlementStatus::Redeemed) {
+                let already = state.redeemed_legs.entry(trade_id).or_default();
+                if !already.contains(&leg) {
+                    already.push(leg);
+                }
+            }
+        }
         let mut restored_any = false;
-        if taker_locked
+        if taker_leg.is_some()
             && !state
                 .initiated
                 .iter()
@@ -2280,7 +2396,7 @@ impl HtlcClient for FakeHtlcClient {
             });
             restored_any = true;
         }
-        if maker_locked
+        if maker_leg.is_some()
             && !state.initiated.iter().any(|init| {
                 init.trade_id == maker_lock.trade_id && init.funder == WalletRole::Maker
             })
