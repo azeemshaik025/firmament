@@ -25,8 +25,8 @@ use crate::application::rebalance::{
     decide_native_sol_top_up, submit_gateway_refill, submit_planned_swap,
 };
 use crate::application::rfq::{
-    FirmQuote, QuoteAcceptance, RfqContext, RfqRequest, RfqResponse, accept_quote_for_settlement,
-    request_quote,
+    FirmQuote, QuoteAcceptance, RequestedAmount, RfqContext, RfqRequest, RfqResponse,
+    accept_quote_for_settlement, request_quote,
 };
 use crate::config::AppConfig;
 use crate::config::AssetConfig;
@@ -3495,7 +3495,7 @@ impl RuntimeOrchestrator {
         Ok(RfqRequest {
             input_mint,
             output_mint,
-            input_amount_raw: amount_raw,
+            amount: RequestedAmount::Input(amount_raw),
             taker_wallet,
             expiry_seconds: Some(
                 self.app_state

@@ -10,7 +10,7 @@ use firmament::events::{
 };
 use firmament::ledger::{LedgerAccountId, LedgerEventConsumer, SqliteLedgerRepository};
 use firmament::ports::{BalanceReader, GatewayClient, HtlcClient, PriceProvider, SwapExecutor};
-use firmament::rfq::{RfqRequest, RfqResponse};
+use firmament::rfq::{RequestedAmount, RfqRequest, RfqResponse};
 use firmament::runtime::{
     RuntimeAdapters, RuntimeOrchestrator, RuntimeOrchestratorOptions, RuntimePersistence,
     TradeSignatureKind,
@@ -58,7 +58,7 @@ fn rfq(amount_raw: u64) -> RfqRequest {
     RfqRequest {
         input_mint: usdc_mint(),
         output_mint: sol_mint(),
-        input_amount_raw: AmountRaw::new(amount_raw),
+        amount: RequestedAmount::Input(AmountRaw::new(amount_raw)),
         taker_wallet: taker_wallet(),
         expiry_seconds: Some(30),
     }
@@ -1693,7 +1693,7 @@ fn rfq_with(input_mint: MintAddress, output_mint: MintAddress, amount_raw: u64) 
     RfqRequest {
         input_mint,
         output_mint,
-        input_amount_raw: AmountRaw::new(amount_raw),
+        amount: RequestedAmount::Input(AmountRaw::new(amount_raw)),
         taker_wallet: taker_wallet(),
         expiry_seconds: Some(30),
     }
@@ -3598,7 +3598,7 @@ fn sol_to_usdc_rfq(amount_raw: u64) -> RfqRequest {
     RfqRequest {
         input_mint: sol_mint(),
         output_mint: usdc_mint(),
-        input_amount_raw: AmountRaw::new(amount_raw),
+        amount: RequestedAmount::Input(AmountRaw::new(amount_raw)),
         taker_wallet: taker_wallet(),
         expiry_seconds: Some(30),
     }

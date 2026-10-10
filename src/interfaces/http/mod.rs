@@ -443,7 +443,7 @@ impl RfqApiService for OrchestratorRfqApiService {
         info!(
             input_mint = %domain_request.input_mint,
             output_mint = %domain_request.output_mint,
-            input_amount_raw = domain_request.input_amount_raw.as_u64(),
+            requested_amount = ?domain_request.amount,
             "RFQ requested"
         );
         let fallback_output_mint = domain_request.output_mint.clone();
@@ -1427,7 +1427,7 @@ fn parse_rfq_request(request: RfqRequest, config: &AppConfig) -> Result<rfq::Rfq
         Ok(rfq::RfqRequest {
             input_mint: input_cfg.mint.clone(),
             output_mint: output_cfg.mint.clone(),
-            input_amount_raw: raw,
+            amount: rfq::RequestedAmount::Input(raw),
             taker_wallet,
             expiry_seconds,
         })
@@ -1445,7 +1445,7 @@ fn parse_rfq_request(request: RfqRequest, config: &AppConfig) -> Result<rfq::Rfq
         Ok(rfq::RfqRequest {
             input_mint,
             output_mint,
-            input_amount_raw,
+            amount: rfq::RequestedAmount::Input(input_amount_raw),
             taker_wallet,
             expiry_seconds,
         })

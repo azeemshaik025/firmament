@@ -11,6 +11,7 @@ use uuid::Uuid;
 use crate::domain::events::{EventMetadata, QuoteEvent, RiskEvent, RuntimeEvent};
 use crate::domain::quote_engine::{
     InventorySnapshot, QuoteBreakdown, QuoteEngineConfig, QuoteMathError, calculate_quote,
+    calculate_quote_exact_output,
 };
 use crate::domain::risk::{RiskEvaluationInput, RiskPolicy, evaluate_pre_quote};
 use crate::domain::types::{
@@ -19,6 +20,16 @@ use crate::domain::types::{
 };
 use crate::ports::PriceProvider;
 
+/// Which side of the trade the taker fixed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestedAmount {
+    /// Taker fixes what they pay; the maker quotes what comes out.
+    Input(AmountRaw),
+    /// Taker fixes what must come out; the maker quotes what it costs.
+    Output(AmountRaw),
+}
+
 /// RFQ request body accepted by the domain layer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RfqRequest {
@@ -26,8 +37,8 @@ pub struct RfqRequest {
     pub input_mint: MintAddress,
     /// Output token mint address.
     pub output_mint: MintAddress,
-    /// Input amount in raw token units.
-    pub input_amount_raw: AmountRaw,
+    /// Fixed side of the trade in raw token units.
+    pub amount: RequestedAmount,
     /// Taker wallet requesting the quote.
     pub taker_wallet: WalletAddress,
     /// Optional quote expiry override in seconds.
@@ -255,12 +266,15 @@ pub async fn request_quote<P: PriceProvider + ?Sized>(
         .expiry_seconds
         .unwrap_or(context.default_expiry_seconds);
     let expires_at = add_seconds(now, expiry_seconds).unwrap_or(now);
-    let input_amount = TokenAmount::new(pair.input.clone(), request.input_amount_raw);
+    let requested_amount = match request.amount {
+        RequestedAmount::Input(raw) => TokenAmount::new(pair.input.clone(), raw),
+        RequestedAmount::Output(raw) => TokenAmount::new(pair.output.clone(), raw),
+    };
     let mut events = vec![RuntimeEvent::Quote(QuoteEvent::Requested {
         metadata: metadata(run_id, now),
         quote_id,
         pair: pair.clone(),
-        input_amount: input_amount.clone(),
+        input_amount: requested_amount,
         taker_wallet: request.taker_wallet.clone(),
         expires_at,
     })];
@@ -279,15 +293,27 @@ pub async fn request_quote<P: PriceProvider + ?Sized>(
         }
     };
 
-    let quote = match calculate_quote(
-        pair.clone(),
-        request.input_amount_raw,
-        reference_price.clone(),
-        input_asset.decimals,
-        output_asset.decimals,
-        &context.inventory,
-        &context.quote_config,
-    ) {
+    let computed = match request.amount {
+        RequestedAmount::Input(raw) => calculate_quote(
+            pair.clone(),
+            raw,
+            reference_price.clone(),
+            input_asset.decimals,
+            output_asset.decimals,
+            &context.inventory,
+            &context.quote_config,
+        ),
+        RequestedAmount::Output(raw) => calculate_quote_exact_output(
+            pair.clone(),
+            raw,
+            reference_price.clone(),
+            input_asset.decimals,
+            output_asset.decimals,
+            &context.inventory,
+            &context.quote_config,
+        ),
+    };
+    let quote = match computed {
         Ok(quote) => quote,
         Err(error) => {
             let (reason, detail) = quote_math_rejection(error);
@@ -704,7 +730,17 @@ mod tests {
         RfqRequest {
             input_mint: usdc_mint(),
             output_mint: sol_mint(),
-            input_amount_raw: AmountRaw::new(amount),
+            amount: RequestedAmount::Input(AmountRaw::new(amount)),
+            taker_wallet: taker(),
+            expiry_seconds: None,
+        }
+    }
+
+    fn exact_output_rfq(output_raw: u64) -> RfqRequest {
+        RfqRequest {
+            input_mint: usdc_mint(),
+            output_mint: sol_mint(),
+            amount: RequestedAmount::Output(AmountRaw::new(output_raw)),
             taker_wallet: taker(),
             expiry_seconds: None,
         }
@@ -714,7 +750,7 @@ mod tests {
         RfqRequest {
             input_mint: cbbtc_mint(),
             output_mint: sol_mint(),
-            input_amount_raw: AmountRaw::new(amount),
+            amount: RequestedAmount::Input(AmountRaw::new(amount)),
             taker_wallet: taker(),
             expiry_seconds: None,
         }
@@ -724,7 +760,7 @@ mod tests {
         RfqRequest {
             input_mint: sol_mint(),
             output_mint: usdc_mint(),
-            input_amount_raw: AmountRaw::new(amount),
+            amount: RequestedAmount::Input(AmountRaw::new(amount)),
             taker_wallet: taker(),
             expiry_seconds: None,
         }
@@ -880,6 +916,54 @@ mod tests {
                 panic!("expected accepted quote, got {rejection:?}");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn rfq_quotes_the_input_cost_for_an_exact_output() {
+        let outcome = request_quote(
+            exact_output_rfq(10_000_000),
+            &context(1_000_000_000),
+            &price(now()),
+            RuntimeRunId::generate(),
+            now(),
+        )
+        .await;
+
+        match outcome.response {
+            RfqResponse::Accepted(quote) => {
+                assert_eq!(quote.output_amount.amount_raw, AmountRaw::new(10_000_000));
+                assert_eq!(quote.input_amount.amount_raw, AmountRaw::new(1_003_513));
+                assert_eq!(
+                    quote.htlc_terms.maker_receive.amount_raw,
+                    AmountRaw::new(1_003_513)
+                );
+                assert_eq!(
+                    quote.htlc_terms.maker_pay.amount_raw,
+                    AmountRaw::new(10_000_000)
+                );
+            }
+            RfqResponse::Rejected(rejection) => {
+                panic!("expected accepted exact-output quote, got {rejection:?}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn rfq_exact_output_still_enforces_the_input_asset_amount_gate() {
+        // 3 USDC worth of SOL trips the 2 USDC per-asset cap on the computed input.
+        let outcome = request_quote(
+            exact_output_rfq(30_000_000),
+            &context(1_000_000_000),
+            &price(now()),
+            RuntimeRunId::generate(),
+            now(),
+        )
+        .await;
+
+        assert_eq!(
+            rejection_reason(&outcome),
+            Some(&RejectionReason::AboveAssetMaxAmount)
+        );
     }
 
     #[tokio::test]

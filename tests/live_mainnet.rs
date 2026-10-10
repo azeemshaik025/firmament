@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use firmament::assets::AssetRegistry;
 use firmament::ledger::LedgerAccountId;
-use firmament::rfq::{RfqRequest, RfqResponse};
+use firmament::rfq::{RequestedAmount, RfqRequest, RfqResponse};
 use firmament::runtime::TradeSignatureKind;
 use firmament::runtime::reconciliation::ReconciliationWorker;
 use firmament::solana_client::SolanaClient;
@@ -65,7 +65,7 @@ async fn live_cbbtc_rfq_accept_skips_without_explicit_opt_in() {
         .request_rfq(RfqRequest {
             input_mint: MintAddress::new(USDC_MINT),
             output_mint: MintAddress::new(CBBTC_MINT),
-            input_amount_raw: AmountRaw::new(input_amount_raw),
+            amount: RequestedAmount::Input(AmountRaw::new(input_amount_raw)),
             taker_wallet: WalletAddress::new(taker.pubkey().to_string()),
             expiry_seconds: Some(45),
         })
@@ -243,7 +243,7 @@ async fn live_gateway_backed_cbbtc_rfq_skips_without_explicit_opt_in() {
         .request_rfq(RfqRequest {
             input_mint: MintAddress::new(USDC_MINT),
             output_mint: MintAddress::new(CBBTC_MINT),
-            input_amount_raw: AmountRaw::new(input_amount_raw),
+            amount: RequestedAmount::Input(AmountRaw::new(input_amount_raw)),
             taker_wallet: WalletAddress::new(taker.pubkey().to_string()),
             expiry_seconds: Some(45),
         })
