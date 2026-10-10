@@ -1,8 +1,10 @@
 import { FormEvent, KeyboardEvent as ReactKeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useConnection, useWallet } from '@solana/wallet-adapter-react';
 import { useWalletModal } from '@solana/wallet-adapter-react-ui';
-import { PublicKey, Transaction, type Connection } from '@solana/web3.js';
+import { Transaction } from '@solana/web3.js';
 import { api, Asset, RfqRejectedResponse, RfqResponse, RuntimeTrade, RuntimeTradesResponse, TradeSignature, TradeSignatureKind, TradeStepResponse, WalletSettlementResponse, WalletSettlementResumeResponse } from '../api';
+import { bytesFromBase64, bytesToHex, formatAssetAmount, formatExpiry, formatRangeLabel, formatRawAmount, hexToBytes, isQuoteExpired, parseAmountRaw, parseDecimal, quoteExpiryMs, shortValue } from '../lib/format';
+import { isNativeAsset, isWalletCancellation, walletFailure, walletFundingIssue } from '../lib/wallet';
 
 type NoticeTone = 'info' | 'success' | 'warn' | 'error';
 
@@ -32,34 +34,12 @@ const fallbackAssets: Asset[] = [
   { id: 'cbBTC', symbol: 'cbBTC', name: 'Coinbase Wrapped BTC', mint: 'cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij', decimals: 8, min_trade_amount: '0.00001', max_trade_amount: '0.00002' }
 ];
 
-function parseDecimal(value: string | number | undefined): number | null {
-  if (value === undefined) return null;
-  const numeric = typeof value === 'number' ? value : Number(value);
-  return Number.isFinite(numeric) ? numeric : null;
-}
-
-function formatAssetAmount(value: number, asset: Asset) {
-  const precision = Math.min(Math.max(asset.decimals, 2), 8);
-  return value.toLocaleString(undefined, {
-    minimumFractionDigits: 0,
-    maximumFractionDigits: precision
-  });
-}
-
-function formatRangeLabel(asset: Asset): string | null {
-  const min = parseDecimal(asset.min_trade_amount);
-  const max = parseDecimal(asset.max_trade_amount);
-  if (min === null || max === null) return null;
-  return `${formatAssetAmount(min, asset)}-${formatAssetAmount(max, asset)} ${asset.symbol}`;
-}
-
 const defaultSourceSymbol = 'SOL';
 const quoteExpirySeconds = 45;
 const quoteRetryMs = 5 * 60 * 1_000;
 const quoteInputDebounceMs = 600;
 const swapStateStorageKey = 'firmament.swap.v1';
 const swapStateMaxAgeMs = 12 * 60 * 60 * 1_000;
-const nativeSolMint = 'So11111111111111111111111111111111111111112';
 const assetLogoUrls: Record<string, string> = {
   sol: 'https://garden.imgix.net/chain_images/solana.png',
   usdc: 'https://garden.imgix.net/token-images/usdc.svg',
@@ -109,74 +89,9 @@ function withFallbackLimits(asset: Asset): Asset {
   };
 }
 
-function parseAmountRaw(amount: string, decimals: number): { ok: true; raw: number } | { ok: false; message: string } {
-  const value = amount.trim();
-  if (!/^\d+(\.\d+)?$/.test(value)) {
-    return { ok: false, message: 'Enter a valid amount.' };
-  }
-
-  const [whole, fraction = ''] = value.split('.');
-  if (fraction.length > decimals) {
-    return { ok: false, message: `Use ${decimals} or fewer decimal places for this asset.` };
-  }
-
-  const raw = BigInt(whole || '0') * 10n ** BigInt(decimals) + BigInt(`${fraction}${'0'.repeat(decimals)}`.slice(0, decimals) || '0');
-  if (raw <= 0n) {
-    return { ok: false, message: 'Enter an amount greater than zero.' };
-  }
-  if (raw > BigInt(Number.MAX_SAFE_INTEGER)) {
-    return { ok: false, message: 'Use a smaller amount for this demo swap.' };
-  }
-
-  return { ok: true, raw: Number(raw) };
-}
-
-function formatRawAmount(raw: number, decimals: number) {
-  const rawText = BigInt(Math.trunc(raw)).toString().padStart(decimals + 1, '0');
-  const whole = rawText.slice(0, -decimals) || '0';
-  const fraction = rawText.slice(-decimals).replace(/0+$/, '');
-  return fraction ? `${whole}.${fraction}` : whole;
-}
-
-function formatRawBigInt(raw: bigint, decimals: number) {
-  const rawText = raw.toString().padStart(decimals + 1, '0');
-  const whole = rawText.slice(0, -decimals) || '0';
-  const fraction = rawText.slice(-decimals).replace(/0+$/, '');
-  return fraction ? `${whole}.${fraction}` : whole;
-}
-
-function bytesToHex(bytes: Uint8Array) {
-  return [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('');
-}
-
-function hexToBytes(value: string) {
-  const normalized = value.trim();
-  if (normalized.length % 2 !== 0) {
-    throw new Error('Invalid recovery secret.');
-  }
-  const bytes = new Uint8Array(normalized.length / 2);
-  for (let index = 0; index < bytes.length; index += 1) {
-    const byte = Number.parseInt(normalized.slice(index * 2, index * 2 + 2), 16);
-    if (Number.isNaN(byte)) {
-      throw new Error('Invalid recovery secret.');
-    }
-    bytes[index] = byte;
-  }
-  return bytes;
-}
-
 async function hashHexSecret(value: string) {
   const digest = await crypto.subtle.digest('SHA-256', hexToBytes(value));
   return bytesToHex(new Uint8Array(digest));
-}
-
-function bytesFromBase64(value: string) {
-  return Uint8Array.from(atob(value), (char) => char.charCodeAt(0));
-}
-
-function shortValue(value?: string) {
-  if (!value) return '';
-  return value.length > 14 ? `${value.slice(0, 7)}...${value.slice(-5)}` : value;
 }
 
 async function copyToClipboard(value: string) {
@@ -217,65 +132,6 @@ function quoteRejectionCopy(rejection: RfqRejectedResponse) {
     ?? rejection.suggested_action
     ?? 'The runtime rejected this quote.';
   return { title, detail };
-}
-
-function isNativeAsset(asset: Asset) {
-  return asset.kind === 'native' || asset.mint === nativeSolMint;
-}
-
-async function walletBalanceRaw(connection: Connection, wallet: PublicKey, asset: Asset) {
-  if (isNativeAsset(asset)) {
-    return BigInt(await connection.getBalance(wallet, 'confirmed'));
-  }
-
-  const accounts = await connection.getParsedTokenAccountsByOwner(
-    wallet,
-    { mint: new PublicKey(asset.mint) },
-    'confirmed'
-  );
-  return accounts.value.reduce((total, { account }) => {
-    const amount = account.data.parsed.info.tokenAmount.amount;
-    return total + BigInt(typeof amount === 'string' ? amount : '0');
-  }, 0n);
-}
-
-async function walletFundingIssue(
-  connection: Connection,
-  wallet: PublicKey,
-  asset: Asset,
-  requiredRaw: string
-) {
-  const required = BigInt(requiredRaw);
-  const available = await walletBalanceRaw(connection, wallet, asset);
-  if (available >= required) return null;
-
-  return {
-    title: `Insufficient ${asset.symbol} balance`,
-    detail: `Wallet has ${formatRawBigInt(available, asset.decimals)} ${asset.symbol}; this quote needs ${formatRawBigInt(required, asset.decimals)} ${asset.symbol}.`
-  };
-}
-
-function formatExpiry(value?: string) {
-  if (!value) return 'Expiry unavailable';
-  const expiry = new Date(value);
-  if (Number.isNaN(expiry.getTime())) return 'Expiry unavailable';
-
-  return new Intl.DateTimeFormat(undefined, {
-    hour: 'numeric',
-    minute: '2-digit',
-    second: '2-digit'
-  }).format(expiry);
-}
-
-function quoteExpiryMs(quote: RfqResponse | null) {
-  if (quote?.status !== 'accepted') return null;
-  const expiresAt = new Date(quote.expires_at).getTime();
-  return Number.isNaN(expiresAt) ? null : expiresAt - Date.now();
-}
-
-function isQuoteExpired(quote: RfqResponse | null) {
-  const expiresInMs = quoteExpiryMs(quote);
-  return expiresInMs !== null && expiresInMs <= 0;
 }
 
 function readPersistedSwapState(): PersistedSwapState | null {
@@ -329,18 +185,6 @@ function writePersistedSwapState(snapshot: PersistedSwapState | null) {
   }
 
   window.localStorage.setItem(swapStateStorageKey, JSON.stringify(snapshot));
-}
-
-function walletFailure(error: unknown, fallback: string) {
-  if (isWalletCancellation(error)) {
-    return 'Wallet action was cancelled.';
-  }
-  return fallback;
-}
-
-function isWalletCancellation(error: unknown) {
-  const message = error instanceof Error ? error.message : '';
-  return message.toLowerCase().includes('reject') || message.toLowerCase().includes('cancel');
 }
 
 function signatureByKind(response: WalletSettlementResumeResponse, kind: TradeSignatureKind) {

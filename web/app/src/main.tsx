@@ -4,6 +4,7 @@ import ReactDOM from 'react-dom/client';
 import { BrowserRouter, NavLink, Route, Routes } from 'react-router-dom';
 import './styles.css';
 
+const PayRoute = lazy(() => import('./pages/PayRoute'));
 const SwapRoute = lazy(() => import('./pages/SwapRoute'));
 const RuntimePage = lazy(() => import('./pages/RuntimePage').then((module) => ({ default: module.RuntimePage })));
 
@@ -23,14 +24,16 @@ function Shell() {
           </span>
         </a>
         <nav aria-label="Console navigation">
-          <NavLink to="/" end>Swap</NavLink>
-          <NavLink to="/runtime">Runtime</NavLink>
+          <NavLink to="/" end>Pay</NavLink>
+          <NavLink to="/swap">Swap</NavLink>
+          <NavLink to="/runtime">Maker</NavLink>
         </nav>
       </header>
       <div className="app-main">
         <Suspense fallback={<div className="route-loading" role="status">Loading console</div>}>
           <Routes>
-            <Route path="/" element={<SwapRoute />} />
+            <Route path="/" element={<PayRoute />} />
+            <Route path="/swap" element={<SwapRoute />} />
             <Route path="/runtime" element={<RuntimePage />} />
           </Routes>
         </Suspense>
@@ -42,8 +45,8 @@ function Shell() {
 
 function ConsoleFooter() {
   const signals = [
-    { code: '01', label: 'Risk-gated RFQs' },
-    { code: '02', label: 'Jupiter + Gateway repair' },
+    { code: '01', label: 'Firm quotes' },
+    { code: '02', label: 'Atomic settlement' },
     { code: '03', label: 'Ledger proof' }
   ];
 
@@ -63,7 +66,7 @@ function ConsoleFooter() {
           </span>
           <div>
             <strong><span>Firm</span>ament</strong>
-            <p>Execution infrastructure for Solana apps and treasuries.</p>
+            <p>Firm FX for stablecoin payments on Solana.</p>
           </div>
         </div>
         <div className="footer-signals" aria-label="Runtime pillars">

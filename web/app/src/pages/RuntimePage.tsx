@@ -113,9 +113,9 @@ export function RuntimePage() {
     <main className="runtime-page">
       <section className="runtime-hero">
         <div>
-          <p className="eyebrow">Public Runtime</p>
-          <h1>Live Runtime</h1>
-          <p className="lede">Ledger-backed proof for Firmament quotes, custody, Gateway balances, and user-facing trades.</p>
+          <p className="eyebrow">Firm FX maker</p>
+          <h1>Maker</h1>
+          <p className="lede">Inventory, quotes, settlements, and the ledger behind every payment.</p>
         </div>
         <RuntimeStatusBadge status={status} />
       </section>
