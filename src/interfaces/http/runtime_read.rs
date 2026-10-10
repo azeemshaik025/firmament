@@ -200,6 +200,11 @@ fn trade_to_summary(
             .taker_wallet
             .as_ref()
             .map(|wallet| wallet.as_str().to_owned()),
+        recipient: trade
+            .recipient
+            .as_ref()
+            .or(trade.taker_wallet.as_ref())
+            .map(|wallet| wallet.as_str().to_owned()),
         expires_at: trade.expires_at.map(|expires_at| expires_at.to_string()),
         created_at: trade.created_at.to_string(),
         settlement_status: settlement_status_str(trade.settlement_status).to_owned(),

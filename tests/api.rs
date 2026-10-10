@@ -7,10 +7,10 @@ use firmament::runtime::{
 };
 use firmament::settlement::SettlementLeg;
 use firmament::types::{
-    AmountRaw, AssetId, AssetPair, BalanceSnapshot, ExternalHtlcInitiation, GatewayReceipt,
-    GatewayRefillRequest, HtlcInitiation, HtlcReceipt, ReferencePrice, SettlementStatus, SwapQuote,
-    SwapReceipt, SwapRequest, TokenAmount, TxSignature, UnsignedWalletTransaction, WalletAddress,
-    WalletRole,
+    AmountRaw, AssetId, AssetPair, BalanceSnapshot, ExternalHtlcInitiation, ExternalRedeemRequest,
+    GatewayReceipt, GatewayRefillRequest, HtlcInitiation, HtlcReceipt, ReferencePrice,
+    SettlementStatus, SwapQuote, SwapReceipt, SwapRequest, TokenAmount, TxSignature,
+    UnsignedWalletTransaction, WalletAddress, WalletRole,
 };
 use firmament::{AppConfig, api, bootstrap};
 use rust_decimal::Decimal;
@@ -1853,9 +1853,7 @@ impl HtlcClient for FakeHtlcClient {
 
     async fn build_external_redeem(
         &self,
-        _trade_id: firmament::types::TradeId,
-        _redeemer: WalletAddress,
-        _preimage: String,
+        _request: ExternalRedeemRequest,
     ) -> Result<UnsignedWalletTransaction, firmament::AppError> {
         Ok(UnsignedWalletTransaction {
             transaction_base64: "AA==".to_owned(),
@@ -2204,4 +2202,118 @@ async fn api_rfq_rejects_both_amount_and_output_amount() {
 
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_eq!(body["error"]["code"], "invalid_amount");
+}
+
+async fn accepted_quote_id(app: &axum::Router) -> String {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v1/rfq")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(rfq_request().to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    let body = response_json(response).await;
+    assert_eq!(body["status"], "accepted", "{body}");
+    body["quote_id"].as_str().expect("quote id").to_owned()
+}
+
+async fn post_wallet_settlement(
+    app: &axum::Router,
+    quote_id: &str,
+    body: Value,
+) -> (StatusCode, Value) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/v1/quotes/{quote_id}/wallet-settlement"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    let status = response.status();
+    (status, response_json(response).await)
+}
+
+#[tokio::test]
+async fn api_wallet_settlement_recipient_shows_on_the_trade() {
+    let app = test_orchestrator_router().await;
+    let quote_id = accepted_quote_id(&app).await;
+
+    let (status, body) = post_wallet_settlement(
+        &app,
+        &quote_id,
+        json!({
+            "taker_wallet": "DemoTaker111111111111111111111111111111111111",
+            "secret_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "recipient": "So11111111111111111111111111111111111111112"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    let trade_id = body["trade_id"].as_str().expect("trade id").to_owned();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/v1/trades/{trade_id}/taker-lock"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({ "signature": "taker-lock-1" }).to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert!(response.status().is_success(), "{}", response.status());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/trades/{trade_id}"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let trade = response_json(response).await;
+    assert_eq!(
+        trade["recipient"],
+        "So11111111111111111111111111111111111111112"
+    );
+    assert_eq!(
+        trade["taker_wallet"],
+        "DemoTaker111111111111111111111111111111111111"
+    );
+}
+
+#[tokio::test]
+async fn api_wallet_settlement_rejects_a_malformed_recipient() {
+    let app = test_orchestrator_router().await;
+    let quote_id = accepted_quote_id(&app).await;
+
+    let (status, body) = post_wallet_settlement(
+        &app,
+        &quote_id,
+        json!({
+            "taker_wallet": "DemoTaker111111111111111111111111111111111111",
+            "secret_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "recipient": "not-a-solana-address"
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"]["code"], "invalid_recipient");
 }

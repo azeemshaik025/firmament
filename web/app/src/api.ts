@@ -216,6 +216,7 @@ export type RuntimeTrade = {
   run_id?: string;
   current_run?: boolean;
   taker_wallet?: string;
+  recipient?: string;
   expires_at?: string;
   created_at?: string;
   settlement_status: string;
@@ -292,7 +293,7 @@ export const api = {
     method: 'POST',
     body: JSON.stringify(payload)
   }),
-  walletSettlement: (quoteId: string, payload: { taker_wallet: string; secret_hash: string }) => request<WalletSettlementResponse>(`/v1/quotes/${quoteId}/wallet-settlement`, {
+  walletSettlement: (quoteId: string, payload: { taker_wallet: string; secret_hash: string; recipient?: string }) => request<WalletSettlementResponse>(`/v1/quotes/${quoteId}/wallet-settlement`, {
     method: 'POST',
     body: JSON.stringify(payload)
   }),

@@ -484,9 +484,19 @@ impl RfqApiService for OrchestratorRfqApiService {
         quote_id: QuoteId,
         request: WalletSettlementRequest,
     ) -> Result<WalletSettlementResponse, ApiError> {
+        if let Some(recipient) = &request.recipient {
+            solana_sdk::pubkey::Pubkey::from_str(recipient.as_str()).map_err(|_| {
+                ApiError::bad_request("invalid_recipient", "recipient is not a Solana address")
+            })?;
+        }
         let response = self
             .orchestrator
-            .start_wallet_settlement(quote_id, request.taker_wallet, request.secret_hash)
+            .start_wallet_settlement(
+                quote_id,
+                request.taker_wallet,
+                request.recipient,
+                request.secret_hash,
+            )
             .await
             .map_err(ApiError::from_app_error)?;
         info!(
@@ -1656,6 +1666,11 @@ fn trade_to_api_response(
         taker_wallet: trade
             .taker_wallet
             .as_ref()
+            .map(|wallet| wallet.as_str().to_owned()),
+        recipient: trade
+            .recipient
+            .as_ref()
+            .or(trade.taker_wallet.as_ref())
             .map(|wallet| wallet.as_str().to_owned()),
         expires_at: trade.expires_at.map(|expires_at| expires_at.to_string()),
         created_at,

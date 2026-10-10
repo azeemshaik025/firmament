@@ -44,8 +44,8 @@ use crate::domain::settlement::{
 };
 use crate::domain::types::{
     AmountRaw, AssetId, BalanceSnapshot, ExecutionPath, ExternalHtlcInitiation,
-    GatewayRefillRequest, QuoteId, RuntimeRunId, SettlementStatus, TokenAmount, TradeId,
-    TxSignature, UnsignedWalletTransaction, WalletAddress, WalletRole,
+    ExternalRedeemRequest, GatewayRefillRequest, QuoteId, RuntimeRunId, SettlementStatus,
+    TokenAmount, TradeId, TxSignature, UnsignedWalletTransaction, WalletAddress, WalletRole,
 };
 use crate::error::{AppError, AppResult};
 use crate::ports::{BalanceReader, GatewayClient, HtlcClient, PriceProvider, SwapExecutor};
@@ -209,6 +209,10 @@ pub struct RuntimeTrade {
     /// Browser wallet that requested the quote when attribution is known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub taker_wallet: Option<WalletAddress>,
+    /// Wallet that receives the maker's output. Equal to the taker unless a
+    /// third-party recipient was named at settlement start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipient: Option<WalletAddress>,
     /// HTLC expiry for wallet settlements when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<OffsetDateTime>,
@@ -341,10 +345,18 @@ struct WalletSettlementState {
     settlement: TwoSidedSettlement,
     taker_lock_request: ExternalHtlcInitiation,
     taker_wallet: WalletAddress,
+    #[serde(default)]
+    recipient: Option<WalletAddress>,
     tx_signatures: Vec<TxSignature>,
     tx_signature_kinds: Vec<TradeSignature>,
     run_id: RuntimeRunId,
     created_at: OffsetDateTime,
+}
+
+impl WalletSettlementState {
+    fn recipient(&self) -> &WalletAddress {
+        self.recipient.as_ref().unwrap_or(&self.taker_wallet)
+    }
 }
 
 /// Summary of one post-settlement automation pass.
@@ -1027,6 +1039,7 @@ fn runtime_trade_from_wallet_state(
         trade_id: state.settlement.terms.trade_id,
         run_id: state.run_id,
         taker_wallet: Some(state.taker_wallet.clone()),
+        recipient: Some(state.recipient().clone()),
         expires_at: Some(state.settlement.terms.expires_at),
         settlement_status: status,
         tx_signatures: state.tx_signatures.clone(),
@@ -1550,6 +1563,7 @@ impl RuntimeOrchestrator {
             trade_id,
             run_id: self.app_state.run_id(),
             taker_wallet: Some(quote.htlc_terms.taker_wallet.clone()),
+            recipient: None,
             expires_at: Some(quote.htlc_terms.expires_at),
             settlement_status: SettlementStatus::Redeemed,
             tx_signatures,
@@ -1610,6 +1624,7 @@ impl RuntimeOrchestrator {
                     trade_id,
                     run_id: self.app_state.run_id(),
                     taker_wallet: Some(quote.htlc_terms.taker_wallet.clone()),
+                    recipient: None,
                     expires_at: Some(quote.htlc_terms.expires_at),
                     settlement_status: SettlementStatus::Failed,
                     tx_signatures: Vec::new(),
@@ -1685,6 +1700,7 @@ impl RuntimeOrchestrator {
         &self,
         quote_id: QuoteId,
         taker_wallet: WalletAddress,
+        recipient: Option<WalletAddress>,
         secret_hash: String,
     ) -> AppResult<WalletSettlementStart> {
         let known_quote = self
@@ -1699,6 +1715,16 @@ impl RuntimeOrchestrator {
                 "connected wallet does not match the RFQ taker wallet",
             ));
         }
+        let maker_wallet = self
+            .adapters
+            .htlc_client
+            .wallet_address(WalletRole::Maker)
+            .await?;
+        if recipient.as_ref() == Some(&maker_wallet) {
+            return Err(AppError::validation(
+                "recipient must not be the maker wallet",
+            ));
+        }
         let quote = self.take_quote(quote_id).await?;
         if quote.htlc_terms.taker_wallet != taker_wallet {
             return Err(AppError::validation(
@@ -1707,11 +1733,6 @@ impl RuntimeOrchestrator {
         }
 
         let trade_id = self.accept_quote_for_trade(&quote).await?;
-        let maker_wallet = self
-            .adapters
-            .htlc_client
-            .wallet_address(WalletRole::Maker)
-            .await?;
         let terms = SettlementTerms {
             quote_id,
             trade_id,
@@ -1747,6 +1768,7 @@ impl RuntimeOrchestrator {
                 settlement,
                 taker_lock_request,
                 taker_wallet,
+                recipient,
                 tx_signatures: Vec::new(),
                 tx_signature_kinds: Vec::new(),
                 run_id: self.app_state.run_id(),
@@ -1839,7 +1861,7 @@ impl RuntimeOrchestrator {
                 .htlc_client
                 .initiate_with_external_redeemer(
                     state.settlement.terms.maker_lock_request(),
-                    state.taker_wallet.clone(),
+                    state.recipient().clone(),
                 )
                 .await?;
             push_trade_signature(
@@ -1888,7 +1910,12 @@ impl RuntimeOrchestrator {
         let taker_redeem_transaction = self
             .adapters
             .htlc_client
-            .build_external_redeem(trade_id, state.taker_wallet, preimage)
+            .build_external_redeem(ExternalRedeemRequest {
+                trade_id,
+                recipient: state.recipient().clone(),
+                payer: state.taker_wallet.clone(),
+                preimage,
+            })
             .await?;
 
         Ok(WalletTakerRedeemPreparation {
@@ -1983,6 +2010,7 @@ impl RuntimeOrchestrator {
             trade_id,
             run_id: state.run_id,
             taker_wallet: Some(state.taker_wallet.clone()),
+            recipient: Some(state.recipient().clone()),
             expires_at: Some(state.settlement.terms.expires_at),
             settlement_status: SettlementStatus::Redeemed,
             tx_signatures: state.tx_signatures.clone(),
@@ -2247,6 +2275,7 @@ impl RuntimeOrchestrator {
             .restore_wallet_settlement(
                 state.taker_lock_request.clone(),
                 state.settlement.terms.maker_lock_request(),
+                state.recipient().clone(),
                 taker_locked,
                 maker_locked,
             )
@@ -3413,6 +3442,7 @@ impl RuntimeOrchestrator {
             trade_id: settlement.terms.trade_id,
             run_id: self.app_state.run_id(),
             taker_wallet: Some(quote.htlc_terms.taker_wallet.clone()),
+            recipient: None,
             expires_at: Some(settlement.terms.expires_at),
             settlement_status: SettlementStatus::Failed,
             tx_signatures: tx_signatures.to_vec(),

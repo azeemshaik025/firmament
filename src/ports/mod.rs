@@ -5,9 +5,9 @@ use async_trait::async_trait;
 use crate::domain::events::RuntimeEvent;
 use crate::domain::settlement::SettlementLeg;
 use crate::domain::types::{
-    AmountRaw, AssetId, AssetPair, BalanceSnapshot, ExternalHtlcInitiation, GatewayReceipt,
-    GatewayRefillRequest, HtlcInitiation, HtlcReceipt, LedgerMovement, ReferencePrice,
-    SettlementStatus, SwapQuote, SwapReceipt, SwapRequest, TradeId, TxSignature,
+    AmountRaw, AssetId, AssetPair, BalanceSnapshot, ExternalHtlcInitiation, ExternalRedeemRequest,
+    GatewayReceipt, GatewayRefillRequest, HtlcInitiation, HtlcReceipt, LedgerMovement,
+    ReferencePrice, SettlementStatus, SwapQuote, SwapReceipt, SwapRequest, TradeId, TxSignature,
     UnsignedWalletTransaction, WalletAddress, WalletRole,
 };
 use crate::error::AppError;
@@ -124,13 +124,9 @@ pub trait HtlcClient: Send + Sync {
     /// Returns an error when the transaction cannot be constructed.
     async fn build_external_redeem(
         &self,
-        trade_id: TradeId,
-        redeemer: WalletAddress,
-        preimage: String,
+        request: ExternalRedeemRequest,
     ) -> Result<UnsignedWalletTransaction, AppError> {
-        let _ = trade_id;
-        let _ = redeemer;
-        let _ = preimage;
+        let _ = request;
         Err(AppError::unsupported(
             "HTLC client does not support browser redeem construction",
         ))
@@ -211,11 +207,13 @@ pub trait HtlcClient: Send + Sync {
         &self,
         taker_lock: ExternalHtlcInitiation,
         maker_lock: HtlcInitiation,
+        maker_redeemer: WalletAddress,
         taker_locked: bool,
         maker_locked: bool,
     ) -> Result<(), AppError> {
         let _ = taker_lock;
         let _ = maker_lock;
+        let _ = maker_redeemer;
         let _ = taker_locked;
         let _ = maker_locked;
         Ok(())

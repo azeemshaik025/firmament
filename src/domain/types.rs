@@ -408,6 +408,21 @@ pub struct ExternalHtlcInitiation {
     pub expires_at: OffsetDateTime,
 }
 
+/// Browser-signed redeem of the maker's HTLC leg: the recipient receives the
+/// escrowed asset, the payer covers the transaction fee and any token
+/// account the recipient is missing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalRedeemRequest {
+    /// Trade whose maker leg is being redeemed.
+    pub trade_id: TradeId,
+    /// Wallet that receives the maker's output.
+    pub recipient: WalletAddress,
+    /// Browser wallet that signs and pays for the transaction.
+    pub payer: WalletAddress,
+    /// Hex-encoded 32-byte preimage revealed by the payer.
+    pub preimage: String,
+}
+
 /// Serialized unsigned transaction returned to a browser wallet for signing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnsignedWalletTransaction {
