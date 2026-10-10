@@ -712,7 +712,8 @@ components:
         - $ref: "#/components/schemas/LegacyRfqRequest"
     FriendlyRfqRequest:
       type: object
-      required: [input_asset, output_asset, amount, taker_wallet]
+      description: Exactly one of `amount` or `output_amount` is required.
+      required: [input_asset, output_asset, taker_wallet]
       properties:
         input_asset:
           type: string
@@ -723,8 +724,12 @@ components:
           example: SOL
         amount:
           type: string
-          description: Decimal amount in the input asset's display units, sent as a string.
+          description: Decimal amount in the input asset's display units, sent as a string. Fixes what the taker pays.
           example: "1.00"
+        output_amount:
+          type: string
+          description: Decimal amount in the output asset's display units. Fixes what must come out; the response's `input` is what it costs. Exactly one of `amount` and `output_amount` is required.
+          example: "89.30"
         taker_wallet:
           $ref: "#/components/schemas/WalletAddress"
         expiry_seconds:

@@ -35,10 +35,9 @@ export type PairsResponse = { pairs: Pair[] };
 export type FriendlyRfqRequest = {
   input_asset: string;
   output_asset: string;
-  amount: string;
   taker_wallet: string;
   expiry_seconds?: number;
-};
+} & ({ amount: string; output_amount?: never } | { output_amount: string; amount?: never });
 
 export type LegacyRfqRequest = {
   input_mint: string;

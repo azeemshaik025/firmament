@@ -1333,6 +1333,7 @@ fn parse_rfq_request(request: RfqRequest, config: &AppConfig) -> Result<rfq::Rfq
         input_asset,
         output_asset,
         amount,
+        output_amount,
         input_mint,
         output_mint,
         input_amount_raw,
@@ -1340,13 +1341,16 @@ fn parse_rfq_request(request: RfqRequest, config: &AppConfig) -> Result<rfq::Rfq
         expiry_seconds,
     } = request;
 
-    let used_friendly = input_asset.is_some() || output_asset.is_some() || amount.is_some();
+    let used_friendly = input_asset.is_some()
+        || output_asset.is_some()
+        || amount.is_some()
+        || output_amount.is_some();
     let used_legacy = input_mint.is_some() || output_mint.is_some() || input_amount_raw.is_some();
 
     if used_friendly && used_legacy {
         return Err(ApiError::bad_request(
             "invalid_rfq",
-            "do not mix friendly (input_asset/output_asset/amount) and legacy (input_mint/output_mint/input_amount_raw) RFQ fields",
+            "do not mix friendly (input_asset/output_asset/amount/output_amount) and legacy (input_mint/output_mint/input_amount_raw) RFQ fields",
         ));
     }
 
@@ -1357,15 +1361,6 @@ fn parse_rfq_request(request: RfqRequest, config: &AppConfig) -> Result<rfq::Rfq
         let output_id = output_asset
             .as_deref()
             .ok_or_else(|| ApiError::bad_request("invalid_rfq", "output_asset is required"))?;
-        let raw_amount = amount.as_deref().ok_or_else(|| {
-            ApiError::new(
-                StatusCode::BAD_REQUEST,
-                "invalid_amount",
-                "amount is required",
-                Vec::new(),
-            )
-        })?;
-
         let input_cfg = resolve_asset_alias(config, input_id)?;
         let output_cfg = resolve_asset_alias(config, output_id)?;
         if input_cfg.id == output_cfg.id {
@@ -1379,6 +1374,19 @@ fn parse_rfq_request(request: RfqRequest, config: &AppConfig) -> Result<rfq::Rfq
                 Vec::new(),
             ));
         }
+
+        let (raw_amount, fixed_cfg) = match (amount.as_deref(), output_amount.as_deref()) {
+            (Some(raw), None) => (raw, input_cfg),
+            (None, Some(raw)) => (raw, output_cfg),
+            _ => {
+                return Err(ApiError::new(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_amount",
+                    "provide exactly one of amount (what you pay) or output_amount (what must come out)",
+                    Vec::new(),
+                ));
+            }
+        };
 
         let amount_decimal = Decimal::from_str(raw_amount.trim()).map_err(|_| {
             ApiError::new(
@@ -1399,14 +1407,14 @@ fn parse_rfq_request(request: RfqRequest, config: &AppConfig) -> Result<rfq::Rfq
 
         let registry = AssetRegistry::from_config(config);
         let raw = registry
-            .display_to_raw(&input_cfg.id, amount_decimal)
+            .display_to_raw(&fixed_cfg.id, amount_decimal)
             .map_err(|err| match err {
                 AssetError::PrecisionLoss { .. } => ApiError::new(
                     StatusCode::BAD_REQUEST,
                     "invalid_amount",
                     format!(
                         "amount '{raw_amount}' has more than {} decimals (max for {})",
-                        input_cfg.decimals, input_cfg.id
+                        fixed_cfg.decimals, fixed_cfg.id
                     ),
                     Vec::new(),
                 ),
@@ -1424,10 +1432,16 @@ fn parse_rfq_request(request: RfqRequest, config: &AppConfig) -> Result<rfq::Rfq
                 ),
             })?;
 
+        let requested = if output_amount.is_some() {
+            rfq::RequestedAmount::Output(raw)
+        } else {
+            rfq::RequestedAmount::Input(raw)
+        };
+
         Ok(rfq::RfqRequest {
             input_mint: input_cfg.mint.clone(),
             output_mint: output_cfg.mint.clone(),
-            amount: rfq::RequestedAmount::Input(raw),
+            amount: requested,
             taker_wallet,
             expiry_seconds,
         })

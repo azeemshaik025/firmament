@@ -2135,3 +2135,73 @@ impl BalanceReader for FakeBalanceReader {
             .ok_or_else(|| firmament::AppError::internal("no fake snapshots"))
     }
 }
+
+fn exact_output_rfq_request(output_amount: &str) -> Value {
+    json!({
+        "input_asset": "USDC",
+        "output_asset": "SOL",
+        "output_amount": output_amount,
+        "taker_wallet": "DemoTaker111111111111111111111111111111111111",
+        "expiry_seconds": 30
+    })
+}
+
+async fn post_rfq(app: axum::Router, body: Value) -> (StatusCode, Value) {
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v1/rfq")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    let status = response.status();
+    (status, response_json(response).await)
+}
+
+#[tokio::test]
+async fn api_rfq_exact_output_quotes_the_input_cost() {
+    let app = test_orchestrator_router().await;
+
+    let (status, body) = post_rfq(app, exact_output_rfq_request("0.01")).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["status"], "accepted", "{body}");
+    assert_eq!(body["output"]["asset"], "SOL");
+    assert_eq!(body["output"]["amount_raw"], "10000000");
+    assert_eq!(body["input"]["asset"], "USDC");
+    let input_raw: u64 = body["input"]["amount_raw"]
+        .as_str()
+        .expect("input amount_raw")
+        .parse()
+        .expect("numeric input amount_raw");
+    assert!(input_raw > 0);
+}
+
+#[tokio::test]
+async fn api_rfq_rejects_output_amount_with_too_many_decimals() {
+    let app = test_orchestrator_router().await;
+
+    let (status, body) = post_rfq(app, exact_output_rfq_request("0.0000000001")).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"]["code"], "invalid_amount");
+    let message = body["error"]["message"].as_str().expect("message");
+    assert!(message.contains("9 decimals"), "{message}");
+    assert!(message.contains("SOL"), "{message}");
+}
+
+#[tokio::test]
+async fn api_rfq_rejects_both_amount_and_output_amount() {
+    let app = test_orchestrator_router().await;
+    let mut body = exact_output_rfq_request("0.01");
+    body["amount"] = json!("1.00");
+
+    let (status, body) = post_rfq(app, body).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"]["code"], "invalid_amount");
+}

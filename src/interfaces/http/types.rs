@@ -17,8 +17,9 @@ use crate::domain::types::{
 /// Request body for `POST /v1/rfq`.
 ///
 /// Accepts two equivalent shapes for backward compatibility:
-/// - **Friendly** (preferred): `input_asset`, `output_asset`, and a decimal
-///   `amount` string. Asset identifiers are case-insensitive.
+/// - **Friendly** (preferred): `input_asset`, `output_asset`, and exactly one
+///   of `amount` (what the taker pays) or `output_amount` (what must come
+///   out). Asset identifiers are case-insensitive.
 /// - **Legacy**: `input_mint`, `output_mint`, and `input_amount_raw` integer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RfqRequest {
@@ -31,6 +32,10 @@ pub struct RfqRequest {
     /// Friendly input amount in display units (e.g. `"0.01"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub amount: Option<String>,
+    /// Friendly output amount in the output asset's display units. Exactly
+    /// one of `amount` and `output_amount` is required.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_amount: Option<String>,
     /// Legacy mint address provided by the taker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_mint: Option<MintAddress>,
