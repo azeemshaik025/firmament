@@ -15,7 +15,8 @@ the live setup path. Start with tiny caps, prove the runtime, then adjust policy
 - A Solana mainnet RPC URL.
 - One maker Solana wallet. This wallet owns working inventory and pays gas.
 - A browser Solana wallet for taker testing.
-- A Jupiter API key if `jupiter.enabled = true`.
+- Optionally a Jupiter API key; without it the runtime uses Jupiter's keyless
+  public tier and its lower rate limits.
 - A Circle Gateway Solana depositor address if `gateway.enabled = true`.
 - USDC and enough SOL for gas in the maker wallet.
 

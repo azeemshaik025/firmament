@@ -4,7 +4,7 @@ use config::FileFormat;
 use firmament::{
     AppConfig,
     config::{PairConfig, ProtocolWorkerScope},
-    types::{AssetId, WalletRole},
+    types::{AssetId, MintAddress, WalletRole},
 };
 use rust_decimal::Decimal;
 
@@ -315,4 +315,30 @@ fn stablecoins_and_sol_use_the_stable_notional_limit() {
             "{asset}"
         );
     }
+}
+
+#[test]
+fn live_guard_does_not_require_a_jupiter_api_key() {
+    let mut config = AppConfig::default();
+    config.runtime.enable_protocol_workers = true;
+    config.gateway.enabled = false;
+    for asset in &mut config.assets.supported {
+        if asset.id.as_str() == "cbBTC" {
+            asset.mint = MintAddress::new("cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij");
+        }
+    }
+
+    // SAFETY: no other test in this binary reads these variables.
+    unsafe {
+        std::env::set_var("SOLANA_RPC_URL", "https://solana-rpc.publicnode.com");
+        std::env::set_var("MAKER_PRIVATE_KEY", "11111111111111111111111111111111");
+        std::env::remove_var("JUPITER_API_KEY");
+    }
+    let result = config.validate_protocol_workers_ready_for(ProtocolWorkerScope::Maker);
+    unsafe {
+        std::env::remove_var("SOLANA_RPC_URL");
+        std::env::remove_var("MAKER_PRIVATE_KEY");
+    }
+
+    result.expect("Jupiter answers keyless on its public tier, so the key is optional");
 }

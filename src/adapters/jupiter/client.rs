@@ -13,7 +13,7 @@ use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_commitment_config::CommitmentConfig;
 use solana_sdk::signature::{Keypair, Signature, Signer};
 use time::OffsetDateTime;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::adapters::solana::wallets::{LoadedWallet, SOLANA_RPC_URL_ENV};
 use crate::config::{AppConfig, AssetConfig, JUPITER_API_KEY_ENV};
@@ -215,6 +215,12 @@ impl JupiterClientConfig {
             .collect::<Result<Vec<_>, _>>()?;
         let pairs = app_config.assets.enabled_pairs();
         let api_key = env_nonempty(JUPITER_API_KEY_ENV);
+        if api_key.is_none() {
+            warn!(
+                env = JUPITER_API_KEY_ENV,
+                "Jupiter API key not set; using the keyless public tier and its lower rate limits"
+            );
+        }
         let rpc_url = env_nonempty(SOLANA_RPC_URL_ENV);
 
         Ok(Self {

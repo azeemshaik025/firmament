@@ -21,7 +21,8 @@ Store these in `.env`:
 
 - `SOLANA_RPC_URL`
 - exactly one maker keypair source: `MAKER_PRIVATE_KEY`, `MAKER_KEYPAIR_PATH`, or `MAKER_KEYPAIR_JSON`
-- `JUPITER_API_KEY` when Jupiter is enabled
+- `JUPITER_API_KEY`, optional; without it Jupiter's keyless public tier and its
+  lower rate limits apply
 - `CIRCLE_GATEWAY_SOLANA_ADDRESS` when Gateway is enabled
 
 The maker wallet and `CIRCLE_GATEWAY_SOLANA_ADDRESS` must refer to the same

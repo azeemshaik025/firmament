@@ -34,7 +34,12 @@ toml_value() {
     ' "$CONFIG_PATH" | tail -n 1
 }
 
-[ -f "$CONFIG_PATH" ] || fail "mount config.toml to $CONFIG_PATH"
+if [ -n "${FIRMAMENT_CONFIG_B64:-}" ]; then
+    printf '%s' "$FIRMAMENT_CONFIG_B64" | base64 -d > "$CONFIG_PATH" \
+        || fail "FIRMAMENT_CONFIG_B64 is not valid base64"
+fi
+
+[ -f "$CONFIG_PATH" ] || fail "mount config.toml to $CONFIG_PATH or set FIRMAMENT_CONFIG_B64"
 [ -r "$CONFIG_PATH" ] || fail "$CONFIG_PATH is not readable by the firmament user"
 [ -d "$DATA_DIR" ] || fail "$DATA_DIR must exist for SQLite persistence"
 [ -w "$DATA_DIR" ] || fail "$DATA_DIR is not writable by the firmament user"

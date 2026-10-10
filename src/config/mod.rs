@@ -213,10 +213,7 @@ impl AppConfig {
             require_wallet_env(*role)?;
         }
 
-        if self.jupiter.enabled {
-            require_env(JUPITER_API_KEY_ENV)?;
-        }
-
+        // Jupiter answers keyless on its public tier; the key only raises rate limits.
         if self.gateway.enabled {
             require_env(CIRCLE_GATEWAY_SOLANA_ADDRESS_ENV)?;
         }
