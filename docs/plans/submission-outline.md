@@ -32,8 +32,8 @@ Links:
    DEX liquidity vs EURC ~$0.7M, Jupiter, Oct 2026), so a route cannot make
    that promise.
 2. What Firmament does: a self-hosted maker that quotes an exact EURC amount,
-   holds the USDC cost for 30 seconds, and settles both legs atomically through
-   Solana HTLCs, to the sender or to any recipient address.
+   holds the USDC cost for 30 seconds, and settles both legs through paired
+   Solana HTLC escrows under one secret, to the sender or to any wallet address.
 3. The proof: two mainnet payments of 1 EURC on 2026-10-10 (one to a brand-new
    wallet whose token account was created inside the redeem). Signatures are in
    the runtime proof doc and the demo video.
