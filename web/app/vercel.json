@@ -11,14 +11,6 @@
   ],
   "rewrites": [
     {
-      "source": "/v1/:path*",
-      "destination": "https://firmament-api.fly.dev/v1/:path*"
-    },
-    {
-      "source": "/health",
-      "destination": "https://firmament-api.fly.dev/health"
-    },
-    {
       "source": "/app/assets/:path*",
       "destination": "/assets/:path*"
     },
