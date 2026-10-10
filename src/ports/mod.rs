@@ -225,6 +225,16 @@ pub trait HtlcClient: Send + Sync {
     ///
     /// Returns an error when the preimage is invalid or the redeem transaction
     /// fails.
+    /// Whether a leg's escrow account is still open on chain.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the chain cannot be read.
+    async fn leg_active(&self, trade_id: TradeId, leg: SettlementLeg) -> Result<bool, AppError> {
+        let _ = (trade_id, leg);
+        Ok(true)
+    }
+
     async fn redeem(&self, trade_id: TradeId, preimage: String) -> Result<HtlcReceipt, AppError>;
 
     /// Refund an expired HTLC escrow.

@@ -1016,6 +1016,31 @@ impl HtlcClient for SolanaHtlcClient {
         })
     }
 
+    async fn leg_active(&self, trade_id: TradeId, leg: SettlementLeg) -> Result<bool, AppError> {
+        let stored = self.state.lock().await.get(&trade_id).and_then(|trade| {
+            trade
+                .legs
+                .iter()
+                .find(|stored| leg_for_funder(stored.request.funder) == leg)
+                .cloned()
+        });
+        let Some(stored) = stored else {
+            return Err(AppError::validation(format!(
+                "no {leg:?} HTLC leg is known for trade {trade_id}"
+            )));
+        };
+        let account = self
+            .rpc_client
+            .get_account_with_commitment(&stored.swap_pda, CommitmentConfig::confirmed())
+            .await
+            .map_err(|error| {
+                AppError::solana(format!("get HTLC account {}: {error}", stored.swap_pda))
+            })?
+            .value;
+        Ok(account
+            .is_some_and(|account| validate_active_htlc_account_matches_leg(&stored, &account).is_ok()))
+    }
+
     async fn status(&self, trade_id: TradeId) -> Result<SettlementStatus, AppError> {
         let legs = self
             .state

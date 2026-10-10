@@ -347,6 +347,10 @@ struct WalletSettlementState {
     taker_wallet: WalletAddress,
     #[serde(default)]
     recipient: Option<WalletAddress>,
+    /// The secret the browser revealed at redeem time, kept so the maker can
+    /// collect without the browser if its own redeem fails first.
+    #[serde(default)]
+    preimage: Option<String>,
     tx_signatures: Vec<TxSignature>,
     tx_signature_kinds: Vec<TradeSignature>,
     run_id: RuntimeRunId,
@@ -357,6 +361,13 @@ impl WalletSettlementState {
     fn recipient(&self) -> &WalletAddress {
         self.recipient.as_ref().unwrap_or(&self.taker_wallet)
     }
+}
+
+fn preimage_matches(preimage: &str, secret_hash: &str) -> bool {
+    hex::decode(preimage)
+        .ok()
+        .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+        .is_some_and(|secret| hex::encode(hash_secret(&secret)).eq_ignore_ascii_case(secret_hash))
 }
 
 /// Summary of one post-settlement automation pass.
@@ -1769,6 +1780,7 @@ impl RuntimeOrchestrator {
                 taker_lock_request,
                 taker_wallet,
                 recipient,
+                preimage: None,
                 tx_signatures: Vec::new(),
                 tx_signature_kinds: Vec::new(),
                 run_id: self.app_state.run_id(),
@@ -1816,9 +1828,23 @@ impl RuntimeOrchestrator {
         }
         let mut state = self.wallet_settlement_state(trade_id).await?;
         if wallet_prelock_expired(&state) {
-            self.fail_expired_prelock_wallet_settlement(state).await?;
-            return Err(AppError::validation(
-                "wallet settlement expired before funds were locked",
+            // The quote is dead, but a signed lock may still have landed; a
+            // landed lock must stay on record so the sender can refund it.
+            let Ok(taker_lock) = self
+                .adapters
+                .htlc_client
+                .record_external_initiate(state.taker_lock_request.clone(), taker_lock_signature)
+                .await
+            else {
+                self.fail_expired_prelock_wallet_settlement(state).await?;
+                return Err(AppError::validation(
+                    "wallet settlement expired before funds were locked",
+                ));
+            };
+            self.record_wallet_taker_lock_receipt(&mut state, &taker_lock)
+                .await?;
+            return Err(AppError::conflict(
+                "the quote expired before the lock landed; the maker will not lock, refund after the escrow expiry",
             ));
         }
         if !has_signature_kind(&state, TradeSignatureKind::TakerLock) {
@@ -1827,27 +1853,8 @@ impl RuntimeOrchestrator {
                 .htlc_client
                 .record_external_initiate(state.taker_lock_request.clone(), taker_lock_signature)
                 .await?;
-            push_trade_signature(
-                &mut state.tx_signatures,
-                &mut state.tx_signature_kinds,
-                &taker_lock,
-            );
-            let transition = state.settlement.record_taker_lock(
-                self.app_state.run_id(),
-                taker_lock.signature.as_ref().map(ToString::to_string),
-            );
-            self.publish(RuntimeEvent::Settlement(transition.event))
+            self.record_wallet_taker_lock_receipt(&mut state, &taker_lock)
                 .await?;
-            // Current wallet-flow confirmation boundary: the browser-driven
-            // path posts the signed taker tx via `record_external_initiate`,
-            // which confirms and validates the expected HTLC account before
-            // returning.
-            let confirmation = state
-                .settlement
-                .confirm_taker_lock(self.app_state.run_id())?;
-            self.publish(RuntimeEvent::Settlement(confirmation.event))
-                .await?;
-            self.persist_and_store_wallet_settlement(&state).await?;
         }
 
         if !has_signature_kind(&state, TradeSignatureKind::MakerLock) {
@@ -1895,6 +1902,33 @@ impl RuntimeOrchestrator {
         Ok(response)
     }
 
+    /// Record a confirmed taker lock. `record_external_initiate` has already
+    /// confirmed the transaction and checked the HTLC account, so the lock is
+    /// recorded and confirmed in one step.
+    async fn record_wallet_taker_lock_receipt(
+        &self,
+        state: &mut WalletSettlementState,
+        taker_lock: &crate::domain::types::HtlcReceipt,
+    ) -> AppResult<()> {
+        push_trade_signature(
+            &mut state.tx_signatures,
+            &mut state.tx_signature_kinds,
+            taker_lock,
+        );
+        let transition = state.settlement.record_taker_lock(
+            self.app_state.run_id(),
+            taker_lock.signature.as_ref().map(ToString::to_string),
+        );
+        self.publish(RuntimeEvent::Settlement(transition.event))
+            .await?;
+        let confirmation = state
+            .settlement
+            .confirm_taker_lock(self.app_state.run_id())?;
+        self.publish(RuntimeEvent::Settlement(confirmation.event))
+            .await?;
+        self.persist_and_store_wallet_settlement(state).await
+    }
+
     /// Build the unsigned taker redeem transaction after the browser reveals
     /// the preimage at redeem time.
     ///
@@ -1906,7 +1940,13 @@ impl RuntimeOrchestrator {
         trade_id: TradeId,
         preimage: String,
     ) -> AppResult<WalletTakerRedeemPreparation> {
-        let state = self.wallet_settlement_state(trade_id).await?;
+        let mut state = self.wallet_settlement_state(trade_id).await?;
+        if !preimage_matches(&preimage, &state.settlement.terms.secret_hash) {
+            return Err(AppError::validation(
+                "preimage does not hash to the settlement secret",
+            ));
+        }
+        self.restore_wallet_settlement_htlc(&state).await?;
         let taker_redeem_transaction = self
             .adapters
             .htlc_client
@@ -1914,9 +1954,11 @@ impl RuntimeOrchestrator {
                 trade_id,
                 recipient: state.recipient().clone(),
                 payer: state.taker_wallet.clone(),
-                preimage,
+                preimage: preimage.clone(),
             })
             .await?;
+        state.preimage = Some(preimage);
+        self.persist_and_store_wallet_settlement(&state).await?;
 
         Ok(WalletTakerRedeemPreparation {
             trade_id,
@@ -1983,6 +2025,25 @@ impl RuntimeOrchestrator {
             self.persist_and_store_wallet_settlement(&state).await?;
         }
 
+        let (trade, _) = self.finish_wallet_maker_redeem(state, preimage).await?;
+        Ok(WalletTakerRedeemResult {
+            maker_redeem_signature: trade
+                .tx_signature_kinds
+                .iter()
+                .find(|signature| signature.kind == TradeSignatureKind::MakerRedeem)
+                .map(|signature| TxSignature::new(signature.signature.clone())),
+            trade,
+        })
+    }
+
+    /// Run the maker redeem if it is still missing and close the settlement
+    /// as redeemed. Returns the terminal trade and the settlement's last phase.
+    async fn finish_wallet_maker_redeem(
+        &self,
+        mut state: WalletSettlementState,
+        preimage: String,
+    ) -> AppResult<(RuntimeTrade, SettlementPhase)> {
+        let trade_id = state.settlement.terms.trade_id;
         if !has_signature_kind(&state, TradeSignatureKind::MakerRedeem) {
             let maker_redeem = self.adapters.htlc_client.redeem(trade_id, preimage).await?;
             push_trade_signature(
@@ -2024,12 +2085,27 @@ impl RuntimeOrchestrator {
         self.trades.write().await.insert(trade_id, trade.clone());
         self.wallet_settlements.write().await.remove(&trade_id);
         self.delete_persisted_wallet_settlement(trade_id)?;
-        self.refresh_inventory_and_automation().await?;
+        // The payment is final at this point; a failed book repair is the
+        // maker's problem, not the payer's.
+        if let Err(error) = self.refresh_inventory_and_automation().await {
+            tracing::warn!(?error, %trade_id, "post-settlement automation failed");
+        }
 
-        Ok(WalletTakerRedeemResult {
-            trade,
-            maker_redeem_signature: signature_for_kind(&state, TradeSignatureKind::MakerRedeem),
-        })
+        Ok((trade, state.settlement.phase))
+    }
+
+    /// Whether the maker's escrow is still open, so refunding the taker leg
+    /// cannot strand a maker that already paid the recipient.
+    async fn maker_leg_still_locked(&self, state: &WalletSettlementState) -> AppResult<bool> {
+        if !has_signature_kind(state, TradeSignatureKind::MakerLock)
+            || has_signature_kind(state, TradeSignatureKind::MakerRefund)
+        {
+            return Ok(true);
+        }
+        self.adapters
+            .htlc_client
+            .leg_active(state.settlement.terms.trade_id, SettlementLeg::MakerOutput)
+            .await
     }
 
     /// Resume an active browser-wallet settlement after a page or backend restart.
@@ -2050,6 +2126,27 @@ impl RuntimeOrchestrator {
             ));
         }
         self.restore_wallet_settlement_htlc(&state).await?;
+        if has_signature_kind(&state, TradeSignatureKind::TakerRedeem)
+            && !has_signature_kind(&state, TradeSignatureKind::MakerRedeem)
+        {
+            if let Some(preimage) = state.preimage.clone() {
+                let expires_at = state.settlement.terms.expires_at;
+                let (trade, phase) = self.finish_wallet_maker_redeem(state, preimage).await?;
+                return Ok(WalletSettlementResume {
+                    trade_id,
+                    quote_id: trade.quote_id,
+                    run_id: trade.run_id,
+                    settlement_phase: phase,
+                    settlement_status: SettlementStatus::Redeemed,
+                    taker_lock_transaction: None,
+                    taker_redeem_transaction: None,
+                    taker_refund_transaction: None,
+                    tx_signatures: trade.tx_signatures,
+                    tx_signature_kinds: trade.tx_signature_kinds,
+                    expires_at,
+                });
+            }
+        }
         let taker_lock_transaction = if has_signature_kind(&state, TradeSignatureKind::TakerLock) {
             None
         } else {
@@ -2060,7 +2157,9 @@ impl RuntimeOrchestrator {
                     .await?,
             )
         };
-        let taker_refund_transaction = if wallet_refund_available(&state) {
+        let taker_refund_transaction = if wallet_refund_available(&state)
+            && self.maker_leg_still_locked(&state).await?
+        {
             Some(
                 self.adapters
                     .htlc_client
@@ -2171,6 +2270,11 @@ impl RuntimeOrchestrator {
         let mut state = self.wallet_settlement_state(trade_id).await?;
         ensure_wallet_refundable(&state)?;
         self.restore_wallet_settlement_htlc(&state).await?;
+        if !self.maker_leg_still_locked(&state).await? {
+            return Err(AppError::conflict(
+                "the recipient has already been paid; the sender's lock is not refundable",
+            ));
+        }
 
         if !has_signature_kind(&state, TradeSignatureKind::TakerRefund) {
             let taker_refund = self
