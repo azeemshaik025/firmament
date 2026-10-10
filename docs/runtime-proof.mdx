@@ -7,6 +7,33 @@ description: "Public runtime reads exposed by the backend."
 
 Firmament exposes read-only runtime state so reviewers can see what the backend is tracking.
 
+## Mainnet payments, 2026-10-10
+
+Two USDC to EURC payments settled on Solana mainnet from a maker running on a
+laptop, each 1.000000 EURC delivered to a wallet that is not the sender.
+
+Payment 1, 1.123994 USDC in, recipient `5u15DULjKqAUAzdtdFzCyWbHRWdQk1VrjLHLfKrfQFMp`:
+
+- taker lock: `5cdkVUTQ5fqjHhR16nzQp7CFNjNquR66vaFQFfbtPTuYqSAuTTZpXkspQNpVHCnaky6pE2HmnLxK3R9rUzjnYd6h`
+- maker lock: `D7A6ByHCVks7q2ta7utsgdDwtRNkEh4To88g4ppX6H83Ak9K4RLh733b8G74gbiuaAzZ7XGjj4eGw7DA4ak3FYj`
+- taker redeem, creates the recipient's EURC account and pays it: `35qnj4n7TKx9NXwJAWZDXR7b9JtBFF5dpJdKyXNaow3Sw6oWs1Nn6aQXnEsDWfu17T5HX37VtEGCBYmhmJfQ7372`
+- maker redeem, creates the maker's USDC account and collects: `26uXunZjYDmXxkvxenp1G4q7jG8eFavMrmRNiBxvFspMS8NJK7G1GaLRVKhg7oSEBgVYsFvkKnHfUvpDFJh4tod5`
+- Jupiter rebalance after the fill: `54BstdY8pFci4C5oYg8grSyYoP7rJvgK6n27trNCAGUQdaVxuCu9Vo8ZEA7zjnnndwiwSJtniKdHM8uguN962PPx`
+
+The maker redeem first failed because the fresh maker wallet had no USDC
+account; the runtime now creates it inside the redeem and restores finished
+legs after a restart, and the same trade completed on the fixed build.
+
+Payment 2, 1.122951 USDC in, recipient `AKRLteKLTfyFMfhsJ8vwH1zAqgwCakpHrnMQkuG4ToRM`, a wallet created minutes earlier:
+
+- taker lock: `3jZm4tFPGdmJPUQEVkHEzrczd4suQAh5QBh1W59LfdrU21PZXmG1ZjQZAJT8UHgNbZJUFjYEabkV41c2Zz3sVBMN`
+- maker lock: `v9EPwQZ1dJUBqQKZYAcogyyCWFFuBpJPYvB4zwpAhknLw4d1xakSori3VxnTJcvpbcUck7XPeqKZtbRgcb33XJ5`
+- taker redeem: `2fiHkBvtqHwhrMWFQ44oMcNjFvRZuazTWAjWvrnAso6bR5A9DNeX9fAcyj4hcjqpZoJPEousYHkoMAH2Dt2rfqJD`
+- maker redeem: `3Dz4Zjyi6itm8vwiggm7614QoVEJWFyzNspnnmh3o2S4bqoF6HyZ4T4FjtsjT3ZKQNWCQ3FAkQL4ax9MBwYPzp25`
+
+Every signature resolves on `https://solscan.io/tx/<signature>`. The maker's
+ledger stayed balanced across both payments (`healthy: true`, 52 entries).
+
 ## Inventory
 
 `GET /v1/runtime/state` includes configured quoteable thresholds, observed inventory events, drift status, RFQ counters, Gateway state, and rebalance counters.
