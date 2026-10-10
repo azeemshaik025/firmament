@@ -3,6 +3,7 @@ import { Adapter } from '@solana/wallet-adapter-base';
 import { ConnectionProvider, WalletProvider } from '@solana/wallet-adapter-react';
 import { WalletModalProvider } from '@solana/wallet-adapter-react-ui';
 import '@solana/wallet-adapter-react-ui/styles.css';
+import { DemoWalletAdapter } from './lib/demoWallet';
 
 type SolanaWalletProviderProps = {
   children: ReactNode;
@@ -30,7 +31,7 @@ const AppWalletModalProvider = WalletModalProvider as unknown as ComponentType<{
 }>;
 
 export function SolanaWalletProvider({ children }: SolanaWalletProviderProps) {
-  const wallets = useMemo<Adapter[]>(() => [], []);
+  const wallets = useMemo<Adapter[]>(() => (import.meta.env.DEV ? [new DemoWalletAdapter()] : []), []);
   const rpcEndpoint = window.__FIRMAMENT_CONFIG__?.solanaRpcUrl?.trim() || import.meta.env.VITE_SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
 
   return (
