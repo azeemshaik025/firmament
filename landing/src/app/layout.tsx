@@ -1,33 +1,38 @@
 import type { Metadata } from "next";
-import { Bangers, IBM_Plex_Sans, JetBrains_Mono } from "next/font/google";
+import { IBM_Plex_Sans, JetBrains_Mono } from "next/font/google";
+import localFont from "next/font/local";
 import type { ReactNode } from "react";
 import "./globals.css";
 
-const bangers = Bangers({
-  display: "block",
-  subsets: ["latin"],
-  variable: "--font-bangers",
-  weight: "400",
+const cabinet = localFont({
+  display: "swap",
+  variable: "--font-cabinet",
+  src: [
+    { path: "../../public/fonts/cabinet-grotesk-500.woff2", weight: "500", style: "normal" },
+    { path: "../../public/fonts/cabinet-grotesk-700.woff2", weight: "700", style: "normal" },
+  ],
 });
 
 const ibmPlexSans = IBM_Plex_Sans({
   display: "swap",
   subsets: ["latin"],
   variable: "--font-plex",
-  weight: ["400", "500", "600", "700"],
+  weight: ["400", "500"],
 });
 
 const jetBrainsMono = JetBrains_Mono({
   display: "swap",
   subsets: ["latin"],
   variable: "--font-jetbrains",
-  weight: ["400", "500", "600", "700", "800"],
+  weight: ["400"],
 });
 
+const description =
+  "Firm FX for stablecoin payments on Solana: quote an exact EURC amount, hold the USDC cost for 30 seconds, settle both legs atomically.";
+
 export const metadata: Metadata = {
-  title: "Firmament | Solana RFQ Maker Runtime",
-  description:
-    "Firmament is managed liquidity infrastructure for Solana apps and treasuries: firm RFQs, risk-aware settlement, book repair, and ledger-backed runtime proof.",
+  title: "Firmament, firm FX for stablecoin payments",
+  description,
   icons: {
     icon: [
       { url: "/favicon.svg", type: "image/svg+xml" },
@@ -37,16 +42,14 @@ export const metadata: Metadata = {
     shortcut: "/favicon.ico",
   },
   openGraph: {
-    title: "Firmament | Solana RFQ Maker Runtime",
-    description:
-      "Managed inventory, firm RFQs, Solana HTLC settlement, book repair, and read-only runtime proof.",
+    title: "Firmament, firm FX for stablecoin payments",
+    description,
     type: "website",
   },
   twitter: {
-    card: "summary_large_image",
-    title: "Firmament | Solana RFQ Maker Runtime",
-    description:
-      "Managed inventory, firm RFQs, Solana HTLC settlement, book repair, and runtime proof.",
+    card: "summary",
+    title: "Firmament, firm FX for stablecoin payments",
+    description,
   },
 };
 
@@ -57,7 +60,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body className={`${bangers.variable} ${ibmPlexSans.variable} ${jetBrainsMono.variable}`}>
+      <body className={`${cabinet.variable} ${ibmPlexSans.variable} ${jetBrainsMono.variable}`}>
         {children}
       </body>
     </html>

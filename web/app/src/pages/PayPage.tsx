@@ -96,6 +96,13 @@ function hasKind(resume: WalletSettlementResumeResponse, kind: string) {
 
 const settlingPhases = new Set<Phase['kind']>(['locking', 'maker_locking', 'redeeming', 'paid', 'expired', 'refunding', 'refunded', 'failed']);
 
+const steps: Array<{ label: string; doneAt: Phase['kind'][]; nowAt: Phase['kind'][] }> = [
+  { label: 'Quote locked at a firm rate', doneAt: ['quoted', 'locking', 'maker_locking', 'redeeming', 'paid'], nowAt: ['quoting'] },
+  { label: 'Your USDC locked in escrow', doneAt: ['maker_locking', 'redeeming', 'paid'], nowAt: ['locking'] },
+  { label: 'Maker locked the EURC for the recipient', doneAt: ['redeeming', 'paid'], nowAt: ['maker_locking'] },
+  { label: 'Delivered', doneAt: ['paid'], nowAt: ['redeeming'] }
+];
+
 export function PayPage() {
   const { connection } = useConnection();
   const { publicKey, signTransaction } = useWallet();
@@ -323,7 +330,8 @@ export function PayPage() {
   const rate = phase.kind === 'quoted'
     ? (Number(phase.quote.output.amount) / Number(phase.quote.input.amount)).toFixed(4)
     : null;
-  const stepDone = (kinds: Phase['kind'][]) => (kinds.includes(phase.kind) ? 'done' : '');
+  const lockFraction = phase.kind === 'quoted' ? phase.secondsLeft / quoteExpirySeconds : 1;
+  const terminal = phase.kind === 'paid' || phase.kind === 'refunded' || phase.kind === 'failed';
   const primaryLabel = !walletAddress
     ? 'Connect wallet'
     : phase.kind === 'locking'
@@ -337,35 +345,38 @@ export function PayPage() {
             : 'Pay';
 
   return (
-    <main className="swap-page">
-      <section className="swap-page-header">
-        <div className="hero-brand-stack">
-          <p className="eyebrow">Firm FX</p>
-          <h1>Pay in euros</h1>
-          <p className="lede">The rate you see is the rate they get. Locked for {quoteExpirySeconds}s, settled atomically.</p>
+    <main className="pay-page">
+      <header className="page-head">
+        <div>
+          <p className="page-kicker">Firm FX</p>
+          <h1>Pay in euros.</h1>
+          <p className="lede">The rate you see is the rate they get. Held for {quoteExpirySeconds} seconds, settled atomically.</p>
         </div>
         <div className="wallet-actions">
           <button className="wallet-button" onClick={() => setWalletModalVisible(true)} type="button">
             {walletAddress ? shortValue(walletAddress) : 'Connect wallet'}
           </button>
         </div>
-      </section>
+      </header>
 
-      <section className="swap-layout">
-        <form className="swap-card" onSubmit={submit}>
-          <div className="swap-card-heading"><h2>Send EURC</h2></div>
+      <section className="pay-desk">
+        <form className="pay-form" onSubmit={submit}>
+          <h2>Send EURC</h2>
 
-          <label className="pay-field">
+          <div className="pay-amount">
             <span>Recipient gets</span>
-            <input
-              inputMode="decimal"
-              placeholder="89.30"
-              value={eurAmount}
-              disabled={inFlight}
-              onChange={(event) => setEurAmount(event.target.value)}
-            />
-            <b>EURC</b>
-          </label>
+            <div className="pay-amount-row">
+              <input
+                aria-label="Amount in EURC"
+                inputMode="decimal"
+                placeholder="89.30"
+                value={eurAmount}
+                disabled={inFlight}
+                onChange={(event) => setEurAmount(event.target.value)}
+              />
+              <b>EURC</b>
+            </div>
+          </div>
           {amountCheck && !amountCheck.ok && <p className="field-error">{amountCheck.message}</p>}
 
           <label className="pay-field">
@@ -379,29 +390,33 @@ export function PayPage() {
           </label>
           {!recipientOk && <p className="field-error">That is not a Solana address.</p>}
 
-          <div className="quote-summary">
+          <div className="pay-quote">
             <span>You pay</span>
-            <strong>{cost ? `${cost} USDC` : phase.kind === 'quoting' ? 'Quoting…' : '—'}</strong>
+            <strong className="is-cost">{cost ? `${cost} USDC` : phase.kind === 'quoting' ? 'Quoting…' : '—'}</strong>
             <span>Rate</span>
             <strong>{rate ? `1 USDC = ${rate} EURC` : '—'}</strong>
             {phase.kind === 'quoted' && (
-              <>
-                <span>Locked for</span>
-                <strong>{phase.secondsLeft}s</strong>
-              </>
+              <div className="pay-lock" role="timer" style={{ '--lock': lockFraction }} aria-label={`Rate held for ${phase.secondsLeft} more seconds`}>
+                <span>Held</span>
+                <div className="pay-lock-track">
+                  <div className="pay-lock-fill" />
+                  <div className="pay-lock-point" />
+                </div>
+                <span className="pay-lock-time">{phase.secondsLeft}s</span>
+              </div>
             )}
           </div>
 
           {phase.kind === 'rejected' && <p className="field-error">{phase.message}</p>}
           {phase.kind === 'failed' && <p className="field-error">{phase.message}</p>}
 
-          {phase.kind === 'paid' || phase.kind === 'refunded' || phase.kind === 'failed' ? (
-            <button type="button" className="primary-swap-button primary-swap-button-reset" onClick={startOver}>New payment</button>
+          {terminal ? (
+            <button type="button" className="pay-submit is-reset" onClick={startOver}>New payment</button>
           ) : phase.kind === 'expired' ? (
-            <button type="button" className="primary-swap-button" onClick={() => void refund()}>Lock expired, refund my USDC</button>
+            <button type="button" className="pay-submit" onClick={() => void refund()}>Lock expired, refund my USDC</button>
           ) : (
             <button
-              className="primary-swap-button"
+              className="pay-submit"
               disabled={inFlight || (walletAddress !== '' && (phase.kind !== 'quoted' || !recipientOk))}
             >
               {primaryLabel}
@@ -409,26 +424,39 @@ export function PayPage() {
           )}
         </form>
 
-        <aside className="proof-panel" aria-label="Settlement progress">
-          <h3>Settlement</h3>
+        <aside className="pay-rail" aria-label="Settlement progress">
+          <h2>Settlement</h2>
           <ol className="pay-steps">
-            <li className={stepDone(['quoted', 'locking', 'maker_locking', 'redeeming', 'paid'])}>Quote locked at a firm rate</li>
-            <li className={stepDone(['maker_locking', 'redeeming', 'paid'])}>Your USDC locked in escrow</li>
-            <li className={stepDone(['redeeming', 'paid'])}>Maker locked the EURC for the recipient</li>
-            <li className={stepDone(['paid'])}>Recipient received exactly {eurAmount || '…'} EURC</li>
+            {steps.map((step) => (
+              <li
+                key={step.label}
+                className={step.doneAt.includes(phase.kind) ? 'done' : step.nowAt.includes(phase.kind) ? 'now' : ''}
+              >
+                {step.label === 'Delivered' && eurAmount ? `Recipient received exactly ${eurAmount} EURC` : step.label}
+              </li>
+            ))}
           </ol>
+
+          {phase.kind === 'paid' && (
+            <div className="pay-delivered">
+              <strong>{eurAmount} EURC</strong>
+              <span>delivered{recipient.trim() ? ` to ${shortValue(recipient.trim())}` : ''}</span>
+            </div>
+          )}
+
           {(phase.kind === 'paid' || phase.kind === 'refunded') && (
-            <ul className="pay-receipt">
+            <ul className="pay-receipt" aria-label="Transactions">
               {phase.signatures.map((signature) => (
                 <li key={signature}><a href={solscan(signature)} target="_blank" rel="noreferrer">{shortValue(signature)}</a></li>
               ))}
             </ul>
           )}
+
           {preimage && inFlight && phase.kind !== 'paid' && (
             <p className="locked-note">Keep this tab open until delivery completes; it holds the secret that releases the EURC.</p>
           )}
           <p className="locked-note">
-            {eurc ? `Maker quotes up to ${eurc.max_trade_amount ?? '?'} EURC per payment on this demo.` : 'EURC is not enabled on this maker.'}
+            {eurc ? `This maker quotes up to ${eurc.max_trade_amount ?? '?'} EURC per payment.` : 'EURC is not enabled on this maker.'}
           </p>
         </aside>
       </section>

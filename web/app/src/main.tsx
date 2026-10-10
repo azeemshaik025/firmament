@@ -13,15 +13,8 @@ function Shell() {
     <div className="app-shell">
       <header className="topbar">
         <a className="brand" href="/app">
-          <span className="brand-mark" aria-hidden="true">
-            <span />
-            <span />
-            <span />
-            <span />
-          </span>
-          <span className="brand-copy">
-            <span>Firmament</span>
-          </span>
+          <span className="brand-mark" aria-hidden="true" />
+          <span className="brand-copy">Firmament</span>
         </a>
         <nav aria-label="Console navigation">
           <NavLink to="/" end>Pay</NavLink>
@@ -44,38 +37,17 @@ function Shell() {
 }
 
 function ConsoleFooter() {
-  const signals = [
-    { code: '01', label: 'Firm quotes' },
-    { code: '02', label: 'Atomic settlement' },
-    { code: '03', label: 'Ledger proof' }
-  ];
-
   return (
-    <footer className="console-footer" aria-label="Firmament runtime footer">
-      <div className="footer-wordmark" aria-hidden="true">
-        <span>Firm</span>
-        <span>ament</span>
-      </div>
+    <footer className="console-footer">
       <div className="footer-content">
         <div className="footer-brand">
-          <span className="brand-mark footer-mark" aria-hidden="true">
-            <span />
-            <span />
-            <span />
-            <span />
-          </span>
-          <div>
-            <strong><span>Firm</span>ament</strong>
-            <p>Firm FX for stablecoin payments on Solana.</p>
-          </div>
+          <strong>Firmament</strong>
+          <p>Firm FX for stablecoin payments on Solana.</p>
         </div>
-        <div className="footer-signals" aria-label="Runtime pillars">
-          {signals.map((signal) => (
-            <span key={signal.code}>
-              <b>{signal.code}</b>
-              {signal.label}
-            </span>
-          ))}
+        <div className="footer-signals">
+          <span>Firm quotes</span>
+          <span>Atomic settlement</span>
+          <span>Ledger proof</span>
         </div>
       </div>
     </footer>

@@ -31,10 +31,9 @@ const checks = [
   {
     label: "Landing should use Next font variables",
     ok:
-      read("landing/src/app/layout.tsx").includes("next/font/google") &&
-      read("landing/src/app/layout.tsx").includes("--font-bangers") &&
-      read("landing/src/app/globals.css").includes('--font-bangers: "Bangers"') &&
-      read("landing/src/app/globals.css").includes("--font-display: var(--font-bangers)"),
+      read("landing/src/app/layout.tsx").includes("next/font/") &&
+      read("landing/src/app/layout.tsx").includes("--font-cabinet") &&
+      read("landing/src/app/globals.css").includes("--font-display: var(--font-cabinet)"),
     detail: "The landing layout should own font preloading and CSS variable wiring.",
   },
   {
@@ -59,7 +58,7 @@ const checks = [
     label: "App should self-host and preload critical fonts",
     ok:
       !read("web/app/index.html").includes("fonts.googleapis.com") &&
-      read("web/app/index.html").includes("/fonts/bangers-latin.woff2") &&
+      read("web/app/index.html").includes("/fonts/cabinet-grotesk-500.woff2") &&
       read("web/app/src/styles.css").includes("@font-face") &&
       read("web/app/vercel.json").includes("/fonts/:path*"),
     detail: "Use local font files and route them from the landing domain so the app does not depend on Google Fonts at first paint.",

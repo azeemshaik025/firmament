@@ -1,0 +1,64 @@
+/* Firmament design tokens — the single source every stylesheet reads. See design.md. */
+
+:root {
+  --color-paper: oklch(97% 0.007 80);
+  --color-paper-2: oklch(94.5% 0.008 80);
+  --color-paper-3: oklch(91% 0.01 80);
+  --color-rule: oklch(86% 0.009 80);
+  --color-rule-strong: oklch(76% 0.012 80);
+  --color-ink: oklch(21% 0.018 265);
+  --color-ink-2: oklch(34% 0.016 265);
+  --color-muted: oklch(48% 0.012 265);
+  --color-faint: oklch(62% 0.01 265);
+  --color-accent: oklch(74% 0.15 78);
+  --color-accent-ink: oklch(42% 0.11 70);
+  --color-accent-soft: oklch(95% 0.04 85);
+  --color-focus: oklch(60% 0.15 78);
+  --color-good: oklch(52% 0.11 155);
+  --color-good-soft: oklch(94% 0.03 155);
+  --color-bad: oklch(50% 0.16 25);
+  --color-bad-soft: oklch(95% 0.03 25);
+
+  --font-display: 'Cabinet Grotesk', 'IBM Plex Sans', 'Helvetica Neue', sans-serif;
+  --font-body: 'IBM Plex Sans', 'Helvetica Neue', Helvetica, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', monospace;
+
+  --text-xs: 0.75rem;
+  --text-sm: 0.8125rem;
+  --text-base: 0.9375rem;
+  --text-md: 1.125rem;
+  --text-lg: 1.375rem;
+  --text-xl: 1.75rem;
+  --text-2xl: 2.25rem;
+  --text-display: clamp(2.25rem, 3.6vw + 1rem, 3.5rem);
+
+  --space-3xs: 0.125rem;
+  --space-2xs: 0.25rem;
+  --space-xs: 0.5rem;
+  --space-sm: 0.75rem;
+  --space-md: 1rem;
+  --space-lg: 1.5rem;
+  --space-xl: 2.5rem;
+  --space-2xl: 4rem;
+  --space-3xl: 6rem;
+
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-pill: 999px;
+  --rule: 1px solid var(--color-rule);
+
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in: cubic-bezier(0.7, 0, 0.84, 0);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --dur-micro: 120ms;
+  --dur-short: 220ms;
+  --dur-long: 420ms;
+
+  --z-base: 1;
+  --z-raised: 10;
+  --z-dropdown: 100;
+  --z-sticky: 200;
+
+  --page-max: 1080px;
+  --measure: 62ch;
+}

@@ -1,27 +1,37 @@
-const runbookSteps = [
-  ["01", "Reserve", "Gateway USDC"],
-  ["02", "Source", "Jupiter route"],
-  ["03", "Gate", "quote or refuse"],
-  ["04", "Settle", "Solana HTLC"],
-  ["05", "Repair", "rebalance / refill"],
+const steps = [
+  {
+    title: "Quote",
+    copy: "Ask for the recipient's exact EURC amount. The maker answers with the USDC cost from its own inventory, under its policy caps.",
+  },
+  {
+    title: "Lock",
+    copy: "The sender's USDC goes into a Solana HTLC. The rate is held for 30 seconds.",
+  },
+  {
+    title: "Match",
+    copy: "The maker locks the exact EURC for the recipient against the same secret hash.",
+  },
+  {
+    title: "Deliver",
+    copy: "The sender reveals the secret. The recipient's EURC and the maker's USDC clear together, or both locks refund.",
+  },
 ];
 
 export function DemoSequence() {
   return (
-    <section className="demo-section" id="runbook">
-      <div className="section-heading compact-heading">
-        <p className="section-kicker">Runtime path</p>
-        <h2>Reserve. Source. Gate. Settle. Repair.</h2>
+    <section className="section" id="payment">
+      <div className="section-heading">
+        <p className="section-kicker">How it settles</p>
+        <h2>One secret, two escrows, no slippage.</h2>
       </div>
-      <div className="flow-rail" aria-label="Firmament runtime path">
-        {runbookSteps.map(([index, label, detail]) => (
-          <article className="flow-step" key={label}>
-            <span>{index}</span>
-            <strong>{label}</strong>
-            <p>{detail}</p>
-          </article>
+      <ol className="sequence">
+        {steps.map((step) => (
+          <li key={step.title}>
+            <h3>{step.title}</h3>
+            <p>{step.copy}</p>
+          </li>
         ))}
-      </div>
+      </ol>
     </section>
   );
 }

@@ -1,57 +1,11 @@
 import { DemoSequence } from "@/components/demo-sequence";
 
 const repoHref = "https://github.com/azeemshaik025/firmament";
-const demoHref = process.env.NEXT_PUBLIC_DEMO_URL ?? "#proof";
+const demoHref = process.env.NEXT_PUBLIC_DEMO_URL ?? "#payment";
 const makerHref = `${repoHref}/blob/main/docs/runtime-proof.mdx`;
 const docsHref = "/docs";
 
-const proofPoints = [
-  ["Quote", "Exact recipient amount"],
-  ["Lock", "Rate held for 30 seconds"],
-  ["Settle", "Atomic Solana HTLC"],
-  ["Refill", "USDC through Circle Gateway"],
-];
-
-const runtimeBlocks = [
-  {
-    label: "Quote",
-    title: "Exact-output RFQ",
-    copy: "Ask for 89.30 EURC, get the USDC cost.",
-    tone: "lime",
-  },
-  {
-    label: "Policy",
-    title: "Risk gate",
-    copy: "Caps, inventory, stale prices.",
-    tone: "amber",
-  },
-  {
-    label: "Inventory",
-    title: "EURC on hand",
-    copy: "The maker holds the thin side.",
-    tone: "cyan",
-  },
-  {
-    label: "Settlement",
-    title: "Solana HTLC",
-    copy: "Both legs or neither.",
-    tone: "blue",
-  },
-  {
-    label: "Repair",
-    title: "Rebalance + refill",
-    copy: "Jupiter and Circle Gateway.",
-    tone: "violet",
-  },
-  {
-    label: "Ledger",
-    title: "Double-entry proof",
-    copy: "Every payment booked.",
-    tone: "red",
-  },
-];
-
-const productLanes = [
+const lanes = [
   {
     label: "Payment apps",
     title: "Promise a euro amount",
@@ -60,91 +14,83 @@ const productLanes = [
   {
     label: "Payroll",
     title: "Pay contractors in their currency",
-    copy: "USDC in, EURC out, one transaction, no slippage to explain.",
+    copy: "USDC in, EURC out, one settlement, no slippage to explain.",
   },
   {
     label: "Makers",
     title: "Run the FX desk",
-    copy: "Hold EURC inventory, quote under policy, refill USDC from Gateway.",
+    copy: "Hold EURC inventory, quote under policy, refill USDC from Circle Gateway.",
   },
 ];
 
-const positionReasons = [
-  "USDC has $465M of Solana DEX liquidity; EURC has $0.7M (Jupiter, Oct 2026)",
-  "An AMM route cannot promise a recipient amount; a maker with inventory can",
-  "Firm quote, then atomic settlement: the recipient gets the number or the sender is refunded",
-  "Self-hosted maker runtime: any app can run its own",
+const spec = [
+  ["Assets", "USDC, EURC, SOL"],
+  ["Quote", "Exact output amount, cost held for 30 seconds"],
+  ["Recipient", "Any Solana address; the token account is created if missing"],
+  ["Settlement", "Two Solana HTLCs under one secret: both legs clear or both refund"],
+  ["Inventory", "The maker's own wallet, rebalanced through Jupiter Swap API v2, USDC refilled through Circle Gateway"],
+  ["Accounting", "Double-entry SQLite ledger with per-trade P&L"],
+  ["Interface", "HTTP API: POST /v1/rfq with output_amount, then wallet-settlement with recipient"],
+  ["Code", "Rust runtime and React app, MIT or Apache-2.0"],
 ];
 
-const runtimeSignals = [
-  ["Health", "runtime status"],
-  ["Inventory", "USDC / EURC / SOL"],
-  ["Flow", "quotes, locks, payouts"],
-  ["Repair", "Jupiter + Gateway"],
-  ["Ledger", "balances + P&L"],
+const makerShows = [
+  ["Inventory", "USDC, EURC, SOL on hand"],
+  ["Flow", "quotes, locks, deliveries, refunds"],
+  ["Repair", "Jupiter rebalances, Gateway refills"],
+  ["Ledger", "balances per account, P&L per trade"],
+  ["Proof", "every Solana signature, linked"],
 ];
 
-const apiProof = [
-  ["Quote", "POST /v1/rfq { output_amount }"],
-  ["Pay", "wallet-settlement { recipient }"],
-  ["Runtime", "GET state + events"],
-  ["Ledger", "balances + trades"],
-];
-
-const footerSignals = [
-  { code: "01", label: "Exact recipient amounts" },
-  { code: "02", label: "Firm quotes under policy" },
-  { code: "03", label: "Atomic HTLC settlement" },
-  { code: "04", label: "Gateway-refilled inventory" },
+const faq = [
+  {
+    q: "Is this running on mainnet?",
+    a: "Yes, with tiny amounts. The demo maker holds a few euros of EURC and runs from a laptop. There is no hosted app yet; the repo runs the whole stack locally.",
+  },
+  {
+    q: "Who holds the money during a payment?",
+    a: "The HTLC programs on Solana. The sender's USDC and the maker's EURC each sit in escrow until the secret is revealed, or the locks expire and refund.",
+  },
+  {
+    q: "What if the maker never locks its side?",
+    a: "The sender refunds after expiry. The maker can never take USDC without the EURC leg clearing in the same step.",
+  },
+  {
+    q: "What is new for the Crypto World's Fair?",
+    a: "EURC, exact-output quotes, third-party recipients, and the Pay page. The maker runtime underneath was built for the Solana Frontier hackathon and is disclosed as prior work.",
+  },
 ];
 
 export default function Home() {
   return (
     <main id="top">
-      <header className="site-header" aria-label="Firmament navigation">
+      <header className="site-header">
         <a className="brand" href="#top" aria-label="Firmament home">
-          <span className="brand-mark" aria-hidden="true">
-            <span />
-            <span />
-            <span />
-            <span />
-          </span>
+          <span className="brand-mark" aria-hidden="true" />
           <span>Firmament</span>
         </a>
-        <nav aria-label="Primary">
-          <a href="#product">Product</a>
-          <a href="#runtime">Maker</a>
-          <a href="#proof">Proof</a>
-          <a href="#api">API</a>
+        <nav className="nav-links" aria-label="Primary">
+          <a href="#payment">How it settles</a>
+          <a href="#maker">Maker</a>
+          <a href="#spec">Spec</a>
           <a href={docsHref}>Docs</a>
         </nav>
-        <a
-          className="nav-action"
-          href={repoHref}
-          target="_blank"
-          rel="noreferrer"
-        >
+        <a className="nav-action" href={repoHref} target="_blank" rel="noreferrer">
           <span>GitHub</span>
           <span className="button-arrow" aria-hidden="true">
             {"→"}
           </span>
         </a>
       </header>
-      <nav className="mobile-nav" aria-label="Mobile sections">
-        <a href="#product">Product</a>
-        <a href="#runtime">Maker</a>
-        <a href="#api">API</a>
-        <a href={docsHref}>Docs</a>
-      </nav>
 
       <section className="hero" aria-labelledby="hero-title">
         <div className="hero-copy">
-          <p className="eyebrow">Firm FX for stablecoin payments</p>
-          <h1 id="hero-title">Firmament</h1>
+          <p className="page-kicker">Firm FX for stablecoin payments on Solana</p>
+          <h1 id="hero-title">The rate you promise is the rate they get.</h1>
           <p className="hero-lede">
-            The rate you promise is the rate they get. Firmament quotes an exact
-            recipient amount in EURC, holds the USDC cost for 30 seconds, and
-            settles both legs atomically on Solana.
+            Firmament quotes an exact EURC amount for the recipient, holds the
+            USDC cost for 30 seconds, and settles both legs atomically. The
+            number shown before signing is the number delivered.
           </p>
           <div className="hero-actions">
             <a className="button button-primary" href={demoHref}>
@@ -153,223 +99,165 @@ export default function Home() {
                 {"→"}
               </span>
             </a>
-            <a
-              className="button button-secondary"
-              href={repoHref}
-              target="_blank"
-              rel="noreferrer"
-            >
+            <a className="button button-secondary" href={repoHref} target="_blank" rel="noreferrer">
               View on GitHub
             </a>
           </div>
         </div>
 
-        <div className="hero-board" aria-label="Firmament runtime block map">
-          <div className="board-top">
-            <span>exact-output quotes</span>
-            <span>USDC in, EURC out</span>
+        <figure className="hero-figure">
+          <div className="quote-card" aria-label="A quote on the Pay page">
+            <div className="quote-card-head">
+              <span>Send EURC</span>
+            </div>
+            <div className="quote-amount">
+              <span>Recipient gets</span>
+              <strong>
+                89.30<small>EURC</small>
+              </strong>
+            </div>
+            <div className="quote-row">
+              <span>Recipient</span>
+              <strong>5u15DUL…fQFMp</strong>
+            </div>
+            <div className="quote-row quote-row-cost">
+              <span>You pay</span>
+              <strong>100.46 USDC</strong>
+            </div>
+            <div className="quote-row">
+              <span>Rate</span>
+              <strong>1 USDC = 0.8889 EURC</strong>
+            </div>
+            <div className="quote-lock" style={{ "--lock": 0.8 }}>
+              <span>Held</span>
+              <div className="lock-track">
+                <i className="lock-fill" />
+                <i className="lock-point" />
+              </div>
+              <span>24s</span>
+            </div>
+            <div className="quote-button">Pay 100.46 USDC</div>
           </div>
-          <div className="block-stack" aria-hidden="true">
-            <span className="piece piece-lime wide">EURC inventory</span>
-            <span className="piece piece-amber">Policy</span>
-            <span className="piece piece-cyan">Jupiter</span>
-            <span className="piece piece-blue wide">HTLC</span>
-            <span className="piece piece-red">Ledger</span>
-            <span className="piece piece-violet wide">Rebalance</span>
-            <span className="piece piece-lime">Gateway refill</span>
-            <span className="piece piece-cyan wide">Runtime API</span>
-          </div>
-          <div className="board-footer">
-            <span>quote when safe</span>
-            <span>deliver the exact amount</span>
-          </div>
+          <figcaption>
+            The Pay page mid-quote, with example amounts. The line is the hold:
+            it drains for 30 seconds while the rate stays fixed.
+          </figcaption>
+        </figure>
+      </section>
+
+      <section className="stat-strip" aria-label="Why a maker, not a route">
+        <div>
+          <strong>$465M</strong>
+          <span>USDC liquidity on Solana DEXs</span>
         </div>
+        <div>
+          <strong>$0.7M</strong>
+          <span>EURC liquidity on Solana DEXs</span>
+        </div>
+        <div>
+          <strong>30 s</strong>
+          <span>the cost is held on every quote</span>
+        </div>
+        <p className="stat-source">Liquidity figures from Jupiter token data, October 2026. A route through that EURC depth cannot promise a recipient amount; a maker holding EURC can.</p>
       </section>
 
-      <section className="proof-strip" aria-label="Project proof points">
-        {proofPoints.map(([label, value]) => (
-          <div key={label}>
-            <span>{label}</span>
-            <strong>{value}</strong>
-          </div>
-        ))}
-      </section>
+      <DemoSequence />
 
-      <section className="section product-section" id="product">
+      <section className="section" id="who">
         <div className="section-heading">
-          <p className="section-kicker">Product position</p>
+          <p className="section-kicker">Who it is for</p>
           <h2>Payments need a number, not a route.</h2>
           <p>
             Swap routers optimise what you pay. Payment apps have to promise
-            what the other side receives. Firmament is the maker that makes that
-            promise safe to show.
+            what the other side receives. Firmament is the maker that makes
+            that promise safe to show.
           </p>
         </div>
-        <div className="lane-grid" aria-label="Firmament users">
-          {productLanes.map((lane) => (
-            <article className="lane-card" key={lane.label}>
+        <div className="lanes">
+          {lanes.map((lane) => (
+            <article className="lane" key={lane.label}>
               <span>{lane.label}</span>
               <h3>{lane.title}</h3>
               <p>{lane.copy}</p>
             </article>
           ))}
         </div>
-        <div className="position-panel" aria-label="Why Firmament is different">
+      </section>
+
+      <section className="section" id="maker">
+        <div className="split">
           <div>
-            <span>Why now</span>
-            <h3>
-              Stablecoin payments are going multi-currency, and the non-USD side
-              on Solana is thin.
-            </h3>
+            <div className="section-heading">
+              <p className="section-kicker">The maker</p>
+              <h2>The desk behind the quote.</h2>
+              <p>
+                A self-hosted runtime any app can run. It quotes from its own
+                inventory under policy caps, settles through escrow, repairs
+                the book, and books every payment in a ledger you can read.
+              </p>
+            </div>
+            <a className="text-link" href={makerHref} target="_blank" rel="noreferrer">
+              Read the runtime proof
+            </a>
           </div>
-          <ul>
-            {positionReasons.map((reason) => (
-              <li key={reason}>{reason}</li>
+          <ul className="plain-list" aria-label="What the maker page shows">
+            {makerShows.map(([label, value]) => (
+              <li key={label}>
+                <span>{label}</span>
+                <span>{value}</span>
+              </li>
             ))}
           </ul>
         </div>
       </section>
 
-      <section className="section runtime-section" id="runtime">
-        <div className="section-heading">
-          <p className="section-kicker">Live maker</p>
-          <h2>See the desk the maker is running.</h2>
-          <p>
-            The public maker page shows USDC and EURC inventory, HTLC
-            settlements, rebalances, Gateway refills, and ledger-backed
-            accounting.
-          </p>
-        </div>
-        <div className="runtime-layout">
-          <div className="terminal-window" aria-label="Live maker preview">
-            <div className="terminal-title">
-              <span>firmament::maker</span>
-              <span>read-only projection</span>
-            </div>
-            <div className="terminal-grid">
-              {runtimeSignals.map(([label, value]) => (
-                <div className="terminal-row" key={label}>
-                  <span>{label}</span>
-                  <strong>{value}</strong>
-                </div>
-              ))}
-            </div>
-          </div>
-          <div className="runtime-cta-panel">
-            <div>
-              <span className="runtime-panel-label">Maker console</span>
-              <h3>Inspect inventory, flow, and the repair loop.</h3>
-              <p>
-                Open the read-only maker view to see whether the book is healthy
-                after quotes and payouts.
-              </p>
-            </div>
-            <div className="runtime-checks" aria-label="Maker console properties">
-              <span>Public</span>
-              <span>Read-only</span>
-              <span>Ledger-backed</span>
-            </div>
-            <a
-              className="button button-primary runtime-button"
-              href={makerHref}
-              target="_blank"
-              rel="noreferrer"
-            >
-              Read the runtime proof
-            </a>
-          </div>
-        </div>
-      </section>
-
-      <section className="section proof-section" id="proof">
-        <div className="section-heading">
-          <p className="section-kicker">Runtime proof</p>
-          <h2>A payment, end to end.</h2>
-        </div>
-        <div className="proof-matrix">
-          {runtimeBlocks.map((block) => (
-            <article className={`proof-card ${block.tone}`} key={block.label}>
-              <span className="proof-label">{block.label}</span>
-              <h3>{block.title}</h3>
-              <p>{block.copy}</p>
-            </article>
-          ))}
-        </div>
-      </section>
-
-      <DemoSequence />
-
-      <section className="section api-section" id="api">
-        <div className="api-panel">
-          <div className="api-copy">
-            <p className="section-kicker">HTTP API</p>
-            <h2>A small API for firm FX.</h2>
+      <section className="section" id="spec">
+        <div className="split">
+          <div className="section-heading">
+            <p className="section-kicker">Spec</p>
+            <h2>Small surface, firm guarantees.</h2>
             <p>
-              Quote an exact output, start wallet settlement with a recipient,
-              and read the same runtime state the maker uses.
+              Two HTTP calls to pay: quote an exact output, then start wallet
+              settlement with a recipient. Everything else is the maker's job.
             </p>
-            <a className="docs-callout" href={docsHref}>
-              <span>Developer docs</span>
-              <strong>API routes, runtime model, and maker setup.</strong>
-              <em>
-                Open docs
-                <span className="button-arrow" aria-hidden="true">
-                  {"→"}
-                </span>
-              </em>
-            </a>
           </div>
-          <div className="api-list" aria-label="API proof surface">
-            {apiProof.map(([label, value]) => (
-              <div className="api-item" key={label}>
-                <span>{label}</span>
-                <code>{value}</code>
+          <dl className="spec">
+            {spec.map(([term, detail]) => (
+              <div key={term}>
+                <dt>{term}</dt>
+                <dd>{detail}</dd>
               </div>
             ))}
-          </div>
+          </dl>
         </div>
       </section>
 
-      <footer className="site-footer" aria-label="Firmament footer">
-        <div className="footer-wordmark" aria-hidden="true">
-          <span>Firm</span>
-          <span>ament</span>
+      <section className="section" id="faq">
+        <div className="section-heading">
+          <p className="section-kicker">Straight answers</p>
+          <h2>What this is, and what it is not yet.</h2>
         </div>
-        <div className="footer-content">
-          <div className="footer-brand">
-            <span className="brand-mark footer-mark" aria-hidden="true">
-              <span />
-              <span />
-              <span />
-              <span />
-            </span>
-            <div>
-              <strong>
-                <span>Firm</span>ament
-              </strong>
-              <p>Firm FX for stablecoin payments on Solana.</p>
+        <div className="faq">
+          {faq.map((item) => (
+            <div key={item.q}>
+              <h3>{item.q}</h3>
+              <p>{item.a}</p>
             </div>
-          </div>
-          <div className="footer-actions" aria-label="Footer links">
-            <a href={repoHref} target="_blank" rel="noreferrer">
-              <span>GitHub</span>
-              <span className="button-arrow" aria-hidden="true">
-                {"→"}
-              </span>
-            </a>
-            <a href={makerHref} target="_blank" rel="noreferrer">
-              Runtime proof
-            </a>
-            <a href={docsHref}>Docs</a>
-          </div>
-        </div>
-        <div className="footer-signals" aria-label="Runtime capabilities">
-          {footerSignals.map((signal) => (
-            <span key={signal.code}>
-              <b>{signal.code}</b>
-              {signal.label}
-            </span>
           ))}
+        </div>
+      </section>
+
+      <footer className="site-footer">
+        <p className="footer-statement">
+          The rate you promise <em>is the rate they get.</em>
+        </p>
+        <div className="footer-row">
+          <span>Firmament. Firm FX for stablecoin payments on Solana.</span>
+          <nav className="footer-links" aria-label="Footer">
+            <a href={repoHref} target="_blank" rel="noreferrer">GitHub</a>
+            <a href={makerHref} target="_blank" rel="noreferrer">Runtime proof</a>
+            <a href={docsHref}>Docs</a>
+          </nav>
         </div>
       </footer>
     </main>

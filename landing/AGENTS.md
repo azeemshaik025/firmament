@@ -67,8 +67,9 @@ and more time on the promise a payment app can finally make.
 
 ## Design Principles
 
-- The current direction is compact, high-contrast, block-game inspired:
-  bold display type, hard borders, grid background, and sharp color accents.
+- The design system is locked in the repo-root `design.md`: warm paper, cool
+  ink, one accent, Cabinet Grotesk display, IBM Plex Sans body, JetBrains Mono
+  for machine values, hairlines, no shadows. Read it before touching styles.
 - Keep layout responsive and legible on mobile.
 - Avoid generic crypto gradients, token hype, and claims that imply production
   custody or audited infrastructure.

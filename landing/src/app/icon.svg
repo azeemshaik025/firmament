@@ -1,8 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Firmament favicon">
   <title>Firmament favicon</title>
-  <rect width="64" height="64" rx="8" fill="#1c202b" />
-  <rect x="10" y="10" width="19" height="19" rx="1.5" fill="#00a6ff" />
-  <rect x="35" y="10" width="19" height="19" rx="1.5" fill="#16a34a" />
-  <rect x="10" y="35" width="19" height="19" rx="1.5" fill="#d97706" />
-  <rect x="35" y="35" width="19" height="19" rx="1.5" fill="#7107e7" />
+  <rect width="64" height="64" rx="14" fill="#f6f5f1" />
+  <rect x="10" y="42" width="44" height="3" rx="1.5" fill="#1d2130" />
+  <circle cx="38" cy="33" r="7" fill="#e3b04b" />
 </svg>

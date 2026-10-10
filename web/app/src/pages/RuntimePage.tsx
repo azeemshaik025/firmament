@@ -22,10 +22,11 @@ type HealthPayload = { status?: string; ok?: boolean; [key: string]: unknown };
 
 const pollMs = 5_000;
 const visibleAccounts: LedgerAccountType[] = ['working_custody', 'gateway', 'htlc_escrow'];
-const assetOrder = ['SOL', 'USDC', 'cbBTC'];
+const assetOrder = ['USDC', 'EURC', 'SOL', 'cbBTC'];
 const fallbackAssets: Asset[] = [
-  { id: 'SOL', symbol: 'SOL', name: 'Solana', mint: 'So11111111111111111111111111111111111111112', decimals: 9 },
   { id: 'USDC', symbol: 'USDC', name: 'USD Coin', mint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', decimals: 6 },
+  { id: 'EURC', symbol: 'EURC', name: 'Euro Coin', mint: 'HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr', decimals: 6 },
+  { id: 'SOL', symbol: 'SOL', name: 'Solana', mint: 'So11111111111111111111111111111111111111112', decimals: 9 },
   { id: 'cbBTC', symbol: 'cbBTC', name: 'Coinbase Wrapped BTC', mint: 'cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij', decimals: 8 }
 ];
 
@@ -113,7 +114,7 @@ export function RuntimePage() {
     <main className="runtime-page">
       <section className="runtime-hero">
         <div>
-          <p className="eyebrow">Firm FX maker</p>
+          <p className="page-kicker">Firm FX maker</p>
           <h1>Maker</h1>
           <p className="lede">Inventory, quotes, settlements, and the ledger behind every payment.</p>
         </div>
@@ -145,10 +146,7 @@ export function RuntimePage() {
 
       <section className="runtime-board">
         <div className="runtime-board-heading">
-          <div>
-            <p className="eyebrow">Custody Ledger</p>
-            <h2>Ledger Balances</h2>
-          </div>
+          <h2>Ledger balances</h2>
           {ledger.data && <LedgerHealth healthy={ledger.data.healthy} entryCount={ledger.data.entry_count} />}
         </div>
         {ledgerLoading ? (
@@ -162,10 +160,7 @@ export function RuntimePage() {
 
       <section className="runtime-board">
         <div className="runtime-board-heading">
-          <div>
-            <p className="eyebrow">Trade Flow</p>
-            <h2>Recent Trades</h2>
-          </div>
+          <h2>Recent trades</h2>
         </div>
         {tradesLoading ? (
           <TradeSkeletonRail />
@@ -352,7 +347,7 @@ function TradeCard({
   return (
     <article className={selected ? `trade-card trade-card-${status.tone} trade-card-selected` : `trade-card trade-card-${status.tone}`}>
       <div className="trade-card-main">
-        <strong>{input} {'->'} {output}</strong>
+        <strong>{input} → {output}</strong>
         <span>{status.label}</span>
       </div>
       <div className="trade-card-meta">
@@ -403,8 +398,7 @@ function NetworkProofDrawer({
     <section className="network-proof-drawer" aria-label="Network proof drawer">
       <div className="network-proof-drawer-head">
         <div>
-          <p className="eyebrow">Network proof</p>
-          <h3>{input} {'->'} {output}</h3>
+          <h3>{input} → {output}</h3>
           <p>Match the amounts, trade id, quote id, and transaction roles in Solscan to verify this swap.</p>
         </div>
         <button className="network-proof-close" type="button" onClick={onClose} aria-label="Close network proof">

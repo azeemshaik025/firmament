@@ -44,12 +44,7 @@ export default function DocsPage() {
     <main className="docs-page">
       <header className="docs-header">
         <Link className="brand" href="/" aria-label="Firmament home">
-          <span className="brand-mark" aria-hidden="true">
-            <span />
-            <span />
-            <span />
-            <span />
-          </span>
+          <span className="brand-mark" aria-hidden="true" />
           <span>Firmament</span>
         </Link>
         <a className="nav-action" href="https://github.com/azeemshaik025/firmament" target="_blank" rel="noreferrer">

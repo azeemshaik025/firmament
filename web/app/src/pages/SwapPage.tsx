@@ -1225,9 +1225,9 @@ export function SwapPage() {
     <main className="swap-page">
       <section className="swap-page-header">
         <div className="hero-brand-stack">
-          <p className="eyebrow">Maker Runtime</p>
-          <h1>Firmament</h1>
-          <p className="lede">Firm quotes. Managed inventory. Live Solana settlement.</p>
+          <p className="page-kicker">Firm FX</p>
+          <h1>Swap</h1>
+          <p className="lede">Firm quotes from the maker's own inventory, settled through the same escrow as a payment.</p>
         </div>
         <div className="wallet-actions">
           {walletAddress && (
@@ -1299,7 +1299,7 @@ export function SwapPage() {
             onAssetChange={selectOutput}
             readOnly
             selectDisabled={flowLocked}
-            placeholder="Estimated output"
+            placeholder="0.00"
             selectPlaceholder="Select"
             loading={busy === 'quote'}
           />
