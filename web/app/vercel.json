@@ -12,11 +12,11 @@
   "rewrites": [
     {
       "source": "/v1/:path*",
-      "destination": "https://api.firmament.shaikazeem.com/v1/:path*"
+      "destination": "https://firmament-api.fly.dev/v1/:path*"
     },
     {
       "source": "/health",
-      "destination": "https://api.firmament.shaikazeem.com/health"
+      "destination": "https://firmament-api.fly.dev/health"
     },
     {
       "source": "/app/assets/:path*",

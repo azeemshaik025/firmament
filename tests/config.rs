@@ -335,6 +335,7 @@ fn live_guard_does_not_require_a_jupiter_api_key() {
         std::env::remove_var("JUPITER_API_KEY");
     }
     let result = config.validate_protocol_workers_ready_for(ProtocolWorkerScope::Maker);
+    // SAFETY: same variables as above; no other test reads them.
     unsafe {
         std::env::remove_var("SOLANA_RPC_URL");
         std::env::remove_var("MAKER_PRIVATE_KEY");
