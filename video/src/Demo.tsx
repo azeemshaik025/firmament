@@ -9,8 +9,8 @@ const seconds = (count: number) => count * fps;
 const timeline = [
   { kind: 'card', duration: 4, title: 'The rate you promise is the rate they get.', body: 'Firmament, firm FX for stablecoin payments on Solana' },
   { kind: 'card', duration: 7, title: 'USDC: $465M. EURC: $0.7M.', body: 'Solana DEX liquidity, Jupiter, Oct 2026. Any app promising a euro amount through a route is guessing.' },
-  { kind: 'clip', duration: 40, src: 'clips/pay.mov', from: 0, caption: 'Exact-output quote, cost held for 30 seconds, one wallet confirmation, atomic delivery' },
-  { kind: 'clip', duration: 14, src: 'clips/receive.mov', from: 2, caption: 'A fresh wallet received exactly 1 EURC' },
+  { kind: 'clip', duration: 40, src: 'clips/pay.mov', from: 0, caption: 'Exact-output quote, cost held for 30 seconds, one wallet confirmation, delivery' },
+  { kind: 'clip', duration: 14, src: 'clips/receive.mov', from: 2, caption: 'A wallet created minutes earlier received exactly 1 EURC' },
   { kind: 'clip', duration: 18, src: 'clips/maker.mov', from: 2, caption: "The maker's desk: inventory, every settlement, the ledger" },
   { kind: 'clip', duration: 14, src: 'clips/solscan.mov', from: 2, caption: 'On chain: lock, lock, redeem, redeem' },
   { kind: 'card', duration: 6, title: 'Firmament', body: 'github.com/azeemshaik025/firmament' }
