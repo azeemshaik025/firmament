@@ -259,12 +259,18 @@ export function PayPage() {
         await finish(stored.tradeId, stored.preimage, redeemSignature);
         return;
       }
+      // With the maker's EURC in escrow, delivering is better for everyone than
+      // refunding, even after the quote window; the refund is the fallback.
+      if (signatureOfKind(resume, 'maker_lock')) {
+        try {
+          await redeem(stored.tradeId, stored.preimage);
+          return;
+        } catch (error) {
+          if (!resume.taker_refund_transaction) throw error;
+        }
+      }
       if (resume.taker_refund_transaction) {
         setPhase({ kind: 'expired', tradeId: stored.tradeId });
-        return;
-      }
-      if (signatureOfKind(resume, 'maker_lock')) {
-        await redeem(stored.tradeId, stored.preimage);
         return;
       }
       if (stored.lockSignature) {
@@ -512,6 +518,13 @@ export function PayPage() {
             <div className="pay-delivered">
               <strong>{eurAmount} EURC</strong>
               <span>delivered{recipient.trim() ? ` to ${shortValue(recipient.trim())}` : ''}</span>
+            </div>
+          )}
+
+          {phase.kind === 'refunded' && (
+            <div className="pay-delivered pay-refunded">
+              <strong>Refunded</strong>
+              <span>Your USDC is back in your wallet; the recipient received nothing.</span>
             </div>
           )}
 

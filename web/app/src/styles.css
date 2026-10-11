@@ -789,6 +789,14 @@ code {
   font-weight: 500;
 }
 
+.pay-refunded {
+  background: var(--color-bad-soft);
+}
+
+.pay-refunded span {
+  color: var(--color-bad);
+}
+
 /* ---------- swap page (inherits) ---------- */
 
 .token-row-controls {
